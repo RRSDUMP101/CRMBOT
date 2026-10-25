@@ -1,0 +1,19 @@
+export type Member = { id: string; name: string; email: string; role: "Admin" | "Agent"; active?: boolean };
+export type Conversation = { id: string; leadId: string; status: string; version: number; assigneeId: string | null; createdAt: string; updatedAt: string; lastMessage?: string; leadName?: string; tags: string[] };
+export type Lead = { id: string; name: string; phone: string; email: string; tags: string[]; interests: string; source: string; market: string; stage: string; assigneeId: string | null; facts: Record<string, string>; summary?: { facts: string[]; unconfirmed: string[] }; createdAt: string; updatedAt: string };
+export type Message = { id: string; role: string; content: string; status: string; createdAt: string; sources: { id: string; title: string; version: number; content: string }[] };
+export type Task = { id: string; leadId: string; title: string; dueAt: string; status: string; kind: string; assigneeId: string | null; notes?: string; createdAt: string };
+export type Knowledge = { id: string; title: string; content: string; tags: string[]; status: string; processingStatus: string; error?: string | null; version: number; sourceUrl: string; expiresAt: string | null; updatedAt: string };
+export type Settings = { botName: string; personality: string; businessHours: string; handoffRule: string; aiEnabled: boolean };
+export type Metrics = { conversations: number; newLeads: number; stages: Record<string, number>; dueTasks: number; handoffRate: number; aiFirstResponseMs: number | null; humanFirstResponseMs: number | null; inputTokens: number | null; outputTokens: number | null; estimatedCostUsd: number | null; timezone: string };
+export type Detail = { conversation: Conversation; lead: Lead; messages: Message[] };
+export type Snapshot = { user: Member; conversations: Conversation[]; leads: Lead[]; tasks: Task[]; knowledge: Knowledge[]; members: Member[]; settings: Settings; metrics: Metrics; audit: { id: string; action: string; createdAt: string; actorId: string; entityId: string; metadata?: Record<string, unknown> }[]; integrations: { sheets: string; drive: string; channels: string } };
+export const stages = ["New", "Qualified", "Follow-up", "Won", "Lost"];
+export const stageNames: Record<string, string> = { New: "ลีดใหม่", Qualified: "ผ่านการคัดกรอง", "Follow-up": "กำลังติดตาม", Won: "ปิดการขาย", Lost: "ไม่สำเร็จ" };
+export const statusNames: Record<string, string> = { bot_active: "AI ดูแลอยู่", waiting_human: "รอเจ้าหน้าที่", human_active: "เจ้าหน้าที่ดูแล", resolved: "จบการสนทนา" };
+export const taskNames: Record<string, string> = { open: "รอดำเนินการ", done: "เสร็จแล้ว", draft: "ลูกค้ายังไม่ยืนยัน", pending: "รอทีมยืนยันนัด", confirmed: "ยืนยันนัดแล้ว", cancelled: "ยกเลิก" };
+export async function api<T>(path: string, body?: unknown): Promise<T> { const res = await fetch(path, { method: body === undefined ? "GET" : "POST", credentials: "same-origin", headers: body === undefined ? undefined : { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store" }); const data = await res.json(); if (!res.ok) throw new Error(data.error || "ไม่สามารถดำเนินการได้ กรุณาลองอีกครั้ง"); return data as T; }
+export function date(value: string | null | undefined, time = true) { return value ? new Intl.DateTimeFormat("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", ...(time ? { hour: "2-digit", minute: "2-digit" } : {}) }).format(new Date(value)) : "—"; }
+export function number(value: number | null | undefined) { return value == null ? "ไม่มีข้อมูล" : new Intl.NumberFormat("th-TH", { maximumFractionDigits: 2 }).format(value); }
+export function isoLocal(value: string) { return value ? new Date(value + ":00+07:00").toISOString() : ""; }
+export function localDate(value: string | null | undefined) { return value ? new Date(new Date(value).getTime() + 7 * 3600000).toISOString().slice(0, 16) : ""; }

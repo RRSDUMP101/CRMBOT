@@ -1,0 +1,78 @@
+import { randomUUID } from 'node:crypto';
+import { NextRequest } from 'next/server';
+import { database, demoMode } from '@/lib/db';
+import { ApiError, STAFF_COOKIE, VISITOR_COOKIE, assertOrigin, checkPassword, cookieValue, fields, hashToken, newToken, rateLimit, readJson, setCookie, staffSession, str, uuid, visitorSession } from '@/lib/auth';
+import { adminAction, appointmentConfirm, appointmentPreview, conversationAction, conversationDetail, createVisitor, handoff, messageStream, publicMember, saveContact, snapshot, visitorDetail } from '@/lib/service';
+import { providerName } from '@/lib/bot';
+
+export const runtime='nodejs';
+export const dynamic='force-dynamic';
+export const maxDuration=120;
+
+function json(body:unknown,status=200,headers:Record<string,string>={}) {
+  return Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
+}
+async function handle(request:NextRequest) {
+  const url=new URL(request.url);const path=url.pathname.replace(/^\/api\//,'').split('/').filter(Boolean);
+  const method=request.method;
+  try {
+    if(method==='POST')assertOrigin(request);
+    if(path.join('/')==='bootstrap'&&method==='GET') {
+      const user=await staffSession(request,false);return json({demo:demoMode(),provider:providerName(),user:user?publicMember(user):null});
+    }
+    if(path.join('/')==='auth/login'&&method==='POST') {
+      const body=await readJson(request);fields(body,['email','password']);
+      const email=str(body.email,'อีเมล',254,true).toLowerCase();const password=str(body.password,'รหัสผ่าน',200,true);
+      // Trust a real client IP only when a controlled reverse proxy supplies this configured header.
+      const ipHeader=process.env.TRUSTED_IP_HEADER;const address=ipHeader?request.headers.get(ipHeader)||'unknown':'single-host';
+      await rateLimit(`login-account:${email}`,10,900);await rateLimit(`login-ip:${address}`,60,900);
+      const member=(await database.query('SELECT * FROM members WHERE email=$1',[email])).rows[0];
+      const dummy='0'.repeat(32)+':'+ '0'.repeat(128);
+      const valid=checkPassword(password,member?.password_hash||dummy);
+      if(!member||!valid||member.active!==true)throw new ApiError(401,'อีเมลหรือรหัสผ่านไม่ถูกต้อง');
+      const token=newToken();
+      await database.query("INSERT INTO staff_sessions(token_hash,org_id,member_id,expires_at) VALUES($1,$2,$3,now()+interval '12 hours')",[hashToken(token),member.org_id,member.id]);
+      return json({user:{id:member.id,name:member.name,email:member.email,role:member.role}},200,{'Set-Cookie':setCookie(STAFF_COOKIE,token,43200)});
+    }
+    if(path.join('/')==='auth/logout'&&method==='POST') {
+      const token=cookieValue(request,STAFF_COOKIE);if(token)await database.query('DELETE FROM staff_sessions WHERE token_hash=$1',[hashToken(token)]);
+      return json({ok:true},200,{'Set-Cookie':setCookie(STAFF_COOKIE,'',0)});
+    }
+    if(path[0]==='admin') {
+      const staff=(await staffSession(request))!;
+      if(method==='POST')await rateLimit(`staff:${staff.orgId}:${staff.id}`,120,60);
+      if(path[1]==='snapshot'&&path.length===2&&method==='GET')return json(await snapshot(staff,url));
+      if(path[1]==='conversations'&&path.length===3&&method==='GET')return json(await conversationDetail(staff.orgId,uuid(path[2]),true));
+      if(path[1]==='conversations'&&path.length===4&&method==='POST')return json(await conversationAction(staff,uuid(path[2]),path[3],await readJson(request)));
+      if(path[1]==='action'&&path.length===2&&method==='POST')return json(await adminAction(staff,await readJson(request)));
+    }
+    if(path[0]==='chat') {
+      if(path[1]==='session'&&path.length===2&&method==='POST') {
+        fields(await readJson(request),[]);const existing=await visitorSession(request,false);
+        if(existing)return json(await visitorDetail(existing));
+        const ipHeader=process.env.TRUSTED_IP_HEADER;const address=ipHeader?request.headers.get(ipHeader)||'unknown':'single-host';
+        await rateLimit(`visitor-create:${address}`,demoMode()?200:40,3600);
+        const created=await createVisitor();return json(await visitorDetail(created.visitor),201,{'Set-Cookie':setCookie(VISITOR_COOKIE,created.token,30*86400)});
+      }
+      const visitor=(await visitorSession(request))!;
+      if(path.length===1&&method==='GET')return json(await visitorDetail(visitor));
+      if(method==='POST') {
+        const body=await readJson(request);
+        if(path[1]==='message'&&path.length===2)return await messageStream(visitor,body,request.signal);
+        await rateLimit(`visitor-action:${visitor.orgId}:${visitor.conversationId}`,60,60);
+        if(path[1]==='handoff'&&path.length===2){fields(body,[]);await handoff(visitor);return json({ok:true});}
+        if(path[1]==='contact'&&path.length===2)return json(await saveContact(visitor,body));
+        if(path[1]==='appointment'&&path[2]==='preview'&&path.length===3)return json(await appointmentPreview(visitor,body));
+        if(path[1]==='appointment'&&path[2]==='confirm'&&path.length===3)return json(await appointmentConfirm(visitor,body));
+      }
+    }
+    return json({error:'ไม่พบ API ที่ร้องขอ'},404);
+  } catch(error) {
+    if(error instanceof ApiError)return json({error:error.message},error.status);
+    const incident=randomUUID();const code=error&&typeof error==='object'&&'code' in error&&typeof error.code==='string'&&/^[0-9A-Z]{5}$/.test(error.code)?error.code:undefined;
+    console.error('[rrs] request_failed',{incident,route:path.slice(0,2).join('/'),type:error instanceof Error?error.name:'Unknown',code});
+    return json({error:`ระบบไม่สามารถทำรายการได้ กรุณาลองใหม่ (รหัส ${incident.slice(0,8)})`},500);
+  }
+}
+export const GET=handle;
+export const POST=handle;
