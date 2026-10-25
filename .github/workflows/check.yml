@@ -1,0 +1,41 @@
+name: Build and acceptance
+on:
+  push:
+    branches: [feat/ai-chatbot-crm-dashboard]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEMO_MODE: 'true'
+      AI_PROVIDER: demo
+      APP_ORIGIN: http://localhost:3000
+      PGLITE_DIR: .data/ci
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Verify real HTTP workflows on isolated Demo database
+        shell: bash
+        run: |
+          pnpm start > /tmp/rrs-next.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:3000/api/bootstrap > /dev/null; then break; fi
+            sleep 1
+          done
+          pnpm test:api
