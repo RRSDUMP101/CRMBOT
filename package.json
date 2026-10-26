@@ -13,11 +13,14 @@
     "typecheck": "next typegen && tsc --noEmit",
     "db:migrate": "tsx scripts/db.ts migrate",
     "db:seed": "tsx scripts/db.ts seed",
-    "test": "tsx --test tests/bot.test.ts",
-    "test:api": "tsx --test tests/api.test.ts"
+    "test": "tsx --test tests/bot.test.ts tests/widget.test.ts tests/widget-runtime.test.ts",
+    "test:api": "tsx --test tests/api.test.ts",
+    "test:helpdesk": "tsx --test tests/helpdesk.test.ts",
+    "test:migrations": "tsx --test tests/migrations.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.11",
+    "@fontsource-variable/noto-sans-thai": "5.3.0",
     "@next/env": "16.4.3",
     "@radix-ui/react-slot": "1.5.0",
     "class-variance-authority": "0.7.1",
