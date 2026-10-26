@@ -55,9 +55,28 @@ async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function executeMigration() {
-  const sql = await readFile(path.join(process.cwd(), 'migrations/001_initial.sql'), 'utf8');
-  if (store.embedded) await store.embedded.exec(sql);
-  else await store.pool!.query(sql);
+  // Explicit ordered manifest keeps migration files traceable in the deployment artifact.
+  const migrations=[
+    {version:1,sql:await readFile(path.join(process.cwd(),'migrations/001_initial.sql'),'utf8')},
+    {version:2,sql:await readFile(path.join(process.cwd(),'migrations/002_helpdesk.sql'),'utf8')}
+  ];
+  const client=store.pool?await store.pool.connect():undefined;
+  const run=async(sql:string,params:unknown[]=[])=>client?client.query(sql,params):rawQuery(sql,params);
+  try {
+    if(client)await client.query('SELECT pg_advisory_lock(726726101)');
+    await run('CREATE TABLE IF NOT EXISTS schema_migrations(version integer PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())');
+    for(const migration of migrations) {
+      if((await run('SELECT version FROM schema_migrations WHERE version=$1',[migration.version])).rows.length)continue;
+      await run('BEGIN');
+      try {
+        if(store.embedded)await store.embedded.exec(migration.sql);else await client!.query(migration.sql);
+        await run('INSERT INTO schema_migrations(version) VALUES($1) ON CONFLICT(version) DO NOTHING',[migration.version]);
+        await run('COMMIT');
+      } catch(error) {await run('ROLLBACK');throw error;}
+    }
+  } finally {
+    if(client){try {await client.query('SELECT pg_advisory_unlock(726726101)');} finally {client.release();}}
+  }
 }
 
 export async function migrateDatabase() {
@@ -86,6 +105,11 @@ export async function seedDemo() {
         await rawQuery('INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5,$6)', [randomUUID(),tenant,name,email,password,role]);
       }
       for (const item of seeds) await rawQuery("INSERT INTO knowledge(id,org_id,title,content,tags,status,source_url) VALUES($1,$2,$3,$4,$5,'published',$6)",[randomUUID(),org,item.title,item.content,JSON.stringify(item.tags),'https://rungruengdump101.com/']);
+      for(const item of [
+        {title:'ขอข้อมูลรถ',shortcut:'/vehicle',content:'ขอทราบรุ่นรถและปีรถที่ต้องการใช้งานหน่อยค่ะ เพื่อให้ทีมตรวจสอบรายละเอียดต่อ',category:'คัดกรอง'},
+        {title:'รับเรื่องขอใบเสนอราคา',shortcut:'/quote',content:'รับความต้องการแล้วค่ะ ทีมจะตรวจสเปกและรายละเอียดจัดส่งก่อนจัดทำใบเสนอราคา',category:'เสนอราคา'},
+        {title:'ส่งออก',shortcut:'/export',content:'ต้องการส่งสินค้าไปประเทศและเมืองไหนคะ ทีมจะใช้ข้อมูลนี้ตรวจสอบเงื่อนไขจัดส่งต่อค่ะ',category:'ส่งออก'}
+      ])await rawQuery('INSERT INTO reply_templates(id,org_id,title,shortcut,content,category) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),org,item.title,item.shortcut,item.content,item.category]);
       await rawQuery('COMMIT');
     } catch (error) { await rawQuery('ROLLBACK'); throw error; }
   });
@@ -95,7 +119,7 @@ async function ready() {
   if (!store.ready) store.ready = (async () => {
     await open();
     if (demoMode()) { await executeMigration(); await seedDemo(); }
-    else await rawQuery('SELECT version FROM schema_migrations WHERE version=1');
+    else if(!(await rawQuery('SELECT version FROM schema_migrations WHERE version=2')).rows.length)throw new Error('Database migration 002 is required');
   })().catch(error => { store.ready = undefined; throw error; });
   return store.ready;
 }

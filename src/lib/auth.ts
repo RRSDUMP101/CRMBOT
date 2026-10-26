@@ -8,6 +8,9 @@ export type Staff = { id: string; orgId: string; name: string; email: string; ro
 export type Visitor = { orgId: string; conversationId: string };
 export const STAFF_COOKIE = 'rrs_staff';
 export const VISITOR_COOKIE = 'rrs_visitor';
+export const WIDGET_COOKIE = 'rrs_widget_visitor';
+export const isWidgetRequest = (request:Request) => request.headers.get('x-rrs-widget')==='1';
+export const visitorCookieName = (request:Request) => isWidgetRequest(request)?WIDGET_COOKIE:VISITOR_COOKIE;
 
 export function hashToken(token: string) {
   const secret = process.env.SESSION_SECRET || (demoMode() ? 'rrs-demo-cookie-secret-not-for-production' : '');
@@ -19,6 +22,7 @@ export function cookieValue(request: Request, key: string) {
   return request.headers.get('cookie')?.split(';').map(value => value.trim()).find(value => value.startsWith(`${key}=`))?.slice(key.length+1) || '';
 }
 export function setCookie(name: string, token: string, maxAge: number) {
+  if(name===WIDGET_COOKIE)return `${name}=${token}; HttpOnly; SameSite=None; Secure; Partitioned; Path=/; Max-Age=${maxAge}`;
   const secure = (process.env.APP_ORIGIN || '').startsWith('https:');
   return `${name}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
@@ -37,9 +41,9 @@ export async function staffSession(request: Request, required = true): Promise<S
   return null;
 }
 export async function visitorSession(request: Request, required=true): Promise<Visitor|null> {
-  const token = cookieValue(request,VISITOR_COOKIE);
+  const token = cookieValue(request,visitorCookieName(request));
   if (token) {
-    const result=await database.query('SELECT org_id,conversation_id FROM visitors WHERE token_hash=$1 AND expires_at>now()', [hashToken(token)]);
+    const result=await database.query('SELECT org_id,conversation_id FROM visitors WHERE token_hash=$1 AND expires_at>now() AND context=$2', [hashToken(token),isWidgetRequest(request)?'widget':'web']);
     if(result.rows[0]) return {orgId:result.rows[0].org_id,conversationId:result.rows[0].conversation_id};
   }
   if(required) throw new ApiError(401,'กรุณาเริ่มบทสนทนาใหม่');

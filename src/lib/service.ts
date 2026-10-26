@@ -31,14 +31,14 @@ async function orgSettings(orgId: string, executor: Executor=database) {
   if(!result.rows[0])throw new ApiError(404,'ไม่พบองค์กร');return {...settingsDefaults,...result.rows[0].settings};
 }
 
-export async function createVisitor(): Promise<{token:string;visitor:Visitor}> {
+export async function createVisitor(context:'web'|'widget'='web'): Promise<{token:string;visitor:Visitor}> {
   return transaction(async connection=>{
     const org=(await connection.query('SELECT id FROM organizations WHERE slug=$1',[process.env.PUBLIC_ORG_SLUG||'rrs'])).rows[0];
     if(!org)throw new ApiError(503,'ยังไม่ได้ตั้งค่าธุรกิจสำหรับเว็บแชต');
     const leadId=randomUUID();const conversationId=randomUUID();const token=newToken();
     await connection.query('INSERT INTO leads(id,org_id) VALUES($1,$2)',[leadId,org.id]);
     await connection.query('INSERT INTO conversations(id,org_id,lead_id) VALUES($1,$2,$3)',[conversationId,org.id,leadId]);
-    await connection.query("INSERT INTO visitors(token_hash,org_id,conversation_id,expires_at) VALUES($1,$2,$3,now()+interval '30 days')",[hashToken(token),org.id,conversationId]);
+    await connection.query("INSERT INTO visitors(token_hash,org_id,conversation_id,expires_at,context) VALUES($1,$2,$3,now()+interval '30 days',$4)",[hashToken(token),org.id,conversationId,context]);
     await audit(connection,org.id,'visitor','conversation.created',conversationId);
     return {token,visitor:{orgId:org.id,conversationId}};
   });
@@ -285,7 +285,15 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       if(reply.rows.length||!body.retry||existing.status==='complete')return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
       if(existing.status!=='failed'&&existing.status!=='interrupted'&&existing.status!=='generating')throw new ApiError(409,'ข้อความนี้ไม่จำเป็นต้องลองใหม่');
     } else {
-      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,client_id,status) VALUES($1,$2,$3,'user',$4,$5,'complete')",[randomUUID(),visitor.orgId,c.id,text,clientId]);
+      if(c.status==='resolved') {
+        // A new customer message reopens the team's queue; it never silently resumes the bot.
+        await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,now()),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+        c.status='waiting_human';c.version=Number(c.version)+1;
+        await audit(connection,visitor.orgId,'visitor','conversation.reopened_by_customer',c.id);
+      }
+      const seq=Number(c.customer_message_seq)+1;
+      await connection.query('UPDATE conversations SET customer_message_seq=$3 WHERE org_id=$1 AND id=$2',[visitor.orgId,c.id,seq]);
+      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,client_id,status,customer_seq) VALUES($1,$2,$3,'user',$4,$5,'complete',$6)",[randomUUID(),visitor.orgId,c.id,text,clientId,seq]);
       const facts=extractFacts(text,lead.facts||{});
       // Contact fields are saved only through the explicit consent endpoint; fact extraction is requirement memory.
       for(const key of Object.keys(facts))if(/phone|email|name|โทร|อีเมล|ชื่อ/i.test(key))delete facts[key];

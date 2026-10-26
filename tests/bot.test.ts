@@ -16,6 +16,10 @@ test('five turns retain facts, correction wins, no repeated year question',async
 });
 test('Thai colloquial typo and Buddhist year',()=>assert.deepEqual(extractFacts('รีโว่ ปี 2565 ชุดดั๊ม 3 ชุด',{}),{product:'kit',vehicle:'Revo',year:'2022',quantity:'3'}));
 test('export and destination independent of domestic flow',()=>assert.deepEqual(extractFacts('export 5 kits to Laos',{}),{product:'kit',market:'export',country:'Laos',quantity:'5'}));
+test('domestic conversational wording preserves known vehicle instead of asking market again',()=>{
+ const facts=extractFacts('ใช้งานในไทยครับ',{vehicle:'Revo',year:'2024'});
+ assert.deepEqual(facts,{vehicle:'Revo',year:'2024',market:'domestic'});
+});
 test('incomplete message asks one issue',async()=>{const r=await reply('สนใจ kit');assert.equal((r.match(/\?/g)||[]).length,1);assert.match(r,/ไทยหรือส่งออก/);});
 test('unknown price is never invented',async()=>assert.match(await reply('ราคาเท่าไรครับ'),/ยังไม่มีใบเสนอราคา/));
 test('discount requires sales review',async()=>assert.match(await reply('ลดราคาให้หน่อย'),/ทีมขายพิจารณา/));

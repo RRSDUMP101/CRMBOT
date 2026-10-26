@@ -10,7 +10,7 @@ export function extractFacts(text:string, previous:Record<string,string>):Record
   else if (/รถทั้งคัน|complete (truck|vehicle)/.test(t)) f.product='complete_vehicle';
   else if (/กระบะดั้มพ์|dump body/.test(t)) f.product='dump_body';
   if (/ส่งออก|export/.test(t)) f.market='export';
-  if (/ใช้ในไทย|ในประเทศ|domestic|in thailand/.test(t)) f.market='domestic';
+  if (/ใช้(?:งาน)?ในไทย|ในประเทศไทย|ในประเทศ|domestic|in thailand/.test(t)) f.market='domestic';
   for (const [pattern,country] of [[/ลาว|\blaos\b/,'Laos'],[/กัมพูชา|cambodia/,'Cambodia'],[/มาเลเซีย|malaysia/,'Malaysia'],[/ออสเตรเลีย|australia/,'Australia'],[/ฟิลิปปินส์|philippines/,'Philippines']] as const) {
     if (pattern.test(t)) {f.country=country;f.market='export';}
   }
