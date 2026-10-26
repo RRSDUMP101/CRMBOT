@@ -27,6 +27,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm test:migrations
       - run: pnpm build
       - name: Verify real HTTP workflows on isolated Demo database
         shell: bash
@@ -39,3 +40,4 @@ jobs:
             sleep 1
           done
           pnpm test:api
+          pnpm test:helpdesk
