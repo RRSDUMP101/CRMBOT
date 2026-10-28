@@ -4,43 +4,51 @@
   "private": true,
   "packageManager": "pnpm@11.25.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "db:migrate": "tsx scripts/db.ts migrate",
-    "db:seed": "tsx scripts/db.ts seed",
-    "test": "tsx --test tests/bot.test.ts tests/widget.test.ts tests/widget-runtime.test.ts",
-    "test:api": "tsx --test tests/api.test.ts",
-    "test:helpdesk": "tsx --test tests/helpdesk.test.ts",
-    "test:migrations": "tsx --test tests/migrations.test.ts"
+    "db:migrate": "node --import tsx scripts/db.ts migrate",
+    "db:seed": "node --import tsx scripts/db.ts seed",
+    "test": "node --import tsx --test tests/bot.test.ts tests/widget.test.ts tests/widget-runtime.test.ts tests/password.test.ts",
+    "test:api": "node --import tsx --test tests/api.test.ts",
+    "test:helpdesk": "node --import tsx --test tests/helpdesk.test.ts",
+    "test:migrations": "node --import tsx --test tests/migrations.test.ts",
+    "cf:build": "RRS_WORKERS_BUILD=true opennextjs-cloudflare build && node scripts/embed-assets.mjs && wrangler deploy --dry-run --outdir .wrangler/bundle --minify",
+    "cf:preview": "wrangler dev --local",
+    "cf:deploy": "wrangler deploy",
+    "test:deployment": "node --import tsx --test tests/deployment.test.ts",
+    "test:integrity": "node --import tsx --test tests/d1-integrity.test.ts",
+    "test:worker": "node --import tsx tests/worker-acceptance.ts"
   },
   "dependencies": {
-    "@electric-sql/pglite": "0.5.11",
     "@fontsource-variable/noto-sans-thai": "5.3.0",
     "@next/env": "16.4.3",
+    "@noble/hashes": "2.4.0",
     "@radix-ui/react-slot": "1.5.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "lucide-react": "1.61.0",
     "next": "16.4.3",
-    "pg": "8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "tailwind-merge": "3.7.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@opennextjs/cloudflare": "1.20.13",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "^24.0.0",
-    "@types/pg": "^8.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261023.1-beta",
     "tailwindcss": "4.3.3",
     "tsx": "4.23.15",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "wrangler": "4.154.0"
   }
 }

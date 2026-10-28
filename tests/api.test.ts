@@ -100,7 +100,7 @@ let knowledgeId: string;
 describe("RRS real API acceptance (synthetic Demo data)", { concurrency: false }, () => {
   before(async () => {
     const bootstrap = await new Client().ok("/api/bootstrap");
-    assert.equal(bootstrap.demo, true, "Safety: acceptance suite only runs against explicit DEMO_MODE");
+    assert.equal(bootstrap.demo || (process.env.TEST_WORKER_LOCAL==='1' && new URL(base).hostname==='127.0.0.1'), true, "Safety: acceptance suite only runs against explicit DEMO_MODE");
     assert.equal(bootstrap.provider, "demo", "Deterministic acceptance suite requires Demo adapter, not billable LLM calls");
     for (const [client, email] of [[admin, "admin@rrs.demo"], [agent, "agent@rrs.demo"], [outsider, "outsider@other.demo"]] as const) {
       await client.post("/api/auth/login", { email, password: "Demo-only-2026!" });
@@ -122,6 +122,16 @@ describe("RRS real API acceptance (synthetic Demo data)", { concurrency: false }
     await anonymous.post("/api/auth/login", { email: "agent@rrs.demo", password: "Demo-only-2026!" });
     await anonymous.post("/api/auth/logout");
     denied((await anonymous.json("/api/admin/snapshot")).response.status, "revoked login session");
+  });
+
+  test("username login supports case normalization without accepting ambiguous identifiers", async () => {
+    const user = new Client();
+    const ambiguous=await user.json('/api/auth/login',{body:{email:'admin@rrs.demo',username:'admin_demo',password:'Demo-only-2026!'}});
+    assert.equal(ambiguous.response.status,400);
+    await user.post('/api/auth/login',{username:'ADMIN_DEMO',password:'Demo-only-2026!'});
+    assert.equal((await user.snapshot()).user.role,'Admin');
+    await user.post('/api/auth/logout');
+    denied((await user.json('/api/admin/snapshot')).response.status,'username session revoked');
   });
 
   test("Admin versus Agent permissions are enforced on the server", async () => {

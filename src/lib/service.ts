@@ -12,7 +12,7 @@ async function audit(executor: Executor, orgId: string, actorId: string, action:
   await executor.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),orgId,actorId,action,entityId,JSON.stringify(metadata)]);
 }
 async function scopedConversation(executor: Executor, orgId: string, id: string, lock=false) {
-  const result=await executor.query(`SELECT * FROM conversations WHERE org_id=$1 AND id=$2${lock?' FOR UPDATE':''}`,[orgId,id]);
+  const result=await executor.query(`SELECT * FROM conversations WHERE org_id=$1 AND id=$2${lock?"":''}`,[orgId,id]);
   if(!result.rows[0])throw new ApiError(404,'ไม่พบบทสนทนา');return result.rows[0];
 }
 async function scopedLead(executor: Executor, orgId: string, id: string) {
@@ -32,13 +32,13 @@ async function orgSettings(orgId: string, executor: Executor=database) {
 }
 
 export async function createVisitor(context:'web'|'widget'='web'): Promise<{token:string;visitor:Visitor}> {
-  return transaction(async connection=>{
-    const org=(await connection.query('SELECT id FROM organizations WHERE slug=$1',[process.env.PUBLIC_ORG_SLUG||'rrs'])).rows[0];
-    if(!org)throw new ApiError(503,'ยังไม่ได้ตั้งค่าธุรกิจสำหรับเว็บแชต');
+  const org=(await database.query('SELECT id FROM organizations WHERE slug=$1',[process.env.PUBLIC_ORG_SLUG||'rrs'])).rows[0];
+  if(!org)throw new ApiError(503,'ยังไม่ได้ตั้งค่าธุรกิจสำหรับเว็บแชต');
+  return transaction(org.id, async connection=>{
     const leadId=randomUUID();const conversationId=randomUUID();const token=newToken();
     await connection.query('INSERT INTO leads(id,org_id) VALUES($1,$2)',[leadId,org.id]);
     await connection.query('INSERT INTO conversations(id,org_id,lead_id) VALUES($1,$2,$3)',[conversationId,org.id,leadId]);
-    await connection.query("INSERT INTO visitors(token_hash,org_id,conversation_id,expires_at,context) VALUES($1,$2,$3,now()+interval '30 days',$4)",[hashToken(token),org.id,conversationId,context]);
+    await connection.query("INSERT INTO visitors(token_hash,org_id,conversation_id,expires_at,context) VALUES($1,$2,$3,(strftime('%Y-%m-%dT%H:%M:%f','now','+30 days')||'000Z'),$4)",[hashToken(token),org.id,conversationId,context]);
     await audit(connection,org.id,'visitor','conversation.created',conversationId);
     return {token,visitor:{orgId:org.id,conversationId}};
   });
@@ -62,10 +62,10 @@ export async function visitorDetail(visitor: Visitor) {
 }
 
 export async function handoff(visitor:Visitor) {
-  await transaction(async connection=>{
+  await transaction(visitor.orgId, async connection=>{
     const conversation=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);
     if(conversation.status==='waiting_human'||conversation.status==='human_active')return;
-    await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,now()),updated_at=now() WHERE org_id=$1 AND id=$2",[visitor.orgId,visitor.conversationId]);
+    await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,visitor.conversationId]);
     await audit(connection,visitor.orgId,'visitor','conversation.handoff',visitor.conversationId);
   });
 }
@@ -77,10 +77,10 @@ export async function saveContact(visitor:Visitor,body:Record<string,unknown>) {
   if(!phone&&!email)throw new ApiError(400,'กรุณาระบุเบอร์โทรหรืออีเมลอย่างน้อยหนึ่งช่องทาง');
   if(phone&&!/^\+?[0-9]{7,16}$/.test(phone))throw new ApiError(400,'เบอร์โทรไม่ถูกต้อง');
   if(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
-  await transaction(async connection=>{
+  await transaction(visitor.orgId, async connection=>{
     const conversation=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);
     // A visitor remains bound to the same lead; never merge by unverified contact data across browsers.
-    await connection.query("UPDATE leads SET name=$3,phone=$4,email=$5,contact_consent_at=now(),contact_consent_version='contact-v1',updated_at=now() WHERE org_id=$1 AND id=$2",[visitor.orgId,conversation.lead_id,name,phone,email]);
+    await connection.query("UPDATE leads SET name=$3,phone=$4,email=$5,contact_consent_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'),contact_consent_version='contact-v1',updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,conversation.lead_id,name,phone,email]);
     await audit(connection,visitor.orgId,'visitor','contact.consent.contact-v1',conversation.lead_id);
   });
   return {ok:true};
@@ -89,22 +89,22 @@ export async function saveContact(visitor:Visitor,body:Record<string,unknown>) {
 export async function appointmentPreview(visitor:Visitor,body:Record<string,unknown>) {
   fields(body,['at','notes']);const at=isoDate(body.at,'เวลานัดหมาย');const notes=str(body.notes,'รายละเอียด',1500);
   if(Date.parse(at)<=Date.now()||Date.parse(at)>Date.now()+365*86400000)throw new ApiError(400,'เลือกเวลานัดหมายภายในหนึ่งปีข้างหน้า');
-  return transaction(async connection=>{
+  return transaction(visitor.orgId, async connection=>{
     const conversation=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);const id=randomUUID();
-    await connection.query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE org_id=$1 AND visitor_conversation_id=$2 AND status='draft'",[visitor.orgId,visitor.conversationId]);
+    await connection.query("UPDATE tasks SET status='cancelled',updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND visitor_conversation_id=$2 AND status='draft'",[visitor.orgId,visitor.conversationId]);
     await connection.query("INSERT INTO tasks(id,org_id,lead_id,title,due_at,kind,status,notes,visitor_conversation_id) VALUES($1,$2,$3,$4,$5,'appointment','draft',$6,$7)",[id,visitor.orgId,conversation.lead_id,'คำขอนัดหมายจากลูกค้า',at,notes,visitor.conversationId]);
     return {id,at,notes,status:'draft'};
   });
 }
 export async function appointmentConfirm(visitor:Visitor,body:Record<string,unknown>) {
   fields(body,['id']);const id=uuid(body.id);
-  return transaction(async connection=>{
-    const task=(await connection.query('SELECT * FROM tasks WHERE org_id=$1 AND id=$2 AND visitor_conversation_id=$3 FOR UPDATE',[visitor.orgId,id,visitor.conversationId])).rows[0];
+  return transaction(visitor.orgId, async connection=>{
+    const task=(await connection.query("SELECT * FROM tasks WHERE org_id=$1 AND id=$2 AND visitor_conversation_id=$3",[visitor.orgId,id,visitor.conversationId])).rows[0];
     if(!task)throw new ApiError(404,'ไม่พบคำขอนัดหมาย');
     if(task.status==='pending')return {ok:true,status:'pending'};
     if(task.status!=='draft')throw new ApiError(409,'คำขอนัดหมายนี้ไม่อยู่ในสถานะรอยืนยันรายละเอียด');
     if(new Date(task.due_at).getTime()<=Date.now())throw new ApiError(400,'เวลานัดหมายผ่านไปแล้ว กรุณาเลือกเวลาใหม่');
-    await connection.query("UPDATE tasks SET status='pending',confirmed_by_customer_at=now(),updated_at=now() WHERE org_id=$1 AND id=$2",[visitor.orgId,id]);
+    await connection.query("UPDATE tasks SET status='pending',confirmed_by_customer_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,id]);
     await audit(connection,visitor.orgId,'visitor','appointment.customer_confirmed.pending_staff',id);
     return {ok:true,status:'pending'};
   });
@@ -113,26 +113,26 @@ export async function appointmentConfirm(visitor:Visitor,body:Record<string,unkn
 export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>) {
   uuid(id);fields(body,['text']);
   if(!['claim','release','reply','note','resolve','summarize'].includes(action))throw new ApiError(404,'ไม่พบคำสั่ง');
-  await transaction(async connection=>{
+  await transaction(staff.orgId, async connection=>{
     const conversation=await scopedConversation(connection,staff.orgId,id,true);
     if(action==='claim') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id)throw new ApiError(409,'มีเจ้าหน้าที่รับผิดชอบแล้ว กรุณาประสานงานก่อนรับช่วง');
-      await connection.query("UPDATE conversations SET status='human_active',assignee_id=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,now()),updated_at=now() WHERE org_id=$1 AND id=$2",[staff.orgId,id,staff.id]);
-      await connection.query('UPDATE leads SET assignee_id=$3,updated_at=now() WHERE org_id=$1 AND id=$2',[staff.orgId,conversation.lead_id,staff.id]);
+      await connection.query("UPDATE conversations SET status='human_active',assignee_id=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,staff.id]);
+      await connection.query("UPDATE leads SET assignee_id=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,conversation.lead_id,staff.id]);
     } else if(action==='release'||action==='resolve') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id&&staff.role!=='Admin')throw new ApiError(403,'เฉพาะผู้รับผิดชอบหรือผู้ดูแลระบบที่เปลี่ยนสถานะได้');
-      await connection.query('UPDATE conversations SET status=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,updated_at=now() WHERE org_id=$1 AND id=$2',[staff.orgId,id,action==='release'?'bot_active':'resolved']);
+      await connection.query("UPDATE conversations SET status=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,action==='release'?'bot_active':'resolved']);
     } else if(action==='reply'||action==='note') {
       const text=str(body.text,action==='note'?'บันทึก':'ข้อความ',6000,true);
       if(action==='reply'&&(conversation.status!=='human_active'||conversation.assignee_id!==staff.id))throw new ApiError(409,'กรุณารับช่วงบทสนทนาก่อนตอบลูกค้า');
       await connection.query('INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,$4,$5)',[randomUUID(),staff.orgId,id,action==='reply'?'agent':'note',text]);
-      await connection.query(`UPDATE conversations SET updated_at=now()${action==='reply'?',first_agent_at=COALESCE(first_agent_at,now())':''} WHERE org_id=$1 AND id=$2`,[staff.orgId,id]);
+      await connection.query(`UPDATE conversations SET updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')${action==='reply'?",first_agent_at=COALESCE(first_agent_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))":''} WHERE org_id=$1 AND id=$2`,[staff.orgId,id]);
     } else if(action==='summarize') {
       const lead=await scopedLead(connection,staff.orgId,conversation.lead_id);
-      await connection.query('UPDATE leads SET summary=$3,updated_at=now() WHERE org_id=$1 AND id=$2',[staff.orgId,lead.id,JSON.stringify(summarizeFacts(lead.facts))]);
+      await connection.query("UPDATE leads SET summary=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,lead.id,JSON.stringify(summarizeFacts(lead.facts))]);
     }
     await audit(connection,staff.orgId,staff.id,`conversation.${action}`,id,{previousStatus:conversation.status,previousAssigneeId:conversation.assignee_id,...(action==='claim'?{nextStatus:'human_active',nextAssigneeId:staff.id}:action==='release'?{nextStatus:'bot_active'}:action==='resolve'?{nextStatus:'resolved'}:{})});
-  });
+  }, staff);
   return conversationDetail(staff.orgId,id,true);
 }
 
@@ -142,7 +142,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
   if(body.values!==undefined&&(!body.values||typeof body.values!=='object'||Array.isArray(body.values)))throw new ApiError(400,'ค่าข้อมูลไม่ถูกต้อง');
   const values=(body.values||{}) as Record<string,unknown>;
   if(['saveKnowledge','deleteKnowledge','updateSettings','createMember','updateMember','revokeMemberSessions'].includes(action))requireAdmin(staff);
-  await transaction(async connection=>{
+  await transaction(staff.orgId, async connection=>{
     let entityId=body.id?uuid(body.id):staff.orgId;let detail='';let metadata:Row={changedFields:Object.keys(values)};
     if(action==='updateLead') {
       fields(values,['name','phone','email','tags','interests','source','market','stage','assigneeId']);
@@ -156,7 +156,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       metadata={...metadata,previousStage:old.stage,nextStage:next.stage,previousAssigneeId:old.assignee_id,nextAssigneeId:next.assignee_id};
       if(next.phone&&!/^\+?[0-9 ()-]{7,32}$/.test(next.phone))throw new ApiError(400,'เบอร์โทรไม่ถูกต้อง');
       if(next.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
-      await connection.query('UPDATE leads SET name=$3,phone=$4,email=$5,tags=$6,interests=$7,market=$8,stage=$9,assignee_id=$10,source=$11,updated_at=now() WHERE org_id=$1 AND id=$2',[staff.orgId,old.id,next.name,next.phone,next.email,JSON.stringify(next.tags),next.interests,next.market,next.stage,next.assignee_id,next.source]);
+      await connection.query("UPDATE leads SET name=$3,phone=$4,email=$5,tags=$6,interests=$7,market=$8,stage=$9,assignee_id=$10,source=$11,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,old.id,next.name,next.phone,next.email,JSON.stringify(next.tags),next.interests,next.market,next.stage,next.assignee_id,next.source]);
     } else if(action==='createTask') {
       fields(values,['leadId','title','dueAt','kind','assigneeId','notes']);
       const lead=await scopedLead(connection,staff.orgId,uuid(values.leadId));
@@ -165,7 +165,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       await connection.query('INSERT INTO tasks(id,org_id,lead_id,title,due_at,kind,assignee_id,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[entityId,staff.orgId,lead.id,str(values.title,'ชื่องาน',200,true),isoDate(values.dueAt,'วันติดตาม'),kind,owner,str(values.notes,'หมายเหตุ',2000)]);
     } else if(action==='updateTask') {
       fields(values,['status','title','dueAt','assigneeId','notes']);entityId=uuid(body.id);
-      const old=(await connection.query('SELECT * FROM tasks WHERE org_id=$1 AND id=$2 FOR UPDATE',[staff.orgId,entityId])).rows[0];
+      const old=(await connection.query("SELECT * FROM tasks WHERE org_id=$1 AND id=$2",[staff.orgId,entityId])).rows[0];
       if(!old)throw new ApiError(404,'ไม่พบงาน');const next={...old};
       if(values.status!==undefined) {
         next.status=oneOf(values.status,old.kind==='appointment'?['confirmed','done','cancelled']:['open','done','cancelled'],'สถานะงาน');
@@ -180,7 +180,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       }
       if(values.assigneeId!==undefined)next.assignee_id=await assignee(connection,staff.orgId,values.assigneeId);
       metadata={...metadata,previousStatus:old.status,nextStatus:next.status,previousDueAt:old.due_at,nextDueAt:next.due_at,previousAssigneeId:old.assignee_id,nextAssigneeId:next.assignee_id};
-      await connection.query("UPDATE tasks SET title=$3,due_at=$4,status=$5,assignee_id=$6,notes=$7,confirmed_by_staff_at=CASE WHEN $5='confirmed' THEN now() ELSE confirmed_by_staff_at END,updated_at=now() WHERE org_id=$1 AND id=$2",[staff.orgId,entityId,next.title,next.due_at,next.status,next.assignee_id,next.notes]);detail=` ${old.status} → ${next.status}`;
+      await connection.query("UPDATE tasks SET title=$3,due_at=$4,status=$5,assignee_id=$6,notes=$7,confirmed_by_staff_at=CASE WHEN $5='confirmed' THEN (strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') ELSE confirmed_by_staff_at END,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,entityId,next.title,next.due_at,next.status,next.assignee_id,next.notes]);detail=` ${old.status} → ${next.status}`;
     } else if(action==='saveKnowledge') {
       fields(values,['title','content','tags','status','sourceUrl','expiresAt']);
       const title=str(values.title,'หัวข้อ',200,true);const content=str(values.content,'เนื้อหา',30000,true);
@@ -188,11 +188,13 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       const sourceUrl=str(values.sourceUrl,'แหล่งข้อมูล',2000);if(sourceUrl){let url:URL;try{url=new URL(sourceUrl);}catch{throw new ApiError(400,'ลิงก์แหล่งข้อมูลไม่ถูกต้อง');}if(!['http:','https:'].includes(url.protocol))throw new ApiError(400,'ลิงก์แหล่งข้อมูลไม่ถูกต้อง');}
       const expiresAt=values.expiresAt?isoDate(values.expiresAt,'วันหมดอายุ'):null;
       if(body.id) {
-        const result=await connection.query("UPDATE knowledge SET title=$3,content=$4,tags=$5,status=$6,source_url=$7,expires_at=$8,version=version+1,processing_status='ready',error=NULL,updated_at=now() WHERE org_id=$1 AND id=$2 RETURNING id",[staff.orgId,entityId,title,content,JSON.stringify(docTags),status,sourceUrl,expiresAt]);
-        if(!result.rows.length)throw new ApiError(404,'ไม่พบเอกสาร');
+        if(!(await connection.query('SELECT id FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,entityId])).rows.length)throw new ApiError(404,'ไม่พบเอกสาร');
+        await connection.query("UPDATE knowledge SET title=$3,content=$4,tags=$5,status=$6,source_url=$7,expires_at=$8,version=version+1,processing_status='ready',error=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,entityId,title,content,JSON.stringify(docTags),status,sourceUrl,expiresAt]);
       } else {entityId=randomUUID();await connection.query('INSERT INTO knowledge(id,org_id,title,content,tags,status,source_url,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[entityId,staff.orgId,title,content,JSON.stringify(docTags),status,sourceUrl,expiresAt]);}
     } else if(action==='deleteKnowledge') {
-      fields(values,[]);entityId=uuid(body.id);const result=await connection.query('DELETE FROM knowledge WHERE org_id=$1 AND id=$2 RETURNING id',[staff.orgId,entityId]);if(!result.rows.length)throw new ApiError(404,'ไม่พบเอกสาร');
+      fields(values,[]);entityId=uuid(body.id);
+      if(!(await connection.query('SELECT id FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,entityId])).rows.length)throw new ApiError(404,'ไม่พบเอกสาร');
+      await connection.query('DELETE FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,entityId]);
     } else if(action==='updateSettings') {
       fields(values,['botName','personality','businessHours','handoffRule','aiEnabled']);const settings=await orgSettings(staff.orgId,connection);
       for(const key of ['botName','personality','businessHours','handoffRule'])if(values[key]!==undefined)settings[key]=str(values[key],key,key==='botName'?80:1500,true);
@@ -204,13 +206,13 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       const email=str(values.email,'อีเมล',254,true).toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
       const password=str(values.password,'รหัสผ่าน',200,true);if(password.length<12)throw new ApiError(400,'รหัสผ่านต้องยาวอย่างน้อย 12 ตัวอักษร');
       const exists=await connection.query('SELECT id FROM members WHERE email=$1',[email]);if(exists.rows.length)throw new ApiError(409,'ไม่สามารถใช้อีเมลนี้ได้');
-      await connection.query('INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5,$6)',[entityId,staff.orgId,str(values.name,'ชื่อ',120,true),email,hashPassword(password),oneOf(values.role,['Admin','Agent'],'บทบาท')]);
+      await connection.query('INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5,$6)',[entityId,staff.orgId,str(values.name,'ชื่อ',120,true),email,await hashPassword(password),oneOf(values.role,['Admin','Agent'],'บทบาท')]);
     } else if(action==='updateMember'||action==='revokeMemberSessions') {
       entityId=uuid(body.id);
       fields(values,action==='revokeMemberSessions'?[]:['name','role','active','password']);
       // Serialize administration per organization, including concurrent attempts to remove its final administrator.
-      await connection.query('SELECT id FROM organizations WHERE id=$1 FOR UPDATE',[staff.orgId]);
-      const old=(await connection.query('SELECT * FROM members WHERE org_id=$1 AND id=$2 FOR UPDATE',[staff.orgId,entityId])).rows[0];
+      await connection.query("SELECT id FROM organizations WHERE id=$1",[staff.orgId]);
+      const old=(await connection.query("SELECT * FROM members WHERE org_id=$1 AND id=$2",[staff.orgId,entityId])).rows[0];
       if(!old)throw new ApiError(404,'ไม่พบสมาชิก');
       if(action==='updateMember') {
         const name=values.name===undefined?old.name:str(values.name,'ชื่อ',120,true);
@@ -218,18 +220,18 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
         const active=values.active===undefined?old.active:values.active;
         if(typeof active!=='boolean')throw new ApiError(400,'สถานะสมาชิกไม่ถูกต้อง');
         if(old.active&&old.role==='Admin'&&(!active||role!=='Admin')) {
-          const count=(await connection.query("SELECT count(*)::int AS total FROM members WHERE org_id=$1 AND role='Admin' AND active=true",[staff.orgId])).rows[0].total;
+          const count=(await connection.query("SELECT count(*) AS total FROM members WHERE org_id=$1 AND role='Admin' AND active=true",[staff.orgId])).rows[0].total;
           if(count<=1)throw new ApiError(409,'องค์กรต้องมีผู้ดูแลระบบที่ใช้งานได้อย่างน้อยหนึ่งคน');
         }
         let passwordHash=old.password_hash;
-        if(values.password!==undefined) {const password=str(values.password,'รหัสผ่าน',200,true);if(password.length<12)throw new ApiError(400,'รหัสผ่านต้องยาวอย่างน้อย 12 ตัวอักษร');passwordHash=hashPassword(password);}
+        if(values.password!==undefined) {const password=str(values.password,'รหัสผ่าน',200,true);if(password.length<12)throw new ApiError(400,'รหัสผ่านต้องยาวอย่างน้อย 12 ตัวอักษร');passwordHash=await hashPassword(password);}
         await connection.query('UPDATE members SET name=$3,role=$4,active=$5,password_hash=$6 WHERE org_id=$1 AND id=$2',[staff.orgId,entityId,name,role,active,passwordHash]);
         metadata={...metadata,previousRole:old.role,nextRole:role,previousActive:old.active,nextActive:active};
       }
       await connection.query('DELETE FROM staff_sessions WHERE org_id=$1 AND member_id=$2',[staff.orgId,entityId]);
     }
     await audit(connection,staff.orgId,staff.id,action+detail,entityId,metadata);
-  });
+  }, staff);
   return {ok:true};
 }
 
@@ -240,7 +242,7 @@ function dateRange(url:URL) {
   for(const value of [from,to])if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(Date.parse(value))||new Date(`${value}T00:00:00Z`).toISOString().slice(0,10)!==value)throw new ApiError(400,'รูปแบบช่วงวันที่ไม่ถูกต้อง');
   const start=new Date(`${from}T00:00:00+07:00`);const end=new Date(Date.parse(`${to}T00:00:00+07:00`)+86400000);
   if(start>=end||end.getTime()-start.getTime()>366*86400000)throw new ApiError(400,'เลือกช่วงวันที่ไม่เกินหนึ่งปี');
-  return {start:start.toISOString(),end:end.toISOString(),from,to};
+  return {start:isoDate(start.toISOString(),"วันเริ่มต้น"),end:isoDate(end.toISOString(),"วันสิ้นสุด"),from,to};
 }
 export async function snapshot(staff:Staff,url:URL) {
   const range=dateRange(url);const p=[staff.orgId,range.start,range.end];
@@ -251,10 +253,10 @@ export async function snapshot(staff:Staff,url:URL) {
     database.query('SELECT * FROM knowledge WHERE org_id=$1 ORDER BY updated_at DESC',[staff.orgId]),
     database.query('SELECT id,name,email,role,active FROM members WHERE org_id=$1 ORDER BY name',[staff.orgId]),
     database.query('SELECT id,actor_id,action,entity_id,metadata,created_at FROM audit_events WHERE org_id=$1 ORDER BY created_at DESC LIMIT 100',[staff.orgId]),
-    database.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE handoff_at IS NOT NULL)::int AS handed_off,avg(extract(epoch from(first_ai_at-first_customer_at))*1000) FILTER(WHERE first_ai_at IS NOT NULL) AS ai_ms,avg(extract(epoch from(first_agent_at-handoff_at))*1000) FILTER(WHERE first_agent_at>=handoff_at) AS human_ms FROM conversations WHERE org_id=$1 AND created_at >= $2::timestamptz AND created_at < $3::timestamptz`,p),
-    database.query('SELECT stage,count(*)::int AS total FROM leads WHERE org_id=$1 AND created_at >= $2::timestamptz AND created_at < $3::timestamptz GROUP BY stage',p),
-    database.query("SELECT count(*)::int AS total FROM tasks WHERE org_id=$1 AND status IN ('open','pending','confirmed') AND due_at<=now()",[staff.orgId]),
-    database.query('SELECT sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,sum(estimated_cost_usd) AS cost FROM messages WHERE org_id=$1 AND created_at >= $2::timestamptz AND created_at < $3::timestamptz',p)
+    database.query("SELECT count(*) AS total,count(*) FILTER(WHERE handoff_at IS NOT NULL) AS handed_off,avg((julianday(first_ai_at)-julianday(first_customer_at))*86400000) FILTER(WHERE first_ai_at IS NOT NULL) AS ai_ms,avg((julianday(first_agent_at)-julianday(handoff_at))*86400000) FILTER(WHERE first_agent_at>=handoff_at) AS human_ms FROM conversations WHERE org_id=$1 AND created_at >= $2 AND created_at < $3",p),
+    database.query("SELECT stage,count(*) AS total FROM leads WHERE org_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY stage",p),
+    database.query("SELECT count(*) AS total FROM tasks WHERE org_id=$1 AND status IN ('open','pending','confirmed') AND due_at<=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')",[staff.orgId]),
+    database.query("SELECT sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,sum(estimated_cost_usd) AS cost FROM messages WHERE org_id=$1 AND created_at >= $2 AND created_at < $3",p)
   ]);
   const count=results[6].rows[0];const usage=results[9].rows[0];const stages:Record<string,number>={New:0,Qualified:0,'Follow-up':0,Won:0,Lost:0};
   for(const row of results[7].rows)stages[row.stage]=row.total;
@@ -270,7 +272,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
   if(!/^[a-zA-Z0-9_-]{8,100}$/.test(clientId))throw new ApiError(400,'รหัสข้อความไม่ถูกต้อง');
   if(body.retry!==undefined&&typeof body.retry!=='boolean')throw new ApiError(400,'สถานะลองใหม่ไม่ถูกต้อง');
   await rateLimit(`chat:${visitor.orgId}:${visitor.conversationId}`,30,60);
-  return transaction(async connection=>{
+  return transaction(visitor.orgId, async connection=>{
     const c=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);
     const lead=await scopedLead(connection,visitor.orgId,c.lead_id);const settings=await orgSettings(visitor.orgId,connection);
     const existing=(await connection.query("SELECT * FROM messages WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND role='user'",[visitor.orgId,c.id,clientId])).rows[0];
@@ -287,7 +289,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     } else {
       if(c.status==='resolved') {
         // A new customer message reopens the team's queue; it never silently resumes the bot.
-        await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,now()),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+        await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
         c.status='waiting_human';c.version=Number(c.version)+1;
         await audit(connection,visitor.orgId,'visitor','conversation.reopened_by_customer',c.id);
       }
@@ -298,25 +300,34 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       // Contact fields are saved only through the explicit consent endpoint; fact extraction is requirement memory.
       for(const key of Object.keys(facts))if(/phone|email|name|โทร|อีเมล|ชื่อ/i.test(key))delete facts[key];
       const market=facts.market==='domestic'||facts.market==='export'?facts.market:lead.market;
-      await connection.query('UPDATE leads SET facts=$3,market=$4,interests=$5,updated_at=now() WHERE org_id=$1 AND id=$2',[visitor.orgId,lead.id,JSON.stringify(facts),market,facts.product||lead.interests]);
+      await connection.query("UPDATE leads SET facts=$3,market=$4,interests=$5,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,lead.id,JSON.stringify(facts),market,facts.product||lead.interests]);
       lead.facts=facts;
     }
-    await connection.query('UPDATE conversations SET first_customer_at=COALESCE(first_customer_at,now()),updated_at=now() WHERE org_id=$1 AND id=$2',[visitor.orgId,c.id]);
+    await connection.query("UPDATE conversations SET first_customer_at=COALESCE(first_customer_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+    if(c.status==='bot_active' && providerName()==='disabled') {
+      await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+      await audit(connection,visitor.orgId,'system','ai.disabled.handoff',c.id);
+      c.status='waiting_human';c.version=Number(c.version)+1;
+    }
     if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
     const cap=Math.max(1,Math.min(10000,Number.parseInt(process.env.AI_DAILY_CALL_LIMIT||'500',10)||500));
-    const reservation=await connection.query("INSERT INTO ai_daily_usage(org_id,day,calls) VALUES($1,(now() AT TIME ZONE 'Asia/Bangkok')::date,1) ON CONFLICT(org_id,day) DO UPDATE SET calls=ai_daily_usage.calls+1 WHERE ai_daily_usage.calls<$2 RETURNING calls",[visitor.orgId,cap]);
-    if(!reservation.rows.length) {
-      await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,now()),updated_at=now() WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+    const day=new Date(Date.now()+7*3600000).toISOString().slice(0,10);
+    const usage=(await connection.query('SELECT calls FROM ai_daily_usage WHERE org_id=$1 AND day=$2',[visitor.orgId,day])).rows[0];
+    if(Number(usage?.calls||0)>=cap) {
+      await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
       await audit(connection,visitor.orgId,'system','ai.daily_cap.handoff',c.id);
       return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
     }
+    await connection.query('INSERT INTO ai_daily_usage(org_id,day,calls) VALUES($1,$2,1) ON CONFLICT(org_id,day) DO UPDATE SET calls=ai_daily_usage.calls+1',[visitor.orgId,day]);
     const version=c.version+1;
-    await connection.query('UPDATE conversations SET version=$3,generating_client_id=$4,generation_started_at=now() WHERE org_id=$1 AND id=$2',[visitor.orgId,c.id,version,clientId]);
-    await connection.query("UPDATE messages SET status='generating' WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3",[visitor.orgId,c.id,clientId]);
+    await connection.query("UPDATE conversations SET version=$3,generating_client_id=$4,generation_started_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id,version,clientId]);
+    await connection.query("UPDATE messages SET status='generating',generation_version=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3",[visitor.orgId,c.id,clientId,version]);
     const history=await connection.query("SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY created_at DESC,id DESC LIMIT 30",[visitor.orgId,c.id]);
-    const knowledge=await connection.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND (expires_at IS NULL OR expires_at>now())",[visitor.orgId]);
+    const knowledge=await connection.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND (expires_at IS NULL OR expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))",[visitor.orgId]);
     const selected=selectKnowledge(text,rows(knowledge.rows) as BotInput['knowledge']);
-    return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:history.rows.reverse().map(row=>({role:row.role,content:row.content})),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content}))};
+    const messages=history.rows.reverse().map(row=>({role:row.role,content:row.content}));
+    if(!existing)messages.push({role:'user',content:text});
+    return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:messages.slice(-30),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content}))};
   });
 }
 
@@ -329,13 +340,13 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
     const active=async()=>{
       const result=await database.query("SELECT id FROM conversations WHERE org_id=$1 AND id=$2 AND status='bot_active' AND version=$3 AND generating_client_id=$4",[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId]);return result.rows.length>0;
     };
-    const finish=async(status:'complete'|'failed'|'interrupted')=>transaction(async connection=>{
+    const finish=async(status:'complete'|'failed'|'interrupted')=>transaction(prepared.orgId, async connection=>{
       const c=await scopedConversation(connection,prepared.orgId,prepared.conversationId,true);
       const current=c.status==='bot_active'&&c.version===prepared.version&&c.generating_client_id===prepared.clientId;
       const actual=status==='complete'&&!current?'interrupted':status;
       if(text)await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,reply_to_client_id,generation_version,sources,input_tokens,output_tokens,estimated_cost_usd) VALUES($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11)",[randomUUID(),prepared.orgId,prepared.conversationId,text,actual,prepared.clientId,prepared.version,JSON.stringify(prepared.sources),usage?.inputTokens??null,usage?.outputTokens??null,usage?.estimatedCostUsd??null]);
-      await connection.query('UPDATE messages SET status=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3',[prepared.orgId,prepared.conversationId,prepared.clientId,actual]);
-      if(current)await connection.query('UPDATE conversations SET generating_client_id=NULL,generation_started_at=NULL,updated_at=now() WHERE org_id=$1 AND id=$2 AND version=$3',[prepared.orgId,prepared.conversationId,prepared.version]);
+      await connection.query('UPDATE messages SET status=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$5',[prepared.orgId,prepared.conversationId,prepared.clientId,actual,prepared.version]);
+      if(current)await connection.query("UPDATE conversations SET generating_client_id=NULL,generation_started_at=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2 AND version=$3",[prepared.orgId,prepared.conversationId,prepared.version]);
       return actual;
     });
     emit({type:'meta',version:prepared.version});
@@ -345,14 +356,15 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
         if(signal.aborted||abort.signal.aborted||!await active()){abort.abort();await finish('interrupted');emit({type:'cancelled'});return;}
         if(chunk.usage)usage=chunk.usage;
         if(chunk.text) {
-          // The update is a second epoch fence immediately before any public text is emitted.
-          const accepted=await transaction(async connection=>{
-            const result=await connection.query("UPDATE conversations SET first_ai_at=CASE WHEN $5 THEN COALESCE(first_ai_at,now()) ELSE first_ai_at END WHERE org_id=$1 AND id=$2 AND version=$3 AND generating_client_id=$4 AND status='bot_active' RETURNING id",[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId,first]);
+          // Recheck the generation before delivery. Never enqueue inside a retryable plan.
+          const accepted=await transaction(prepared.orgId, async connection=>{
+            const result=await connection.query("SELECT id FROM conversations WHERE org_id=$1 AND id=$2 AND version=$3 AND generating_client_id=$4 AND status='bot_active'",[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId]);
             if(!result.rows.length)return false;
-            // A claim locks the same row, so it cannot commit between this fence and enqueue.
-            first=false;text+=chunk.text;emit({type:'token',text:chunk.text,version:prepared.version});return true;
+            if(first)await connection.query("UPDATE conversations SET first_ai_at=COALESCE(first_ai_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')) WHERE org_id=$1 AND id=$2",[prepared.orgId,prepared.conversationId]);
+            return true;
           });
           if(!accepted){abort.abort();await finish('interrupted');emit({type:'cancelled'});return;}
+          first=false;text+=chunk.text;emit({type:'token',text:chunk.text,version:prepared.version});
         }
       }
       if(!text.trim())throw new Error('Empty provider response');

@@ -1,3 +1,7 @@
+# Historical verification record
+
+The results below predate the D1/R2 rewrite. They do not establish that the current release passed; use the current PR checks and deployment report for that.
+
 # MVP verification — 27 October 2026
 
 Test environment: Windows, Node.js 24.19.0, pnpm 11.25.0, Next.js 16.4.3 production build, disk-backed PGlite 0.5.11, `AI_PROVIDER=demo`. This is local acceptance evidence, not certification of a production deployment or external service connection.
