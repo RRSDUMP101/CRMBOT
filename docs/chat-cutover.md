@@ -1,0 +1,28 @@
+# Staging, cutover and rollback
+
+Production switching requires the user's explicit approval after the evidence below is complete. This branch is not ready to retire the source workflows: see `chat-migration-limitations.md`. The previously requested Sale domain migration remains a separate approval/change; this chat PR changes no DNS.
+
+## Prepare an isolated staging pair
+
+1. Save release SHA, source Sites version, environment variable names, current webhook URLs/subscriptions, database schema version and DNS exports. Back up both D1 databases and private R2 objects with counts/hashes; prove restoration in isolated bindings. Never commit exports, session cookies or tokens.
+2. Build the exact PR revisions. CRM runs on its existing Workers architecture; Sale retains Sites/Vinext. Create separate staging Workers/Sites and isolated D1/R2 bindings. Do not use production databases as staging. Set exact APP_ORIGIN/site origin and host-only secure cookies for each host. Retain TLS verification and private cache policy.
+3. Apply CRM additive migrations 005–009 and Sale 0012–0014 only to staging first. Keep old tables/objects and feature flags. Provision the matched bridge secret, fixed organization and explicit active staff mapping through secure settings. Example names are in `chat-bridge-environment.example` and the companion Sale example; no real values are supplied. Sale inbound business reactions additionally require their explicit enable flag and reviewed UTC cutover watermark.
+4. Enable bridge-only preview. Run bounded explicit bootstrap until complete, then open Sale `/crm-chat?mode=live` and `/crm-chat?mode=domestic` under the appropriate accounts. Verify counts, history pagination, scope, revoked-session behavior and direct refresh. No webhook move or live send is required for this step.
+5. Capture/import history per `chat-history-migration.md`. Compare source counts, native aliases, ID mappings, timestamps, suppression tombstones and every file hash; verify ordinary staff cannot see private evidence. Capture later source snapshots and reconcile explicit monotonic deltas. Do not treat row-count success as file backup success.
+6. Configure a controlled provider account and the separately authorized test recipient in secure staging settings. Verify account ownership, signature/challenge, inbound, duplicate delivery, safe reply, media and receipts. A user authorized one WhatsApp test recipient, but its number is intentionally absent from the repository. Source Sites masks all WhatsApp credential values; they must be provisioned securely, not extracted through logs or a customer-data endpoint. CRM currently lacks these bindings. No real WhatsApp test has passed yet.
+
+## Evidence required before requesting the switch
+
+Close applicable feature-parity gaps, build both deploy artifacts, pass actual HTTPS staging and provider tests, measure commit-to-DOM latency under expected load, and complete D1/R2 backup/restore. Test lost responses, source/target downtime, duplicates, ordering, expired/revoked credentials and cross-organization/market denials. Verify realtime routes bypass caching and preserve streaming. Inventory pending approved jobs and all `sending`/`unknown` attempts; do not recreate them as new sends. Provide exact host release IDs, account IDs, callbacks and before/after flags without secrets.
+
+## Approved production procedure
+
+1. Keep both deployments and data intact. Stop old scheduler/live-send flags and reconcile in-flight outcomes; freeze old inbound/transport with `RRS_CHAT_OWNER=crm`. Verify old send routes and webhook POSTs reject work. A flag change itself is not a distributed lock; do not enable CRM while old ownership is uncertain.
+2. Capture/import final source delta with matching workspace revision and tailSequence. Verify no uncaptured changes, all mappings and private bytes. If the source cannot drain without loss, stop and retain the old owner; do not guess a safe cut point.
+3. Set CRM organization/account bindings and owner `crm`, enable inbound only, switch the exact verified provider callback to `/api/channels/whatsapp` (and other channels only after their own tests). Verify provider retries during the transition are retained/deduplicated. Record the ownership handoff time and source/target event watermarks.
+4. Verify inbound through CRM and Sale, then enable only the approved channel's outbound gates after its durable account verification/stop controls are valid. Check the test recipient once, IDs/receipts, sessions, attachments and measured latency on the actual hosts. Enable relevant schedulers/AI only after their separate parity gates pass.
+5. Observe errors, unknown outcomes, event backlog/ACK distance and file failures. Keep old data/deployment available. Redirect/decommission old chat entrypoints only after the new service passes; do not delete old messages or files.
+
+## Rollback
+
+Disable CRM live sends first, stop new claiming/dispatch and record the last CRM event sequence and provider acceptance IDs. Reconcile pending/unknown attempts; never blindly resend them. Preserve/export all messages and private objects received since handoff and replay them through a reviewed reverse mapping or retain CRM as read-only history. Point webhook/owner back only after confirming one sender and no unhandled target messages. Restore original flag/callback values from the saved inventory. Do not overwrite newer data with an old database snapshot, enable both owners or erase imported rows to simulate rollback. Sale projection can be disabled independently while CRM continues recording. DNS rollback is separate and must use the saved actual records from the domain migration plan.

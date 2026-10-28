@@ -24,6 +24,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:migrations
+      - run: pnpm test:chat
       - run: pnpm test:integrity
       - run: pnpm test:deployment
       - run: pnpm cf:build

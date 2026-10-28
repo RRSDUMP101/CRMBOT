@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { subscribeCRMChanges } from './realtime';
 import { ArrowLeft, ArrowUpRight, Bookmark, Check, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X } from "lucide-react";
 import { api, date, stageNames, stages, statusNames, type Detail } from "./data";
 import { emptyCounts, queueNames, type InboxItem, type InboxQueue, type InboxResult, type ReplyTemplate } from "./inbox-data";
@@ -8,6 +9,7 @@ import { Badge, Button, Empty, Input, Select, Textarea } from "./ui";
 import { ChatMessage, LeadEditor, Modal, Summary } from "./workspace-panels";
 import type { PanelProps } from "./workspace";
 import { useFocusScope } from "./focus-scope";
+import { WhatsAppConsent } from "./whatsapp-consent";
 
 const queues: InboxQueue[] = ["all", "unread", "waiting", "mine", "unassigned", "closed"];
 type Drafts = Record<string, { reply: string; note: string }>;
@@ -76,6 +78,7 @@ export function InboxWorkspace({ data, reload, notify }: PanelProps) {
     const timer = setInterval(() => void loadDetail(selected), 2500);
     return () => clearInterval(timer);
   }, [selected, loadDetail]);
+  useEffect(()=>subscribeCRMChanges(()=>{void refreshList();if(selectedRef.current)void loadDetail(selectedRef.current);}),[refreshList,loadDetail]);
   useEffect(() => { const panel = history.current; if (panel) panel.scrollTop = panel.scrollHeight; }, [detail?.conversation.id, detail?.messages.length]);
   const selectConversation = (id: string) => { selectedRef.current = id; setSelected(id); setNote(false); setTemplateOpen(false); setProfileOpen(false); setError(""); };
   const act = async (action: string, content?: string) => {
@@ -85,7 +88,7 @@ export function InboxWorkspace({ data, reload, notify }: PanelProps) {
       if (selectedRef.current === id) setDetail(updated);
       if (action === "reply" || action === "note") setDrafts(previous => previous[id]?.[mode] !== content ? previous : ({ ...previous, [id]: { reply: previous[id]?.reply || "", note: previous[id]?.note || "", [mode]: "" } }));
       await Promise.all([refreshList(), reload()]);
-      notify(({ claim: "รับช่วงแล้ว AI หยุดตอบ", release: "ส่งกลับให้ AI แล้ว", resolve: "จบการสนทนาแล้ว", reply: "ส่งข้อความแล้ว", note: "บันทึกภายในแล้ว", summarize: "อัปเดตสรุปความต้องการแล้ว" } as Record<string, string>)[action] || "บันทึกแล้ว");
+      notify(({ claim: "รับช่วงแล้ว AI หยุดตอบ", release: "ส่งกลับให้ AI แล้ว", resolve: "จบการสนทนาแล้ว", reply: "บันทึกคำตอบแล้ว ตรวจสถานะการส่งใต้ข้อความ", note: "บันทึกภายในแล้ว", summarize: "อัปเดตสรุปความต้องการแล้ว" } as Record<string, string>)[action] || "บันทึกแล้ว");
     } catch (e) { if (selectedRef.current === id) setError((e as Error).message); }
     finally { setBusy(false); }
   };
@@ -109,6 +112,7 @@ export function InboxWorkspace({ data, reload, notify }: PanelProps) {
     <div className="desk-profile-content"><div className="profile-identity"><span className="contact-avatar large">{(activeDetail.lead.name || "ล").slice(0, 1)}</span><h3>{activeDetail.lead.name || "ลูกค้าใหม่"}</h3><span className="channel-label"><Globe size={13} />{activeDetail.lead.source === "website" ? "เว็บไซต์" : activeDetail.lead.source}</span></div>
       <label className="profile-stage"><span>ขั้นตอนการขาย</span><Select aria-label="ขั้นตอนการขายของลูกค้า" value={activeDetail.lead.stage} disabled={busy} onChange={e => updateStage(e.target.value)}>{stages.map(stage => <option value={stage} key={stage}>{stageNames[stage]}</option>)}</Select></label>
       <dl className="profile-fields"><dt>เบอร์โทร</dt><dd>{activeDetail.lead.phone || "ยังไม่ระบุ"}</dd><dt>อีเมล</dt><dd>{activeDetail.lead.email || "ยังไม่ระบุ"}</dd><dt>ตลาด</dt><dd>{activeDetail.lead.market === "export" ? "ส่งออก" : activeDetail.lead.market === "domestic" ? "ในประเทศ" : "ยังไม่ยืนยัน"}</dd><dt>ความสนใจ</dt><dd>{activeDetail.lead.interests || "กำลังเก็บข้อมูล"}</dd><dt>ผู้ดูแลลูกค้า</dt><dd>{data.members.find(member => member.id === activeDetail.lead.assigneeId)?.name || "ยังไม่มอบหมาย"}</dd></dl>
+      {data.user.role === 'Admin' && <WhatsAppConsent key={activeDetail.conversation.id} conversationId={activeDetail.conversation.id}/>}
       <div className="profile-section"><h3>แท็ก <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>แก้ไข</Button></h3><div className="tag-list">{activeDetail.lead.tags.length ? activeDetail.lead.tags.map(tag => <Badge key={tag}>{tag}</Badge>) : <span className="profile-placeholder">ยังไม่มีแท็ก</span>}</div></div>
       <div className="profile-section"><h3><Sparkles size={16} />สรุปความต้องการ</h3><Button variant="secondary" size="sm" className="full-width" disabled={busy} onClick={() => act("summarize")}>สรุปจากข้อมูลลูกค้า</Button>{activeDetail.lead.summary ? <Summary lead={activeDetail.lead} /> : <p className="profile-placeholder">สรุปจะแยกข้อเท็จจริงและสิ่งที่ต้องตรวจสอบ</p>}</div>
       <details className="profile-facts"><summary>ข้อมูลจากบทสนทนา <ChevronDown size={14} /></summary>{Object.entries(activeDetail.lead.facts || {}).length ? Object.entries(activeDetail.lead.facts).map(([key, value]) => <p key={key}><strong>{key}</strong><span>{value}</span></p>) : <p>ยังไม่มีข้อมูลที่จับจากบทสนทนา</p>}</details>

@@ -18,7 +18,7 @@ export function protectResponse(request: Request, response: Response): Response 
   const path = new URL(request.url).pathname;
   // Only content-addressed build assets and public font files may be cached.
   if (!(path.startsWith('/_next/static/') || path.startsWith('/fonts/')) || result.headers.has('set-cookie')) {
-    result.headers.set('Cache-Control', 'private, no-store');
+    result.headers.set('Cache-Control', result.headers.get('content-type')?.startsWith('text/event-stream')?'private, no-store, no-transform':'private, no-store');
     result.headers.set('CDN-Cache-Control', 'no-store');
     result.headers.set('Cloudflare-CDN-Cache-Control', 'no-store');
   }

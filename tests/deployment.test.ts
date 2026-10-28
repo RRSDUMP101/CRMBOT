@@ -23,6 +23,12 @@ test('only public assets remain cacheable; cookies always disable caching', () =
   assert.equal(protectResponse(request,new Response('asset',{headers:{'Cache-Control':'public,max-age=31536000,immutable'}})).headers.get('cache-control'),'public,max-age=31536000,immutable');
   assert.equal(protectResponse(request,new Response('asset',{headers:{'Set-Cookie':'synthetic=x'}})).headers.get('cache-control'),'private, no-store');
 });
+
+test('realtime responses keep streaming protection through the Worker edge',()=>{
+  const response=protectResponse(new Request('https://rrs-crm-terminal.com/api/admin/events'),new Response('event: change\ndata: {}\n\n',{headers:{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'private, no-store, no-transform'}}));
+  assert.equal(response.headers.get('cache-control'),'private, no-store, no-transform');
+  assert.equal(response.headers.get('cloudflare-cdn-cache-control'),'no-store');
+});
 test('unset or disabled AI never falls back to a Demo bot', async () => {
   const prior=process.env.AI_PROVIDER;
   try {
