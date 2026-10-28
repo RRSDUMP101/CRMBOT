@@ -1,7 +1,7 @@
 name: Build and acceptance
 on:
   push:
-    branches: [feat/ai-chatbot-crm-dashboard]
+    branches: [feat/ai-chatbot-crm-dashboard, codex/cloudflare-production]
   pull_request:
 permissions:
   contents: read
@@ -28,7 +28,10 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:migrations
+      - run: pnpm test:deployment
       - run: pnpm build
+      - run: node tests/standalone-smoke.mjs
+      - run: pnpm cf:build
       - name: Verify real HTTP workflows on isolated Demo database
         shell: bash
         run: |

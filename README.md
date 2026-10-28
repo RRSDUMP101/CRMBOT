@@ -1,4 +1,8 @@
 # RRS Connect — AI Chatbot + CRM
+## Cloud Run / Cloudflare deployment
+
+ดู [สถานะ deployment, secrets, การทดสอบ และข้อจำกัด cold start](docs/deployment-cloudrun.md) สำหรับ branch นี้ ระบบยังรอการเชื่อมต่อ Google Cloud ก่อนเผยแพร่จริง
+
 
 เว็บแชตและพื้นที่ทำงานทีมขายสำหรับ RRS รุ่งเรืองดั๊มพ์ 101: ตอบข้อมูลที่อนุมัติ เก็บความต้องการลูกค้าไทย/ส่งออก และส่งต่อเจ้าหน้าที่เพื่อเสนอราคา มีฐานข้อมูล การเข้าสู่ระบบ และ API ที่ตรวจสิทธิ์จริง
 

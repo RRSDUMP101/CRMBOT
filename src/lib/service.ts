@@ -302,6 +302,11 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       lead.facts=facts;
     }
     await connection.query('UPDATE conversations SET first_customer_at=COALESCE(first_customer_at,now()),updated_at=now() WHERE org_id=$1 AND id=$2',[visitor.orgId,c.id]);
+    if(c.status==='bot_active' && providerName()==='disabled') {
+      await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,now()),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+      await audit(connection,visitor.orgId,'system','ai.disabled.handoff',c.id);
+      c.status='waiting_human';c.version=Number(c.version)+1;
+    }
     if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
     const cap=Math.max(1,Math.min(10000,Number.parseInt(process.env.AI_DAILY_CALL_LIMIT||'500',10)||500));
     const reservation=await connection.query("INSERT INTO ai_daily_usage(org_id,day,calls) VALUES($1,(now() AT TIME ZONE 'Asia/Bangkok')::date,1) ON CONFLICT(org_id,day) DO UPDATE SET calls=ai_daily_usage.calls+1 WHERE ai_daily_usage.calls<$2 RETURNING calls",[visitor.orgId,cap]);

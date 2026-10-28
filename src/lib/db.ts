@@ -13,6 +13,14 @@ const store: Store = globalDb.rrsDatabase ??= { tail: Promise.resolve() };
 
 export const demoMode = () => process.env.DEMO_MODE === 'true';
 
+function validateProductionConfig() {
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required outside DEMO_MODE');
+  if ((process.env.SESSION_SECRET || '').length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters');
+  if (!process.env.APP_ORIGIN) throw new Error('APP_ORIGIN is required outside DEMO_MODE');
+  const origin = new URL(process.env.APP_ORIGIN);
+  if (origin.origin !== process.env.APP_ORIGIN || (origin.protocol !== 'https:' && !['localhost','127.0.0.1','[::1]'].includes(origin.hostname))) throw new Error('APP_ORIGIN must be an HTTPS origin, except localhost development');
+}
+
 function passwordHash(password: string) {
   const salt = randomBytes(16).toString('hex');
   return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`;
@@ -27,12 +35,13 @@ async function open() {
     store.embedded = new PGlite(directory);
     await store.embedded.waitReady;
   } else {
-    if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required outside DEMO_MODE');
-    if ((process.env.SESSION_SECRET || '').length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters');
-    if (!process.env.APP_ORIGIN) throw new Error('APP_ORIGIN is required outside DEMO_MODE');
-    const origin=new URL(process.env.APP_ORIGIN);
-    if(origin.origin!==process.env.APP_ORIGIN || (origin.protocol!=='https:'&&!['localhost','127.0.0.1','[::1]'].includes(origin.hostname)))throw new Error('APP_ORIGIN must be an HTTPS origin, except localhost development');
-    store.pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 5 });
+    validateProductionConfig();
+    store.pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 5,
+      connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000,
+      statement_timeout: 15000, maxLifetimeSeconds: 300 });
+    // A suspended/restarted database may close idle sockets. pg removes the
+    // affected client; handling this event prevents an uncaught process error.
+    store.pool.on('error', () => console.warn('Database idle connection closed; reconnecting on the next request.'));
   }
 }
 
@@ -58,7 +67,8 @@ async function executeMigration() {
   // Explicit ordered manifest keeps migration files traceable in the deployment artifact.
   const migrations=[
     {version:1,sql:await readFile(path.join(process.cwd(),'migrations/001_initial.sql'),'utf8')},
-    {version:2,sql:await readFile(path.join(process.cwd(),'migrations/002_helpdesk.sql'),'utf8')}
+    {version:2,sql:await readFile(path.join(process.cwd(),'migrations/002_helpdesk.sql'),'utf8')},
+    {version:3,sql:await readFile(path.join(process.cwd(),'migrations/003_member_usernames.sql'),'utf8')}
   ];
   const client=store.pool?await store.pool.connect():undefined;
   const run=async(sql:string,params:unknown[]=[])=>client?client.query(sql,params):rawQuery(sql,params);
@@ -102,7 +112,7 @@ export async function seedDemo() {
     try {
       await rawQuery('INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3),($4,$5,$6)', [org,'rrs','RRS รุ่งเรืองดั๊มพ์ 101 — Demo',other,'other','องค์กรตัวอย่าง B']);
       for (const [email, name, role, tenant] of [['admin@rrs.demo','ผู้ดูแล RRS','Admin',org],['agent@rrs.demo','ทีมขาย RRS','Agent',org],['outsider@other.demo','ทีมองค์กร B','Admin',other]]) {
-        await rawQuery('INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5,$6)', [randomUUID(),tenant,name,email,password,role]);
+        await rawQuery('INSERT INTO members(id,org_id,name,email,password_hash,role,username) VALUES($1,$2,$3,$4,$5,$6,$7)', [randomUUID(),tenant,name,email,password,role,email.split('@')[0]+'_demo']);
       }
       for (const item of seeds) await rawQuery("INSERT INTO knowledge(id,org_id,title,content,tags,status,source_url) VALUES($1,$2,$3,$4,$5,'published',$6)",[randomUUID(),org,item.title,item.content,JSON.stringify(item.tags),'https://rungruengdump101.com/']);
       for(const item of [
@@ -119,7 +129,7 @@ async function ready() {
   if (!store.ready) store.ready = (async () => {
     await open();
     if (demoMode()) { await executeMigration(); await seedDemo(); }
-    else if(!(await rawQuery('SELECT version FROM schema_migrations WHERE version=2')).rows.length)throw new Error('Database migration 002 is required');
+    else if(!(await rawQuery('SELECT version FROM schema_migrations WHERE version=3')).rows.length)throw new Error('Database migration 003 is required');
   })().catch(error => { store.ready = undefined; throw error; });
   return store.ready;
 }
@@ -127,13 +137,13 @@ async function ready() {
 export const database: Executor = {
   async query<T extends Row = Row>(sql: string, params: unknown[] = []) {
     await ready();
-    return exclusive(() => rawQuery<T>(sql, params));
+    return store.embedded ? exclusive(() => rawQuery<T>(sql, params)) : rawQuery<T>(sql, params);
   }
 };
 
 export async function transaction<T>(fn: (connection: Executor) => Promise<T>): Promise<T> {
   await ready();
-  return exclusive(async () => {
+  const run = async () => {
     const client = store.pool ? await store.pool.connect() : undefined;
     const query: Executor['query'] = async <R extends Row>(sql: string, params: unknown[] = []) => {
       if (!client) return rawQuery<R>(sql, params);
@@ -145,7 +155,8 @@ export async function transaction<T>(fn: (connection: Executor) => Promise<T>): 
     try { const result = await fn(executor); await query('COMMIT'); return result; }
     catch (error) { await query('ROLLBACK'); throw error; }
     finally { client?.release(); }
-  });
+  };
+  return store.embedded ? exclusive(run) : run();
 }
 
 export async function closeDatabase() {

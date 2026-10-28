@@ -1,0 +1,60 @@
+# Review template. Replace project/account/image values with verified GCP resources.
+# Keep minScale=0 until recurring warm-instance cost is explicitly approved.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rrs-crm-terminal
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: '0'
+        autoscaling.knative.dev/maxScale: '3'
+        run.googleapis.com/startup-cpu-boost: 'true'
+    spec:
+      serviceAccountName: RUNTIME_SERVICE_ACCOUNT
+      containerConcurrency: 20
+      timeoutSeconds: 300
+      containers:
+        - image: VERIFIED_ARTIFACT_REGISTRY_IMAGE_DIGEST
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: '1'
+              memory: 512Mi
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 3
+            failureThreshold: 30
+          env:
+            - name: DEMO_MODE
+              value: 'false'
+            - name: AI_PROVIDER
+              value: disabled
+            - name: RRS_EDGE_PROXY_REQUIRED
+              value: 'true'
+            - name: APP_ORIGIN
+              value: VERIFIED_CLOUDFLARE_PREVIEW_ORIGIN
+            - name: PUBLIC_ORG_SLUG
+              value: rrs
+            - name: TRUSTED_IP_HEADER
+              value: x-rrs-client-ip
+            - name: AI_DAILY_CALL_LIMIT
+              value: '50'
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rrs-crm-database-url
+                  key: '1'
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rrs-crm-session-secret
+                  key: '1'
+            - name: EDGE_PROXY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rrs-crm-edge-proxy-secret
+                  key: '1'

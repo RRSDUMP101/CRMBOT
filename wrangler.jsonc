@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rrs-crm-terminal",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-10-28",
+  "workers_dev": true,
+  "preview_urls": false
+  // Set BACKEND_ORIGIN only to the service URL returned by Cloud Run.
+  // Store EDGE_PROXY_SECRET through Cloudflare Secrets.
+  // Attach apex and www as Custom Domains after the preview passes.
+}

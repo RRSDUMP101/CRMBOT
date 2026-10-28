@@ -16,7 +16,11 @@
     "test": "tsx --test tests/bot.test.ts tests/widget.test.ts tests/widget-runtime.test.ts",
     "test:api": "tsx --test tests/api.test.ts",
     "test:helpdesk": "tsx --test tests/helpdesk.test.ts",
-    "test:migrations": "tsx --test tests/migrations.test.ts"
+    "test:migrations": "tsx --test tests/migrations.test.ts",
+    "cf:build": "wrangler deploy --dry-run --outdir .wrangler/bundle",
+    "cf:preview": "wrangler dev",
+    "cf:deploy": "wrangler deploy",
+    "test:deployment": "tsx --test tests/deployment.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.11",
@@ -41,6 +45,7 @@
     "@types/react-dom": "^19.0.0",
     "tailwindcss": "4.3.3",
     "tsx": "4.23.15",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "wrangler": "4.154.0"
   }
 }

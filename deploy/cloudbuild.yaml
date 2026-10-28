@@ -1,0 +1,6 @@
+# Requires an existing Artifact Registry repository and an approved GCP project.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-t', '${_IMAGE}', '.']
+images: ['${_IMAGE}']
+timeout: 1200s

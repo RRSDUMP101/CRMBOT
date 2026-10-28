@@ -27,15 +27,18 @@ async function handle(request:NextRequest) {
       const user=await staffSession(request,false);return json({demo:demoMode(),provider:providerName(),user:user?publicMember(user):null});
     }
     if(path.join('/')==='auth/login'&&method==='POST') {
-      const body=await readJson(request);fields(body,['email','password']);
-      const email=str(body.email,'อีเมล',254,true).toLowerCase();const password=str(body.password,'รหัสผ่าน',200,true);
+      const body=await readJson(request);fields(body,['email','username','password']);
+      if(body.email!==undefined&&body.username!==undefined)throw new ApiError(400,'ระบุชื่อผู้ใช้หรืออีเมลเพียงรายการเดียว');
+      const login=str(body.username??body.email,'ชื่อผู้ใช้หรืออีเมล',254,true).toLowerCase();const password=str(body.password,'รหัสผ่าน',200,true);
       // Trust a real client IP only when a controlled reverse proxy supplies this configured header.
       const ipHeader=process.env.TRUSTED_IP_HEADER;const address=ipHeader?request.headers.get(ipHeader)||'unknown':'single-host';
-      await rateLimit(`login-account:${email}`,10,900);await rateLimit(`login-ip:${address}`,60,900);
-      const member=(await database.query('SELECT * FROM members WHERE email=$1',[email])).rows[0];
+      await rateLimit(`login-ip:${address}`,60,900);
+      const member=(await database.query('SELECT * FROM members WHERE email=$1 OR username=$1',[login])).rows[0];
+      // Username and email aliases share a single account bucket.
+      await rateLimit(`login-account:${member?.id||login}`,10,900);
       const dummy='0'.repeat(32)+':'+ '0'.repeat(128);
       const valid=checkPassword(password,member?.password_hash||dummy);
-      if(!member||!valid||member.active!==true)throw new ApiError(401,'อีเมลหรือรหัสผ่านไม่ถูกต้อง');
+      if(!member||!valid||member.active!==true)throw new ApiError(401,'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
       const token=newToken();
       await database.query("INSERT INTO staff_sessions(token_hash,org_id,member_id,expires_at) VALUES($1,$2,$3,now()+interval '12 hours')",[hashToken(token),member.org_id,member.id]);
       return json({user:{id:member.id,name:member.name,email:member.email,role:member.role}},200,{'Set-Cookie':setCookie(STAFF_COOKIE,token,43200)});

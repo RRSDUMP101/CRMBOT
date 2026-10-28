@@ -1,0 +1,15 @@
+.git
+.next
+.open-next
+.wrangler
+node_modules
+.data
+.env
+.env.*
+.dev.vars*
+*.log
+*.tsbuildinfo
+test-results
+playwright-report
+docs
+tests

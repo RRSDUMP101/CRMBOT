@@ -124,6 +124,16 @@ describe("RRS real API acceptance (synthetic Demo data)", { concurrency: false }
     denied((await anonymous.json("/api/admin/snapshot")).response.status, "revoked login session");
   });
 
+  test("username login supports case normalization without accepting ambiguous identifiers", async () => {
+    const user = new Client();
+    const ambiguous=await user.json('/api/auth/login',{body:{email:'admin@rrs.demo',username:'admin_demo',password:'Demo-only-2026!'}});
+    assert.equal(ambiguous.response.status,400);
+    await user.post('/api/auth/login',{username:'ADMIN_DEMO',password:'Demo-only-2026!'});
+    assert.equal((await user.snapshot()).user.role,'Admin');
+    await user.post('/api/auth/logout');
+    denied((await user.json('/api/admin/snapshot')).response.status,'username session revoked');
+  });
+
   test("Admin versus Agent permissions are enforced on the server", async () => {
     assert.equal((await admin.snapshot()).user.role, "Admin");
     assert.equal((await agent.snapshot()).user.role, "Agent");

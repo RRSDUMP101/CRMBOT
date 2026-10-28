@@ -49,6 +49,14 @@ describe('Database upgrade and durable inbox state', {concurrency:false},()=>{
     assert.equal(found.items[0].unreadCount,2);assert.equal(found.items[0].lastCustomerMessageId,ids.second);
   });
 
+  test('username migration preserves email login and enforces unique normalized names',async()=>{
+    await database.query('UPDATE members SET username=$1 WHERE id=$2',['migration_admin',ids.member]);
+    assert.equal((await database.query('SELECT id FROM members WHERE email=$1 OR username=$1',['migration_admin'])).rows[0].id,ids.member);
+    assert.equal((await database.query('SELECT id FROM members WHERE email=$1 OR username=$1',[`${ids.member}@example.invalid`])).rows[0].id,ids.member);
+    await assert.rejects(database.query('UPDATE members SET username=$1 WHERE id=$2',['migration_admin',ids.secondMember]));
+    await assert.rejects(database.query('UPDATE members SET username=$1 WHERE id=$2',['INVALID NAME',ids.secondMember]));
+  });
+
   test('read watermarks are per member, monotonic, and survive migration reruns',async()=>{
     await markConversationRead(staff,ids.conversation,{throughMessageId:ids.first});
     assert.equal((await readItem()).unreadCount,1);
@@ -60,7 +68,7 @@ describe('Database upgrade and durable inbox state', {concurrency:false},()=>{
     assert.equal((await readItem()).unreadCount,0);
     assert.equal((await readItem(ids.secondMember)).unreadCount,2);
     const versions=await database.query('SELECT version FROM schema_migrations ORDER BY version');
-    assert.deepEqual(versions.rows.map(row=>row.version),[1,2]);
+    assert.deepEqual(versions.rows.map(row=>row.version),[1,2,3]);
   });
 
   test('cursor pagination preserves microseconds and UUID tie-breaks without skipping records',async()=>{
