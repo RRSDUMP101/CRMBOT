@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+const base=process.env.BASE_URL||'http://localhost:3000';
+const request=(path:string,init:RequestInit={})=>fetch(base+path,init);
+test('private file upload and download work through authenticated HTTP on D1/R2',async()=>{
+  assert.ok(['localhost','127.0.0.1'].includes(new URL(base).hostname),'Synthetic fixture tests only');
+  const bootstrap=await (await request('/api/bootstrap')).json();assert.equal(bootstrap.provider,'demo');
+  const headers={'Origin':base,'Content-Type':'application/json'};
+  const login=async(email:string)=>{const r=await request('/api/auth/login',{method:'POST',headers,body:JSON.stringify({email,password:'Demo-only-2026!'})});assert.equal(r.status,200);return r.headers.get('set-cookie')!.split(';')[0];};
+  const admin=await login('admin@rrs.demo'),outsider=await login('outsider@other.demo');
+  const session=await request('/api/chat/session',{method:'POST',headers,body:'{}'});assert.equal(session.status,201);const leadId=(await session.json()).lead.id;
+  const path=`/api/admin/leads/${leadId}/files`;const bytes='%PDF-1.7\nSynthetic R2 HTTP fixture';
+  const upload={method:'POST',headers:{Origin:base,Cookie:admin,'Content-Type':'application/pdf','X-File-Name':encodeURIComponent('เอกสารทดสอบ.pdf')},body:bytes};
+  assert.equal((await request(path,{...upload,headers:{...upload.headers,Cookie:''}})).status,401);
+  assert.equal((await request(path,{...upload,headers:{...upload.headers,Origin:'https://example.invalid'}})).status,403);
+  const saved=await request(path,upload);assert.equal(saved.status,201,await saved.clone().text());const id=(await saved.json()).id;
+  const list=await request(path,{headers:{Cookie:admin}});assert.equal(list.status,200);assert.equal((await list.json()).files[0].id,id);
+  assert.equal((await request(`/api/admin/files/${id}`)).status,401);
+  assert.equal((await request(`/api/admin/files/${id}`,{headers:{Cookie:outsider}})).status,404);
+  const download=await request(`/api/admin/files/${id}`,{headers:{Cookie:admin}});assert.equal(download.status,200);assert.equal(download.headers.get('cache-control'),'private, no-store');assert.match(download.headers.get('content-disposition')!,/^attachment;/);assert.equal(await download.text(),bytes);
+});

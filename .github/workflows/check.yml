@@ -1,0 +1,30 @@
+name: Build and acceptance
+on:
+  push:
+    branches: [feat/ai-chatbot-crm-dashboard, codex/cloudflare-production]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm test:migrations
+      - run: pnpm test:integrity
+      - run: pnpm test:deployment
+      - run: pnpm cf:build
+      - run: pnpm test:worker
