@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
-import { database, demoMode } from '@/lib/db';
+import { database, demoMode, transaction } from '@/lib/db';
 import { ApiError, STAFF_COOKIE, assertOrigin, checkPassword, cookieValue, fields, hashToken, isWidgetRequest, newToken, rateLimit, readJson, setCookie, staffSession, str, uuid, visitorCookieName, visitorSession } from '@/lib/auth';
 import { adminAction, appointmentConfirm, appointmentPreview, conversationAction, conversationDetail, createVisitor, handoff, messageStream, publicMember, saveContact, snapshot, visitorDetail } from '@/lib/service';
 import { providerName } from '@/lib/bot';
 import { adminWidgetConfig, getPublicWidgetConfig, getWidgetEmbedConfig, inbox, inboxSummary, markConversationRead, replyTemplates, saveWidgetConfig, templateAction } from '@/lib/helpdesk';
+import {downloadFile,listFiles,uploadFile} from '@/lib/files';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -36,12 +37,17 @@ async function handle(request:NextRequest) {
       const member=(await database.query('SELECT * FROM members WHERE email=$1 OR username=$1',[login])).rows[0];
       // Username and email aliases share a single account bucket.
       await rateLimit(`login-account:${member?.id||login}`,10,900);
-      const dummy='0'.repeat(32)+':'+ '0'.repeat(128);
-      const valid=checkPassword(password,member?.password_hash||dummy);
+      const dummy='pbkdf2:600000:'+ '0'.repeat(32)+':'+ '0'.repeat(64);
+      const valid=await checkPassword(password,member?.password_hash||dummy);
       if(!member||!valid||member.active!==true)throw new ApiError(401,'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
       const token=newToken();
-      await database.query("INSERT INTO staff_sessions(token_hash,org_id,member_id,expires_at) VALUES($1,$2,$3,now()+interval '12 hours')",[hashToken(token),member.org_id,member.id]);
-      return json({user:{id:member.id,name:member.name,email:member.email,role:member.role}},200,{'Set-Cookie':setCookie(STAFF_COOKIE,token,43200)});
+      const current=await transaction(member.org_id,async connection=>{
+        const fresh=(await connection.query('SELECT id,name,email,role,active,password_hash FROM members WHERE org_id=$1 AND id=$2',[member.org_id,member.id])).rows[0];
+        if(!fresh?.active||fresh.password_hash!==member.password_hash)throw new ApiError(401,'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+        await connection.query("INSERT INTO staff_sessions(token_hash,org_id,member_id,expires_at) VALUES($1,$2,$3,(strftime('%Y-%m-%dT%H:%M:%f','now','+12 hours')||'000Z'))",[hashToken(token),member.org_id,member.id]);
+        return {id:fresh.id,name:fresh.name,email:fresh.email,role:fresh.role};
+      });
+      return json({user:current},200,{'Set-Cookie':setCookie(STAFF_COOKIE,token,43200)});
     }
     if(path.join('/')==='auth/logout'&&method==='POST') {
       const token=cookieValue(request,STAFF_COOKIE);if(token)await database.query('DELETE FROM staff_sessions WHERE token_hash=$1',[hashToken(token)]);
@@ -50,6 +56,11 @@ async function handle(request:NextRequest) {
     if(path[0]==='admin') {
       const staff=(await staffSession(request))!;
       if(method==='POST')await rateLimit(`staff:${staff.orgId}:${staff.id}`,120,60);
+      if(path[1]==='leads'&&path.length===4&&path[3]==='files') {
+        if(method==='GET')return json(await listFiles(staff,uuid(path[2])));
+        if(method==='POST'){await rateLimit(`upload:${staff.orgId}:${staff.id}`,20,3600);return json(await uploadFile(staff,uuid(path[2]),request),201);}
+      }
+      if(path[1]==='files'&&path.length===3&&method==='GET')return await downloadFile(staff,uuid(path[2]));
       if(path.join('/')==='admin/widget'&&method==='GET')return json(await adminWidgetConfig(staff));
       if(path.join('/')==='admin/widget'&&method==='POST')return json(await saveWidgetConfig(staff,await readJson(request)));
       if(path.join('/')==='admin/inbox'&&method==='GET')return json(await inbox(staff,url));

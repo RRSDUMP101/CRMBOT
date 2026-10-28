@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
 
-const UNREAD='GREATEST(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)';
+const UNREAD="MAX(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)";
 const READ_JOIN='LEFT JOIN conversation_reads r ON r.org_id=c.org_id AND r.conversation_id=c.id AND r.member_id=$2';
 
 async function event(connection:Executor,staff:Staff,action:string,entityId:string,metadata:Row={}) {
@@ -11,17 +11,16 @@ async function event(connection:Executor,staff:Staff,action:string,entityId:stri
 
 export async function inboxSummary(staff:Staff,connection:Executor=database) {
   const result=await connection.query(`SELECT
-    count(*) FILTER(WHERE c.status!='resolved')::int AS all,
-    count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id=$2)::int AS mine,
-    count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id IS NULL)::int AS unassigned,
-    count(*) FILTER(WHERE c.status='waiting_human')::int AS waiting,
-    count(*) FILTER(WHERE c.status='resolved')::int AS closed,
-    count(*) FILTER(WHERE c.status!='resolved' AND ${UNREAD}>0)::int AS unread
+    count(*) FILTER(WHERE c.status!='resolved') AS "all",
+    count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id=$2) AS mine,
+    count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id IS NULL) AS unassigned,
+    count(*) FILTER(WHERE c.status='waiting_human') AS waiting,
+    count(*) FILTER(WHERE c.status='resolved') AS closed,
+    count(*) FILTER(WHERE c.status!='resolved' AND ${UNREAD}>0) AS unread
     FROM conversations c ${READ_JOIN} WHERE c.org_id=$1`,[staff.orgId,staff.id]);
   return {counts:result.rows[0]};
 }
 
-function literalPattern(text:string) {return `%${text.replace(/[\\%_]/g,value=>`\\${value}`)}%`;}
 function cursorValue(value:string) {
   if(value.length>400||!/^[A-Za-z0-9_-]+$/.test(value))throw new ApiError(400,'รหัสหน้ารายการไม่ถูกต้อง');
   try {
@@ -29,7 +28,7 @@ function cursorValue(value:string) {
     if(!decoded||typeof decoded!=='object'||Array.isArray(decoded))throw new Error();
     fields(decoded,['updatedAt','id']);const id=uuid(decoded.id);
     if(typeof decoded.updatedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(decoded.updatedAt)||!Number.isFinite(Date.parse(decoded.updatedAt)))throw new Error();
-    // Preserve PostgreSQL microseconds; converting through Date would skip rows inside one millisecond.
+    // Preserve canonical timestamp precision; converting through Date would skip rows inside one millisecond.
     return {id,updatedAt:decoded.updatedAt};
   } catch {throw new ApiError(400,'รหัสหน้ารายการไม่ถูกต้อง');}
 }
@@ -51,20 +50,22 @@ export async function inbox(staff:Staff,url:URL) {
   if(unread!==null&&unread!==''){oneOf(unread,['true','false'],'ตัวกรองยังไม่อ่าน');where.push(`${UNREAD}${unread==='true'?'>0':'=0'}`);}
   const status=url.searchParams.get('status');if(status)where.push(`c.status=${bind(oneOf(status,['bot_active','human_active','waiting_human','resolved'],'สถานะ'))}`);
   const owner=url.searchParams.get('assignee');if(owner)where.push(`c.assignee_id=${bind(uuid(owner,'ผู้รับผิดชอบ'))}`);
-  const tag=str(url.searchParams.get('tag'),'แท็ก',40);if(tag)where.push(`EXISTS(SELECT 1 FROM jsonb_array_elements_text(l.tags) t(value) WHERE lower(t.value)=lower(${bind(tag)}))`);
+  const tag=str(url.searchParams.get('tag'),'แท็ก',40);if(tag)where.push(`EXISTS(SELECT 1 FROM json_each(l.tags) t WHERE lower(t.value)=lower(${bind(tag)}))`);
   if(query) {
-    const term=bind(literalPattern(query));
-    where.push(`(l.name ILIKE ${term} ESCAPE '\\' OR l.phone ILIKE ${term} ESCAPE '\\' OR l.email ILIKE ${term} ESCAPE '\\' OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent') AND search_message.content ILIKE ${term} ESCAPE '\\'))`);
+    // D1 limits LIKE patterns to 50 bytes, too short for normal Thai names.
+    // INSTR keeps search literal (including % and _) without truncation.
+    const term=bind(query);
+    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent') AND instr(lower(search_message.content),lower(${term}))>0))`);
   }
   const totalParams=[...params];const totalWhere=where.join(' AND ');
   const cursor=url.searchParams.get('cursor');
-  if(cursor){const parsed=cursorValue(cursor);where.push(`(c.updated_at,c.id)<(${bind(parsed.updatedAt)}::timestamptz,${bind(parsed.id)}::uuid)`);}
+  if(cursor){const parsed=cursorValue(cursor);where.push(`(c.updated_at,c.id)<(${bind(parsed.updatedAt)},${bind(parsed.id)})`);}
   const pageLimit=bind(limit+1);
-  return transaction(async connection=>{
-    const total=await connection.query(`SELECT count(*)::int AS total FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${totalWhere}`,totalParams);
+  return transaction(staff.orgId, async connection=>{
+    const total=await connection.query(`SELECT count(*) AS total FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${totalWhere}`,totalParams);
     const result=await connection.query(`SELECT c.id,c.lead_id,c.status,c.version,c.assignee_id,c.created_at,c.updated_at,l.name AS lead_name,l.tags,
-      to_char(c.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at,
-      ${UNREAD}::int AS unread_count,
+      c.updated_at AS cursor_updated_at,
+      ${UNREAD} AS unread_count,
       (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user' ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,
       (SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent') ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message
       FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${where.join(' AND ')} ORDER BY c.updated_at DESC,c.id DESC LIMIT ${pageLimit}`,params);
@@ -72,17 +73,16 @@ export async function inbox(staff:Staff,url:URL) {
     const items=pageRows.map(row=>{const item=camel(row);delete item.cursorUpdatedAt;return item;});
     const nextCursor=result.rows.length>limit&&last?Buffer.from(JSON.stringify({updatedAt:last.cursor_updated_at,id:last.id})).toString('base64url'):null;
     return {items,nextCursor,total:total.rows[0].total,...await inboxSummary(staff,connection)};
-  });
+  }, staff);
 }
 
 export async function markConversationRead(staff:Staff,id:string,body:Record<string,unknown>) {
   uuid(id);fields(body,['throughMessageId']);const messageId=uuid(body.throughMessageId);
-  await transaction(async connection=>{
+  await transaction(staff.orgId, async connection=>{
     const message=(await connection.query("SELECT customer_seq FROM messages WHERE org_id=$1 AND conversation_id=$2 AND id=$3 AND role='user'",[staff.orgId,id,messageId])).rows[0];
     if(!message||!message.customer_seq)throw new ApiError(404,'ไม่พบข้อความลูกค้าในบทสนทนานี้');
-    await connection.query(`INSERT INTO conversation_reads(org_id,conversation_id,member_id,last_read_seq) VALUES($1,$2,$3,$4)
-      ON CONFLICT(org_id,conversation_id,member_id) DO UPDATE SET last_read_seq=GREATEST(conversation_reads.last_read_seq,excluded.last_read_seq),updated_at=now()`,[staff.orgId,id,staff.id,message.customer_seq]);
-  });
+    await connection.query("INSERT INTO conversation_reads(org_id,conversation_id,member_id,last_read_seq) VALUES($1,$2,$3,$4)\n      ON CONFLICT(org_id,conversation_id,member_id) DO UPDATE SET last_read_seq=MAX(conversation_reads.last_read_seq,excluded.last_read_seq),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')",[staff.orgId,id,staff.id,message.customer_seq]);
+  }, staff);
   return {ok:true};
 }
 
@@ -98,14 +98,14 @@ export async function templateAction(staff:Staff,body:Record<string,unknown>) {
   if(!body.values||typeof body.values!=='object'||Array.isArray(body.values))throw new ApiError(400,'ค่าข้อมูลไม่ถูกต้อง');
   const values=body.values as Record<string,unknown>;
   fields(values,action==='deleteReplyTemplate'?['version']:['title','shortcut','content','category','version']);
-  await transaction(async connection=>{
-    // This lock also serializes uniqueness checks and the per-organization template limit.
-    await connection.query('SELECT id FROM organizations WHERE id=$1 FOR UPDATE',[staff.orgId]);
+  await transaction(staff.orgId, async connection=>{
+    // The organization revision serializes uniqueness checks and the template limit.
+    await connection.query("SELECT id FROM organizations WHERE id=$1",[staff.orgId]);
     const id=body.id?uuid(body.id):randomUUID();
     if(action==='deleteReplyTemplate'&&!body.id)throw new ApiError(400,'กรุณาระบุข้อความที่ต้องการลบ');
     let existing:Row|undefined;
     if(body.id) {
-      existing=(await connection.query('SELECT * FROM reply_templates WHERE org_id=$1 AND id=$2 FOR UPDATE',[staff.orgId,id])).rows[0];
+      existing=(await connection.query("SELECT * FROM reply_templates WHERE org_id=$1 AND id=$2",[staff.orgId,id])).rows[0];
       if(!existing)throw new ApiError(404,'ไม่พบข้อความตอบสำเร็จรูป');
       if(existing.version!==version(values.version))throw new ApiError(409,'ข้อความนี้ถูกแก้ไขแล้ว กรุณาโหลดรายการใหม่');
     }
@@ -116,15 +116,15 @@ export async function templateAction(staff:Staff,body:Record<string,unknown>) {
       if(!/^[a-z0-9_-]{1,40}$/.test(rawShortcut))throw new ApiError(400,'คำย่อใช้ตัวอักษรอังกฤษ ตัวเลข - หรือ _ ไม่เกิน 40 ตัว');
       const shortcut=`/${rawShortcut}`;
       if((await connection.query('SELECT id FROM reply_templates WHERE org_id=$1 AND shortcut=$2 AND id!=$3',[staff.orgId,shortcut,id])).rows.length)throw new ApiError(409,'คำย่อนี้มีอยู่แล้วในองค์กร');
-      if(existing)await connection.query('UPDATE reply_templates SET title=$3,shortcut=$4,content=$5,category=$6,version=version+1,updated_at=now() WHERE org_id=$1 AND id=$2',[staff.orgId,id,title,shortcut,content,category]);
+      if(existing)await connection.query("UPDATE reply_templates SET title=$3,shortcut=$4,content=$5,category=$6,version=version+1,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,title,shortcut,content,category]);
       else {
-        const count=(await connection.query('SELECT count(*)::int AS total FROM reply_templates WHERE org_id=$1',[staff.orgId])).rows[0].total;
+        const count=(await connection.query("SELECT count(*) AS total FROM reply_templates WHERE org_id=$1",[staff.orgId])).rows[0].total;
         if(count>=200)throw new ApiError(400,'รองรับข้อความตอบสำเร็จรูปสูงสุด 200 รายการต่อองค์กร');
         await connection.query('INSERT INTO reply_templates(id,org_id,title,shortcut,content,category) VALUES($1,$2,$3,$4,$5,$6)',[id,staff.orgId,title,shortcut,content,category]);
       }
     }
     await event(connection,staff,action,id,{previousVersion:existing?.version??null,nextVersion:action==='deleteReplyTemplate'?null:(existing?.version??0)+1});
-  });
+  }, staff);
   return {ok:true};
 }
 
@@ -166,10 +166,10 @@ export async function getPublicWidgetConfig(origin?:string) {
 export async function adminWidgetConfig(staff:Staff) {requireAdmin(staff);return {config:await widgetForOrg(staff.orgId)};}
 export async function saveWidgetConfig(staff:Staff,body:Record<string,unknown>) {
   requireAdmin(staff);fields(body,['config']);const config=validateWidgetConfig(body.config);
-  await transaction(async connection=>{
+  await transaction(staff.orgId, async connection=>{
     await connection.query('UPDATE organizations SET widget_config=$2 WHERE id=$1',[staff.orgId,JSON.stringify(config)]);
-    if(!config.enabled)await connection.query("UPDATE conversations c SET version=version+1,generating_client_id=NULL,generation_started_at=NULL WHERE c.org_id=$1 AND EXISTS(SELECT 1 FROM visitors v WHERE v.org_id=c.org_id AND v.conversation_id=c.id AND v.context='widget')",[staff.orgId]);
+    if(!config.enabled)await connection.query("UPDATE conversations AS c SET version=version+1,generating_client_id=NULL,generation_started_at=NULL WHERE c.org_id=$1 AND EXISTS(SELECT 1 FROM visitors v WHERE v.org_id=c.org_id AND v.conversation_id=c.id AND v.context='widget')",[staff.orgId]);
     await event(connection,staff,'widget.updated',staff.orgId,{enabled:config.enabled,allowedOriginCount:config.allowedOrigins.length});
-  });
+  }, staff);
   return {config};
 }

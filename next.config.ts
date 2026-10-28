@@ -1,7 +1,14 @@
 import type { NextConfig } from 'next';
+import path from 'node:path';
 const config: NextConfig = {
   output: 'standalone',
-  serverExternalPackages: ['@electric-sql/pglite', 'pg'],
+  webpack(config) {
+    if(process.env.RRS_WORKERS_BUILD==='true') {
+      const stub=path.resolve('cloudflare/local-disabled.ts');
+      config.resolve.alias={...config.resolve.alias,'./local-db':stub,'./seed-demo':stub,'./local-files':stub};
+    }
+    return config;
+  },
   poweredByHeader: false,
   async headers() { return [{ source: '/:path*', headers: [
     {key:'X-Content-Type-Options',value:'nosniff'},

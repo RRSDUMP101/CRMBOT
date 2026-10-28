@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { PGlite } from '@electric-sql/pglite';
+import { DatabaseSync } from 'node:sqlite';
 import { closeDatabase, database, migrateDatabase } from '../src/lib/db';
 import { inbox, markConversationRead } from '../src/lib/helpdesk';
 import { messageStream } from '../src/lib/service';
@@ -21,10 +21,10 @@ describe('Database upgrade and durable inbox state', {concurrency:false},()=>{
     const directory=path.join(process.cwd(),'.data',`migration-test-${randomUUID()}`);
     await mkdir(directory,{recursive:true});
     process.env.DEMO_MODE='true';process.env.AI_PROVIDER='demo';process.env.PGLITE_DIR=directory;process.env.APP_ORIGIN='http://localhost:3000';
-    const legacy=new PGlite(directory);
+    const sqlite=new DatabaseSync(path.join(directory,'crm.sqlite'));
+    const legacy={exec:async(sql:string)=>sqlite.exec(sql),query:async(sql:string,params:unknown[])=>{const ordered:unknown[]=[];const text=sql.replace(/\$(\d+)/g,(_,i)=>{ordered.push(params[Number(i)-1]);return '?';});return sqlite.prepare(text).all(...ordered as any[]);},close:async()=>sqlite.close()};
     try {
-      await legacy.waitReady;
-      await legacy.exec(await readFile(path.join(process.cwd(),'migrations/001_initial.sql'),'utf8'));
+      await legacy.exec(await readFile(path.join(process.cwd(),'migrations/d1/001_initial.sql'),'utf8'));
       await legacy.query('INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)',[ids.org,'rrs','Preserved synthetic organization']);
       for(const member of [ids.member,ids.secondMember])await legacy.query("INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5,'Admin')",[member,ids.org,'Migration tester',`${member}@example.invalid`,'synthetic-no-login']);
       await legacy.query('INSERT INTO leads(id,org_id,name) VALUES($1,$2,$3)',[ids.lead,ids.org,'Preserved synthetic customer']);
@@ -68,7 +68,7 @@ describe('Database upgrade and durable inbox state', {concurrency:false},()=>{
     assert.equal((await readItem()).unreadCount,0);
     assert.equal((await readItem(ids.secondMember)).unreadCount,2);
     const versions=await database.query('SELECT version FROM schema_migrations ORDER BY version');
-    assert.deepEqual(versions.rows.map(row=>row.version),[1,2,3]);
+    assert.deepEqual(versions.rows.map(row=>row.version),[1,2,3,4]);
   });
 
   test('cursor pagination preserves microseconds and UUID tie-breaks without skipping records',async()=>{

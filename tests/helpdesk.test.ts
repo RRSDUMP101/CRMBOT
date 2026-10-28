@@ -102,7 +102,7 @@ const historyNeedle = `ประวัติเฉพาะ-${runId}`;
 describe("RRS helpdesk and widget HTTP acceptance", { concurrency: false }, () => {
   before(async () => {
     const bootstrap = await new Client().ok("/api/bootstrap");
-    assert.equal(bootstrap.demo, true, "Safety: use explicit DEMO_MODE with synthetic data");
+    assert.equal(bootstrap.demo || (process.env.TEST_WORKER_LOCAL==='1' && new URL(base).hostname==='127.0.0.1'), true, "Safety: use explicit DEMO_MODE with synthetic data");
     assert.equal(bootstrap.provider, "demo", "Acceptance tests must not call a billable LLM");
     const administrator = await admin.post("/api/auth/login", { email: "admin@rrs.demo", password });
     const salesperson = await agent.post("/api/auth/login", { email: "agent@rrs.demo", password });

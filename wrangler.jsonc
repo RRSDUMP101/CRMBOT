@@ -3,9 +3,23 @@
   "name": "rrs-crm-terminal",
   "main": "cloudflare/worker.ts",
   "compatibility_date": "2026-10-28",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
-  "preview_urls": false
-  // Set BACKEND_ORIGIN only to the service URL returned by Cloud Run.
-  // Store EDGE_PROXY_SECRET through Cloudflare Secrets.
-  // Attach apex and www as Custom Domains after the preview passes.
+  "preview_urls": false,
+  "limits": {"cpu_ms": 1000},
+  "assets": {"directory": ".open-next/assets", "binding": "ASSETS"},
+  "d1_databases": [{"binding":"DB","database_name":"rrs-crm-terminal","database_id":"00000000-0000-0000-0000-000000000000","migrations_dir":"migrations/d1"}],
+  "r2_buckets": [{"binding":"BUCKET","bucket_name":"rrs-crm-terminal-files"}],
+  "vars": {
+    "APP_ORIGIN":"https://rrs-crm-terminal.com",
+    "RRS_WORKERS":"true",
+    "DEMO_MODE":"false",
+    "PUBLIC_ORG_SLUG":"rrs",
+    "AI_PROVIDER":"disabled",
+    "AI_DAILY_CALL_LIMIT":"100",
+    "FILE_STORAGE_LIMIT_BYTES":"1073741824",
+    "TRUSTED_IP_HEADER":"cf-connecting-ip"
+  }
+  // Put the real database_id only in an ignored deployment config.
+  // Set SESSION_SECRET through Cloudflare Secrets.
 }

@@ -1,9 +1,8 @@
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { database, demoMode, type Executor } from './db';
 
-export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
-}
+import { ApiError } from './errors';
+export { ApiError };
 export type Staff = { id: string; orgId: string; name: string; email: string; role: 'Admin'|'Agent' };
 export type Visitor = { orgId: string; conversationId: string };
 export const STAFF_COOKIE = 'rrs_staff';
@@ -34,7 +33,7 @@ export function assertOrigin(request: Request) {
 export async function staffSession(request: Request, required = true): Promise<Staff|null> {
   const token = cookieValue(request, STAFF_COOKIE);
   if (token) {
-    const result = await database.query(`SELECT m.id,m.org_id,m.name,m.email,m.role FROM staff_sessions s JOIN members m ON m.org_id=s.org_id AND m.id=s.member_id WHERE s.token_hash=$1 AND s.expires_at>now() AND m.active=true`, [hashToken(token)]);
+    const result = await database.query("SELECT m.id,m.org_id,m.name,m.email,m.role FROM staff_sessions s JOIN members m ON m.org_id=s.org_id AND m.id=s.member_id WHERE s.token_hash=$1 AND s.expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') AND m.active=true", [hashToken(token)]);
     if (result.rows[0]) { const row=result.rows[0]; return {id:row.id,orgId:row.org_id,name:row.name,email:row.email,role:row.role}; }
   }
   if (required) throw new ApiError(401, 'กรุณาเข้าสู่ระบบ');
@@ -43,23 +42,29 @@ export async function staffSession(request: Request, required = true): Promise<S
 export async function visitorSession(request: Request, required=true): Promise<Visitor|null> {
   const token = cookieValue(request,visitorCookieName(request));
   if (token) {
-    const result=await database.query('SELECT org_id,conversation_id FROM visitors WHERE token_hash=$1 AND expires_at>now() AND context=$2', [hashToken(token),isWidgetRequest(request)?'widget':'web']);
+    const result=await database.query("SELECT org_id,conversation_id FROM visitors WHERE token_hash=$1 AND expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') AND context=$2", [hashToken(token),isWidgetRequest(request)?'widget':'web']);
     if(result.rows[0]) return {orgId:result.rows[0].org_id,conversationId:result.rows[0].conversation_id};
   }
   if(required) throw new ApiError(401,'กรุณาเริ่มบทสนทนาใหม่');
   return null;
 }
 export function requireAdmin(staff: Staff) { if(staff.role!=='Admin') throw new ApiError(403,'ต้องใช้สิทธิ์ผู้ดูแลระบบ'); }
-export function hashPassword(password: string) { const salt=randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password,salt,64).toString('hex')}`; }
-export function checkPassword(password: string, stored: string) {
-  const [salt,hash]=stored.split(':');
-  if(!salt||!hash||hash.length!==128) return false;
-  const actual=scryptSync(password,salt,64); const expected=Buffer.from(hash,'hex');
-  return actual.length===expected.length && timingSafeEqual(actual,expected);
+export async function hashPassword(password: string) {
+  const salt = randomBytes(16).toString('hex');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:Buffer.from(salt,'hex'),iterations:600000},key,256);
+  return `pbkdf2:600000:${salt}:${Buffer.from(bits).toString('hex')}`;
+}
+export async function checkPassword(password: string, stored: string) {
+  const [scheme,iterations,salt,hash]=stored.split(':');
+  if(scheme!=='pbkdf2'||iterations!=='600000'||!salt||!/^[0-9a-f]{32}$/.test(salt)||!hash||!/^[0-9a-f]{64}$/.test(hash))return false;
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);
+  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:Buffer.from(salt,'hex'),iterations:600000},key,256);
+  return timingSafeEqual(Buffer.from(bits),Buffer.from(hash,'hex'));
 }
 
 export async function rateLimit(key: string, maximum: number, seconds: number) {
-  const result=await database.query(`INSERT INTO rate_buckets(key,hits,reset_at) VALUES($1,1,now()+($2::text||' seconds')::interval) ON CONFLICT(key) DO UPDATE SET hits=CASE WHEN rate_buckets.reset_at<=now() THEN 1 ELSE rate_buckets.hits+1 END,reset_at=CASE WHEN rate_buckets.reset_at<=now() THEN excluded.reset_at ELSE rate_buckets.reset_at END RETURNING hits`,[hashToken(key),seconds]);
+  const result=await database.query("INSERT INTO rate_buckets(key,hits,reset_at) VALUES($1,1,(strftime('%Y-%m-%dT%H:%M:%f','now','+'||$2||' seconds')||'000Z')) ON CONFLICT(key) DO UPDATE SET hits=CASE WHEN rate_buckets.reset_at<=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') THEN 1 ELSE rate_buckets.hits+1 END,reset_at=CASE WHEN rate_buckets.reset_at<=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') THEN excluded.reset_at ELSE rate_buckets.reset_at END RETURNING hits",[hashToken(key),seconds]);
   if(Number(result.rows[0].hits)>maximum) throw new ApiError(429,'ส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่');
 }
 
@@ -91,7 +96,7 @@ export function tags(value: unknown): string[] {
 }
 export function isoDate(value: unknown, label: string): string {
   const raw=str(value,label,64,true); const parsed=new Date(raw);
-  if(!/^\d{4}-\d{2}-\d{2}T/.test(raw)||!Number.isFinite(parsed.getTime()))throw new ApiError(400,`${label}ไม่ถูกต้อง`);return parsed.toISOString();
+  if(!/^\d{4}-\d{2}-\d{2}T/.test(raw)||!Number.isFinite(parsed.getTime()))throw new ApiError(400,`${label}ไม่ถูกต้อง`);return parsed.toISOString().replace(/(\.\d{3})Z$/, (_,fraction)=>fraction+'000Z');
 }
 export async function assignee(executor: Executor, orgId: string, value: unknown): Promise<string|null> {
   if(value===null||value==='')return null; const id=uuid(value);

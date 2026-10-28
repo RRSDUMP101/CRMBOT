@@ -100,7 +100,7 @@ let knowledgeId: string;
 describe("RRS real API acceptance (synthetic Demo data)", { concurrency: false }, () => {
   before(async () => {
     const bootstrap = await new Client().ok("/api/bootstrap");
-    assert.equal(bootstrap.demo, true, "Safety: acceptance suite only runs against explicit DEMO_MODE");
+    assert.equal(bootstrap.demo || (process.env.TEST_WORKER_LOCAL==='1' && new URL(base).hostname==='127.0.0.1'), true, "Safety: acceptance suite only runs against explicit DEMO_MODE");
     assert.equal(bootstrap.provider, "demo", "Deterministic acceptance suite requires Demo adapter, not billable LLM calls");
     for (const [client, email] of [[admin, "admin@rrs.demo"], [agent, "agent@rrs.demo"], [outsider, "outsider@other.demo"]] as const) {
       await client.post("/api/auth/login", { email, password: "Demo-only-2026!" });
