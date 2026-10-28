@@ -22,6 +22,14 @@ This branch moves the CRM runtime to Workers with a dedicated D1 database and pr
 
 Provision the initial organization and administrator once in D1 using an atomic batch. Store only the salted password hash, never a plaintext password or public default credential. Do not seed Demo accounts, customer records or unapproved knowledge into production.
 
+### Password hashing on deployed Workers
+
+Cloudflare's native PBKDF2 API caps a derivation at 100,000 iterations, while local workerd does not enforce that cap. The app uses the JavaScript PBKDF2 implementation in the pinned `@noble/hashes` package to retain the existing PBKDF2-SHA256 600,000-round format and all already-provisioned passwords. Random salts, constant-time comparison, per-IP/account rate limits and session checks remain in effect. A 3,000 ms Worker CPU ceiling allows headroom for the JavaScript derivation; it is a per-request ceiling, not a plan upgrade or monthly spending cap.
+
+The password regression suite compares against independently generated Node.js PBKDF2 hashes (including Thai text) and rejects wrong passwords while native WebCrypto is mocked to throw the deployed-platform error. The Worker HTTP suite exercises actual login/session behavior. Always check a deployed preview too: a local workerd pass alone did not detect this platform difference.
+
+Runtime source: [Workers PBKDF2 limit](https://github.com/cloudflare/workerd/blob/main/src/workerd/io/limit-enforcer.h) and [Node crypto shares the same limit](https://github.com/cloudflare/workerd/blob/main/src/workerd/api/node/crypto.c%2B%2B).
+
 ## Release sequence
 
 1. Verify the target account, existing plan, zone, DNS and certificates. Obtain authorization for incremental charges. Workers Paid has a $5/account/month minimum, not per application; included usage is shared across the account. D1 and R2 overages, AI and messaging providers are additional. Billing alerts are not hard caps.

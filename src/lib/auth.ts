@@ -1,4 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 import { database, demoMode, type Executor } from './db';
 
 import { ApiError } from './errors';
@@ -51,15 +53,19 @@ export async function visitorSession(request: Request, required=true): Promise<V
 export function requireAdmin(staff: Staff) { if(staff.role!=='Admin') throw new ApiError(403,'ต้องใช้สิทธิ์ผู้ดูแลระบบ'); }
 export async function hashPassword(password: string) {
   const salt = randomBytes(16).toString('hex');
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:Buffer.from(salt,'hex'),iterations:600000},key,256);
+  const bits = await derivePassword(password,salt);
   return `pbkdf2:600000:${salt}:${Buffer.from(bits).toString('hex')}`;
 }
+function derivePassword(password: string, salt: string) {
+  // Deployed Workers cap native PBKDF2 at 100,000 rounds, unlike local workerd.
+  // Keep the existing 600,000-round hashes compatible without weakening their cost.
+  return pbkdf2Async(sha256,new TextEncoder().encode(password),Buffer.from(salt,'hex'),{c:600000,dkLen:32});
+}
 export async function checkPassword(password: string, stored: string) {
-  const [scheme,iterations,salt,hash]=stored.split(':');
-  if(scheme!=='pbkdf2'||iterations!=='600000'||!salt||!/^[0-9a-f]{32}$/.test(salt)||!hash||!/^[0-9a-f]{64}$/.test(hash))return false;
-  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);
-  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:Buffer.from(salt,'hex'),iterations:600000},key,256);
+  const parts=/^pbkdf2:600000:([0-9a-f]{32}):([0-9a-f]{64})$/.exec(stored);
+  if(!parts)return false;
+  const [,salt,hash]=parts;
+  const bits=await derivePassword(password,salt);
   return timingSafeEqual(Buffer.from(bits),Buffer.from(hash,'hex'));
 }
 

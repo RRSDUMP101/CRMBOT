@@ -13,7 +13,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "db:migrate": "node --import tsx scripts/db.ts migrate",
     "db:seed": "node --import tsx scripts/db.ts seed",
-    "test": "node --import tsx --test tests/bot.test.ts tests/widget.test.ts tests/widget-runtime.test.ts",
+    "test": "node --import tsx --test tests/bot.test.ts tests/widget.test.ts tests/widget-runtime.test.ts tests/password.test.ts",
     "test:api": "node --import tsx --test tests/api.test.ts",
     "test:helpdesk": "node --import tsx --test tests/helpdesk.test.ts",
     "test:migrations": "node --import tsx --test tests/migrations.test.ts",
@@ -27,6 +27,7 @@
   "dependencies": {
     "@fontsource-variable/noto-sans-thai": "5.3.0",
     "@next/env": "16.4.3",
+    "@noble/hashes": "2.4.0",
     "@radix-ui/react-slot": "1.5.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
