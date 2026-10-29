@@ -13,6 +13,9 @@ CRM_REVIEWED_SALE_SOURCE_ORIGIN=https://<authorized-source-staging-host>
 SOCIAL_CHANNELS_ORG_ID=<same-existing-crm-organization-uuid>
 SOCIAL_CHANNELS_OWNER=disabled
 SOCIAL_INBOUND_ENABLED=false
+SOCIAL_MEDIA_ARCHIVE_ENABLED=false
+# When enabled for CRM-owned WhatsApp inbound, the ignored deployment config
+# must include triggers.crons=["* * * * *"]. Disabled releases keep crons=[].
 SOCIAL_LIVE_ENABLED=false
 WHATSAPP_LIVE_ENABLED=false
 LINE_LIVE_ENABLED=false

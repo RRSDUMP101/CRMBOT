@@ -26,6 +26,7 @@ function configure(orgId=scope.orgId){
   Object.assign(process.env,{SOCIAL_CHANNELS_ORG_ID:orgId,LINE_BOT_USER_ID:account('line'),LINE_CHANNEL_ACCESS_TOKEN:'fixture-line-token',WHATSAPP_PHONE_NUMBER_ID:account('whatsapp'),WHATSAPP_ACCESS_TOKEN:'fixture-whatsapp-token',WHATSAPP_API_VERSION:'v24.0',META_PAGE_ID:account('facebook'),META_PAGE_ACCESS_TOKEN:'fixture-facebook-token',META_API_VERSION:'v24.0',CRM_BRIDGE_ORG_ID:orgId,CRM_BRIDGE_SECRET:bridgeSecret,CRM_LEGACY_SOURCE_ORIGIN:'https://source.example.invalid',FILE_STORAGE_LIMIT_BYTES:'104857600'});
 }
 async function attachment(provider='line',ref='fixture-message-id',metadata:Record<string,unknown>={},target=scope){
+  if(provider==='legacy'&&typeof metadata.originalRef==='string')ref=metadata.originalRef;
   const id=randomUUID(),messageId=randomUUID();
   await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,'user','[synthetic attachment]')",[messageId,target.orgId,target.conversationId]);
   await database.query("INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_type,direction,delivery_status,provider_timestamp) VALUES($1,$2,$3,$4,'synthetic-remote','file','in','received',$5)",[target.orgId,messageId,provider,account(provider),new Date().toISOString()]);
@@ -59,9 +60,27 @@ test('LINE fixed-host fetch archives private bytes and future reads use only the
   await assertPrivate(await downloadSocialAttachment(scope.orgId,a.id,failTransport));assert.equal(calls,1);
 });
 
+test('pending reviewed originals cannot race the sender by fetching a provider copy',async()=>{
+  configure();const a=await attachment('whatsapp','synthetic-provider-media',{reviewedSale:true,sha256:checksum(fixtureBytes),size:fixtureBytes.length,mime:'application/pdf'});
+  await assert.rejects(downloadSocialAttachment(scope.orgId,a.id,failTransport),{status:503});assert.equal(await archived(scope.orgId,a.id),undefined);
+});
+test('revocation while the final private object read is pending cancels its response body',async()=>{
+  for(const change of ['removed','owner','parent-removed','parent-owner']){
+    configure();const a=await attachment();await (await downloadSocialAttachment(scope.orgId,a.id,(async()=>fileResponse()) as typeof fetch)).body?.cancel();let cancelled=false;
+    const readBucket=async()=>({put:async()=>{},get:async()=>{
+      if(change==='removed')await database.query("UPDATE social_message_attachments SET removed_at='2026-01-01',storage_state='removed' WHERE org_id=$1 AND id=$2",[scope.orgId,a.id]);
+      else if(change==='owner')await database.query("UPDATE social_message_attachments SET metadata='{\"sourceOwnerOnly\":true}' WHERE org_id=$1 AND id=$2",[scope.orgId,a.id]);
+      else if(change==='parent-owner')await database.query('UPDATE messages SET source_owner_only=1 WHERE org_id=$1 AND id=$2',[scope.orgId,a.messageId]);
+      else await database.query("UPDATE social_message_provenance SET removed_at='2026-01-01' WHERE org_id=$1 AND message_id=$2",[scope.orgId,a.messageId]);
+      return {body:new ReadableStream<Uint8Array>({cancel(){cancelled=true;}})};
+    }});
+    await assert.rejects(downloadSocialAttachment(scope.orgId,a.id,failTransport,false,readBucket),{status:change.includes('removed')?404:403});assert.equal(cancelled,true);
+  }
+});
+
 test('WhatsApp resolves media metadata on fixed Graph host and archives only an allowed CDN URL',async()=>{
   configure();const a=await attachment('whatsapp','provider:whatsapp:fixture-wa-media');const seen:string[]=[];
-  const transport=(async(input,init)=>{seen.push(String(input));assert.equal(init?.redirect,'manual');assert.equal(new Headers(init?.headers).get('authorization'),'Bearer fixture-whatsapp-token');return seen.length===1?Response.json({url:'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=fixture'}):fileResponse();}) as typeof fetch;
+  const transport=(async(input,init)=>{seen.push(String(input));assert.equal(init?.redirect,'manual');assert.equal(new Headers(init?.headers).get('authorization'),'Bearer fixture-whatsapp-token');return seen.length===1?Response.json({url:'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=fixture',file_size:fixtureBytes.length,mime_type:'application/pdf',sha256:checksum(fixtureBytes)}):fileResponse();}) as typeof fetch;
   await assertPrivate(await downloadSocialAttachment(scope.orgId,a.id,transport));
   assert.deepEqual(seen,['https://graph.facebook.com/v24.0/fixture-wa-media','https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=fixture']);
   await assertPrivate(await downloadSocialAttachment(scope.orgId,a.id,failTransport));
@@ -96,7 +115,7 @@ test('redirects, arbitrary hosts, credential URLs and provider-reference injecti
     const a=await attachment('facebook',ref);await assert.rejects(downloadSocialAttachment(scope.orgId,a.id,failTransport));assert.equal(await archived(scope.orgId,a.id),undefined);
   }
   const wa=await attachment('whatsapp','fixture-ssrf');let infoCalls=0;
-  await assert.rejects(downloadSocialAttachment(scope.orgId,wa.id,(async()=>{infoCalls++;return Response.json({url:'https://169.254.169.254/metadata'});}) as typeof fetch),{status:502});assert.equal(infoCalls,1);
+  await assert.rejects(downloadSocialAttachment(scope.orgId,wa.id,(async()=>{infoCalls++;return Response.json({url:'https://169.254.169.254/metadata',file_size:fixtureBytes.length,mime_type:'application/pdf',sha256:checksum(fixtureBytes)});}) as typeof fetch),{status:502});assert.equal(infoCalls,1);
   const injected=await attachment('line','../private?token=anything');await assert.rejects(downloadSocialAttachment(scope.orgId,injected.id,failTransport),{status:409});
 });
 

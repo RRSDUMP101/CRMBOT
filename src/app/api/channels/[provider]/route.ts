@@ -18,6 +18,11 @@ export async function POST(request: Request,context: Context) {
     const provider=socialProvider((await context.params).provider);
     await rateLimit('social-webhook:'+provider,provider === 'whatsapp' ? 600 : 300,60);
     const result=await ingestSocialWebhook(provider,await readSocialBody(request),request.headers,readSocialConfig(provider));
+    if(provider==='whatsapp'&&process.env.SOCIAL_MEDIA_ARCHIVE_ENABLED==='true'&&process.env.RRS_WORKERS==='true'){
+      const {getCloudflareContext}=await import('@opennextjs/cloudflare');
+      const {runMediaArchiveJobs}=await import('@/lib/media-archive-queue');
+      getCloudflareContext().ctx.waitUntil(runMediaArchiveJobs(readSocialConfig(provider).orgId,1).catch(()=>{console.error('[rrs] inbound_media_archive_deferred');}));
+    }
     return Response.json({ok:true,...result},{headers});
   } catch(error) {return failure(error);}
 }

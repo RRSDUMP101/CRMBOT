@@ -1,6 +1,6 @@
 # Implemented chat boundaries and release gates
 
-CRM owns canonical channel identities, conversations, messages, provider commands and delivery events. Sale owns sales records, scheduling, shared AI execution and product knowledge authoring. The companion branches implement an authenticated boundary between them. All new send/inference gates default off. The user's current instruction is **simulation only**: no production deployment, provider message, database export, DNS or webhook change is authorized by these tests.
+CRM owns canonical channel identities, conversations, messages, provider commands and delivery events. Sale owns sales records, scheduling, shared AI execution and product knowledge authoring. The companion branches implement an authenticated boundary between them. All new send/inference gates default off. Provider validation in these branches uses simulated transports; passing tests do not authorize or prove a production webhook or customer-message switch.
 
 ## Implemented boundaries
 
@@ -26,6 +26,7 @@ Source-specific quotation/review/knowledge tools remain in Sale; CRM is the cano
 - An attempted send with no definitive provider outcome stays `unknown`. There is no general operator retry/re-send button: reconciliation requires provider receipts and a reviewed decision. An abort cannot retract a message already accepted by a provider. `submitted` does not mean `delivered`.
 - Source approval and provider dispatch run on different hosts. Repeated fresh checks and an in-flight monitor reduce revocation races; they are not an atomic distributed lock. Monitor network checks can take up to eight seconds. The two owner flags likewise cannot enforce exclusive ownership against a mistaken dual-enable configuration.
 - Snapshot captures are bounded (7 MiB snapshot, 8 MiB request, 20,000 records). Larger actual workspaces need reviewed chunking before export. Provider media may expire; every original private byte/hash and permission must be reconciled in staging.
+- Native WhatsApp media now has a durable bounded archive queue and explicit scheduler gate; historical imports remain inert. Newly reviewed outgoing files are archived from verified source bytes before customer media send. These copies do not prove all old files were archived. See [archive behavior and activation](media-archive-queue.md).
 
 ## Required before a production switch
 

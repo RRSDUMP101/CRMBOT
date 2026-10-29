@@ -47,7 +47,7 @@ async function handle(request: Request) {
     }
     if (url.search) throw new BridgeError(400, 'Unexpected bridge query');
     if(path==='domestic-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-domestic-messages')).acceptDomestic(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','source'])));
-    if(path==='reviewed-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-sale-messages')).acceptReviewedSale(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','template','source'])));
+    if(path==='reviewed-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-sale-messages')).acceptReviewedSale(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','template','parts','source'])));
     if(path==='approved-commands'&&request.method==='POST'){
       const {acceptApprovedAi}=await import('@/lib/approved-ai');
       return json(await acceptApprovedAi(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','actorId','provider','accountId','remoteId','text','source'])));

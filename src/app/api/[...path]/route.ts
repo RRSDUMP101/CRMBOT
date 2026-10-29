@@ -60,6 +60,10 @@ async function handle(request:NextRequest) {
       if(path.join('/')==='admin/events'&&method==='GET')return await realtimeResponse(request,'staff');
       if(path[1]==='social-attachments'&&path.length===3&&method==='GET')return await downloadSocialAttachment(staff.orgId,uuid(path[2]),fetch,staff.role==='Admin');
       if(method==='POST')await rateLimit(`staff:${staff.orgId}:${staff.id}`,120,60);
+      if(path.join('/')==='admin/media-archive'&&method==='GET')return json(await (await import('@/lib/media-archive-queue')).mediaArchiveStatus(staff));
+      if(path.join('/')==='admin/media-archive/retry'&&method==='POST'){
+        const body=await readJson(request);fields(body,['attachmentId']);return json(await (await import('@/lib/media-archive-queue')).retryMediaArchive(staff,uuid(body.attachmentId)));
+      }
       if(path[1]==='leads'&&path.length===4&&path[3]==='files') {
         if(method==='GET')return json(await listFiles(staff,uuid(path[2])));
         if(method==='POST'){await rateLimit(`upload:${staff.orgId}:${staff.id}`,20,3600);return json(await uploadFile(staff,uuid(path[2]),request),201);}

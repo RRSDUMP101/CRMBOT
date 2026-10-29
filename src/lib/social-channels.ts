@@ -249,7 +249,11 @@ async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Even
   const messageId=randomUUID(), seq=event.echo ? null : Number(conversation.customer_message_seq)+1;
   await c.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,customer_seq,created_at) VALUES($1,$2,$3,$4,$5,'complete',$6,$7)",[messageId,config.orgId,identity.conversation_id,event.echo ? 'agent' : 'user',event.text!,seq,event.at]);
   await c.query('INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_message_id,provider_type,direction,delivery_status,provider_timestamp,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[config.orgId,messageId,config.provider,config.accountId,event.remote,event.mid!,event.messageType!,event.echo ? 'out' : 'in',event.echo ? 'sent' : 'received',event.at,JSON.stringify(event.metadata || {})]);
-  for(const attachment of event.attachments || []) await c.query('INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),config.orgId,messageId,config.provider,config.accountId,attachment.type,attachment.ref,JSON.stringify(attachment.metadata)]);
+  for(const attachment of event.attachments || []) {
+    const attachmentId=randomUUID(),archive=config.provider==='whatsapp'&&!event.echo;
+    await c.query('INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[attachmentId,config.orgId,messageId,config.provider,config.accountId,attachment.type,attachment.ref,JSON.stringify({...attachment.metadata,...archive?{archiveState:'queued'}:{}})]);
+    if(archive)await (await import('./media-archive-queue')).enqueueInboundMediaArchive(c,config,attachmentId);
+  }
   const optOut=/^(stop|unsubscribe|หยุดติดต่อ|หยุด|ยกเลิกการติดต่อ)(?:$|\s|[.!])/i.test(event.text!.trim());
   if(optOut) await c.query('UPDATE social_identities SET opt_out=1,updated_at=$3 WHERE org_id=$1 AND id=$2',[config.orgId,identity.id,time]);
   await c.query(`UPDATE conversations SET customer_message_seq=customer_message_seq+$3,first_customer_at=CASE WHEN $3=1 THEN COALESCE(first_customer_at,$4) ELSE first_customer_at END,updated_at=$5 WHERE org_id=$1 AND id=$2`,[config.orgId,identity.conversation_id,event.echo ? 0 : 1,event.at,time]);

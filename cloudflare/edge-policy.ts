@@ -1,3 +1,15 @@
+/** The Cloudflare ingress URL is authoritative; caller forwarding headers are not. */
+export function applicationRequest(request: Request): Request {
+  const url = new URL(request.url), headers = new Headers(request.headers);
+  headers.set('Host', url.host);
+  headers.set('X-Forwarded-Host', url.host);
+  headers.set('X-Forwarded-Proto', url.protocol.slice(0, -1));
+  headers.set('X-Forwarded-Port', url.port || (url.protocol === 'https:' ? '443' : '80'));
+  headers.delete('Forwarded');
+  headers.delete('x-middleware-subrequest');
+  return new Request(request, { headers });
+}
+
 export function canonicalRedirect(request: Request): Response | null {
   const url = new URL(request.url);
   if (url.hostname === 'www.rrs-crm-terminal.com') {

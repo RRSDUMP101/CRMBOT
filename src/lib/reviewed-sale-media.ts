@@ -3,6 +3,7 @@ import {ApiError} from './errors';
 import {database,transaction,type Executor,type Row} from './db';
 import {signBridgeRequest} from './bridge-protocol';
 import {readSocialConfig,type SocialChannelConfig} from './social-channels';
+import {archiveSocialAttachmentBytes} from './social-media';
 
 export type ReviewedPrivateFile={kind:'private-file';fileId:string;sourceRecordKind:'media'|'quote';sourceRecordId:string;sha256:string;size:number;mime:string;name:string;ownerOnly?:true};
 export type ReviewedSalePart={kind:'text';text:string}|ReviewedPrivateFile;
@@ -165,11 +166,15 @@ export async function dispatchReviewedSaleMultipart(orgId:string,commandId:strin
     effect=true;const uploaded=await transport('https://graph.facebook.com/'+config.apiVersion+'/'+config.accountId+'/media',{method:'POST',headers:{Authorization:'Bearer '+config.accessToken},body:form,redirect:'manual',signal:abort.signal});
     if(!uploaded.ok){providerRejected=uploaded.status>=400&&uploaded.status<500;await uploaded.body?.cancel();throw new ApiError(providerRejected?400:503,'provider_media_upload_rejected');}
     const data=await providerJson(uploaded);if(typeof data.id!=='string'||!/^\d{1,200}$/.test(data.id))throw new ApiError(503,'provider_media_id_missing');
+    // The upload receipt is known, but no customer media message has been attempted yet.
+    effect=false;
     await transaction(orgId,async c=>{
      const current=(await partRows(c,orgId,commandId))[index];if(current.attempt_id!==attempt||current.status!=='preparing')throw new ApiError(409,'Reviewed part claim changed');
      await c.query('UPDATE crm_reviewed_sale_parts SET provider_media_id=$4,updated_at=$5 WHERE org_id=$1 AND outbound_command_id=$2 AND part_index=$3',[orgId,commandId,index,data.id,now()]);
      await c.query("INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata) VALUES($1,$2,$3,'whatsapp',$4,$5,$6,$7)",[attempt,orgId,claim.message_id,config.accountId,formats[part.mime].type,data.id,JSON.stringify({name:part.name,mime:part.mime,size:part.size,sha256:part.sha256,deliveryStatus:'preparing',sourceOwnerOnly:!!part.ownerOnly,reviewedSale:{outboundCommandId:commandId,partIndex:index}})]);
     });
+    // Preserve the exact reviewed source copy before sending its provider media ID. A CDN may later expire or transcode it.
+    await archiveSocialAttachmentBytes(orgId,attempt,{bytes,type:part.mime,ownerOnly:!!part.ownerOnly},{allowOwnerOnly:!!part.ownerOnly,guard:assertCurrent});
     const type=formats[part.mime].type;body={type,[type]:{id:data.id,...type==='document'?{filename:part.name}:{}}};effect=false;
    }
    await assertCurrent();await transaction(orgId,async c=>{await options.guard(c,claim,config,claim.control_epoch);await c.query("UPDATE crm_reviewed_sale_parts SET status='sending',updated_at=$4 WHERE org_id=$1 AND outbound_command_id=$2 AND part_index=$3 AND attempt_id=$5 AND status='preparing'",[orgId,commandId,index,now(),attempt]);});

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {writeFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import path from 'node:path';
@@ -8,6 +8,8 @@ import {database,closeDatabase} from '../src/lib/db';
 import {applyLegacyPlan,canonicalLegacyTimestamp,handleLegacyImport,legacyId,planLegacyImport,type LegacySnapshot} from '../src/lib/legacy-chat-import';
 import {readBridgeEvents} from '../src/lib/chat-bridge';
 import {inbox,markConversationRead} from '../src/lib/helpdesk';
+import {downloadSocialAttachment} from '../src/lib/social-media';
+import {verifyBridgeRequest} from '../src/lib/bridge-protocol';
 
 const org=randomUUID(),other=randomUUID(),time='2025-01-02T03:04:05.123456Z';
 const base=(id:string,kind:string,values:Record<string,unknown>={})=>({id,kind,created:time,updated:time,...values});
@@ -27,6 +29,16 @@ before(async()=>{process.env.DEMO_MODE='true';process.env.AI_PROVIDER='disabled'
 after(closeDatabase);
 async function complete(snapshot:LegacySnapshot,options:Record<string,unknown>={},importOrg=org){let cursor=0;for(let round=0;round<100;round++){const result=await handleLegacyImport(importOrg,{snapshot,options,dryRun:false,cursor,limit:2}) as any;cursor=result.progress.cursor;if(result.progress.complete)return result;}throw Error('Import did not finish');}
 async function freshOrg(){const id=randomUUID();await database.query('INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)',[id,id,'Synthetic delta fixture']);return id;}
+
+test('imported LINE local files use signed source bytes and never enqueue native archival',async()=>{
+  const tenant=await freshOrg(),snapshot=domestic();snapshot.snapshotId='line-local-file';
+  snapshot.records.find(r=>r.id==='incoming-1')!.attachments=['/api/rrs/files?id=synthetic-line-file&mode=domestic'];await complete(snapshot,{},tenant);
+  const row=(await database.query("SELECT * FROM social_message_attachments WHERE org_id=$1 AND provider='line' AND provider_ref LIKE '/api/rrs/files%'",[tenant])).rows[0];assert.ok(row);
+  const content=Buffer.from('Synthetic retained LINE file'),secret='synthetic-line-source-bridge-secret-32chars';Object.assign(process.env,{CRM_BRIDGE_ORG_ID:tenant,CRM_BRIDGE_SECRET:secret,CRM_LEGACY_SOURCE_ORIGIN:'https://source.example.invalid'});
+  let calls=0;const transport=(async(input,init)=>{calls++;await verifyBridgeRequest(new Request(String(input),init),{orgId:tenant,secret});assert.equal(new URL(String(input)).pathname,'/api/rrs/chat-migration/files');return new Response(content,{headers:{'Content-Type':'text/plain','X-File-SHA256':createHash('sha256').update(content).digest('hex')}});}) as typeof fetch;
+  await assert.rejects(downloadSocialAttachment(tenant,row.id,transport),{status:403});assert.equal(calls,0);assert.equal(await(await downloadSocialAttachment(tenant,row.id,transport,true)).text(),content.toString());
+  assert.equal((await database.query('SELECT count(*) n FROM social_media_archive_jobs WHERE org_id=$1',[tenant])).rows[0].n,0);
+});
 
 test('pure planner preserves identities/times, restricts unknown/cancelled messages and marks unresolved files',()=>{
   const plan=planLegacyImport(domestic(),org);assert.equal(plan.valid,true);assert.equal(plan.counts.message,4);assert.equal(plan.counts.lead,1);
@@ -199,6 +211,13 @@ test('auxiliary evidence is immutable and cached WhatsApp media replaces expired
   const attachments=(await database.query('SELECT provider_ref,storage_state FROM social_message_attachments WHERE org_id=$1',[tenant])).rows;
   assert.equal(attachments.find(row=>row.provider_ref==='provider:whatsapp:80001')!.storage_state,'removed');
   assert.equal(attachments.find(row=>row.provider_ref==='/api/rrs/files?id=wa-aux-inbound&mode=live')!.storage_state,'provider_reference');
+  const localFile=(await database.query("SELECT id FROM social_message_attachments WHERE org_id=$1 AND provider_ref LIKE '/api/rrs/files%'",[tenant])).rows[0];
+  const bytes=Buffer.from('Synthetic retained WhatsApp file'),secret='synthetic-only-source-bridge-secret-32chars';
+  Object.assign(process.env,{CRM_BRIDGE_ORG_ID:tenant,CRM_BRIDGE_SECRET:secret,CRM_LEGACY_SOURCE_ORIGIN:'https://source.example.invalid'});
+  const transport=(async(input,init)=>{const url=String(input);assert.equal(new URL(url).pathname,'/api/rrs/chat-migration/files');await verifyBridgeRequest(new Request(url,init),{orgId:tenant,secret});return new Response(bytes,{headers:{'Content-Type':'text/plain','X-File-SHA256':createHash('sha256').update(bytes).digest('hex')}});}) as typeof fetch;
+  await assert.rejects(downloadSocialAttachment(tenant,localFile.id,transport),{status:403});
+  assert.equal(await(await downloadSocialAttachment(tenant,localFile.id,transport,true)).text(),bytes.toString());
+  assert.equal((await database.query('SELECT count(*) AS n FROM social_media_archive_jobs WHERE org_id=$1',[tenant])).rows[0].n,0);
   assert.equal((await database.query('SELECT count(*) AS n FROM social_outbound_commands WHERE org_id=$1',[tenant])).rows[0].n,0);
   await assert.rejects(database.query('UPDATE crm_legacy_auxiliary SET raw_json=$2 WHERE org_id=$1',[tenant,'{}']),/immutable/);
   const stale=structuredClone(next);stale.snapshotId='stale-auxiliary';stale.tailSequence=100;await assert.rejects(handleLegacyImport(tenant,{snapshot:stale,options:{...options,allowSourceUpdates:true},dryRun:false}),{status:409});
