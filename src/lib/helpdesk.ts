@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
+import { messageOrder } from './message-order';
 
-const UNREAD="MAX(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)";
+const unreadCount=(staff:Staff)=>staff.role==='Admin'?"MAX(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)":"(SELECT count(*) FROM messages unread_message WHERE unread_message.org_id=c.org_id AND unread_message.conversation_id=c.id AND unread_message.role='user' AND unread_message.source_owner_only=0 AND unread_message.customer_seq>COALESCE(r.last_read_seq,0))";
+const visibleMessage=(staff:Staff,alias:string)=>staff.role==='Admin'?'':` AND ${alias}.source_owner_only=0`;
 const READ_JOIN='LEFT JOIN conversation_reads r ON r.org_id=c.org_id AND r.conversation_id=c.id AND r.member_id=$2';
 
 async function event(connection:Executor,staff:Staff,action:string,entityId:string,metadata:Row={}) {
@@ -10,6 +12,7 @@ async function event(connection:Executor,staff:Staff,action:string,entityId:stri
 }
 
 export async function inboxSummary(staff:Staff,connection:Executor=database) {
+  const UNREAD=unreadCount(staff);
   const result=await connection.query(`SELECT
     count(*) FILTER(WHERE c.status!='resolved') AS "all",
     count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id=$2) AS mine,
@@ -34,6 +37,7 @@ function cursorValue(value:string) {
 }
 
 export async function inbox(staff:Staff,url:URL) {
+  const UNREAD=unreadCount(staff);
   for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
   const query=str(url.searchParams.get('q'),'คำค้น',200);
   const view=oneOf(url.searchParams.get('view')||'all',['all','mine','unassigned','waiting','closed','unread'],'กล่องข้อความ');
@@ -55,7 +59,7 @@ export async function inbox(staff:Staff,url:URL) {
     // D1 limits LIKE patterns to 50 bytes, too short for normal Thai names.
     // INSTR keeps search literal (including % and _) without truncation.
     const term=bind(query);
-    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent') AND instr(lower(search_message.content),lower(${term}))>0))`);
+    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${visibleMessage(staff,'search_message')} AND instr(lower(search_message.content),lower(${term}))>0))`);
   }
   const totalParams=[...params];const totalWhere=where.join(' AND ');
   const cursor=url.searchParams.get('cursor');
@@ -66,8 +70,8 @@ export async function inbox(staff:Staff,url:URL) {
     const result=await connection.query(`SELECT c.id,c.lead_id,c.status,c.version,c.assignee_id,c.created_at,c.updated_at,l.name AS lead_name,l.tags,
       c.updated_at AS cursor_updated_at,
       ${UNREAD} AS unread_count,
-      (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user' ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,
-      (SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent') ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message
+      (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user'${visibleMessage(staff,'m')} ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,
+      (SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent')${visibleMessage(staff,'m')} ORDER BY ${messageOrder('m',true)} LIMIT 1) AS last_message
       FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${where.join(' AND ')} ORDER BY c.updated_at DESC,c.id DESC LIMIT ${pageLimit}`,params);
     const pageRows=result.rows.slice(0,limit);const last=pageRows.at(-1);
     const items=pageRows.map(row=>{const item=camel(row);delete item.cursorUpdatedAt;return item;});
@@ -79,7 +83,7 @@ export async function inbox(staff:Staff,url:URL) {
 export async function markConversationRead(staff:Staff,id:string,body:Record<string,unknown>) {
   uuid(id);fields(body,['throughMessageId']);const messageId=uuid(body.throughMessageId);
   await transaction(staff.orgId, async connection=>{
-    const message=(await connection.query("SELECT customer_seq FROM messages WHERE org_id=$1 AND conversation_id=$2 AND id=$3 AND role='user'",[staff.orgId,id,messageId])).rows[0];
+    const message=(await connection.query(`SELECT m.customer_seq FROM messages m WHERE m.org_id=$1 AND m.conversation_id=$2 AND m.id=$3 AND m.role='user'${visibleMessage(staff,'m')}`,[staff.orgId,id,messageId])).rows[0];
     if(!message||!message.customer_seq)throw new ApiError(404,'ไม่พบข้อความลูกค้าในบทสนทนานี้');
     await connection.query("INSERT INTO conversation_reads(org_id,conversation_id,member_id,last_read_seq) VALUES($1,$2,$3,$4)\n      ON CONFLICT(org_id,conversation_id,member_id) DO UPDATE SET last_read_seq=MAX(conversation_reads.last_read_seq,excluded.last_read_seq),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')",[staff.orgId,id,staff.id,message.customer_seq]);
   }, staff);

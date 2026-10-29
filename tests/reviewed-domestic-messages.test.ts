@@ -1,0 +1,43 @@
+/** Production handlers against isolated SQLite and injected signed source/provider fixtures only. */
+import assert from 'node:assert/strict';
+import {randomUUID,createHmac} from 'node:crypto';
+import {before,after,test} from 'node:test';
+import {database,closeDatabase} from '../src/lib/db';
+import {acceptDomestic,domesticStatus,parseDomestic,type DomesticEnvelope} from '../src/lib/reviewed-domestic-messages';
+import {ingestSocialWebhook,readSocialConfig,socialConfigFingerprint,dispatchSocialReply} from '../src/lib/social-channels';
+import {verifyBridgeRequest} from '../src/lib/bridge-protocol';
+let org:string,actor:string,number=0,sends=0,proofs=0,valid=true,outcome=200;
+const transport=(async(input,init)=>{
+ const u=new URL(String(input));if(u.origin==='https://sale.test'){
+  assert.equal(u.pathname,'/api/rrs/crm/domestic/validate');const {body}=await verifyBridgeRequest(new Request(input,init),{orgId:org,secret:process.env.CRM_BRIDGE_SECRET!});proofs++;if(!valid)return Response.json({error:'revoked'},{status:409});const p=JSON.parse(body);return Response.json({version:1,valid:true,orgId:org,commandId:p.commandId,payloadHash:p.payloadHash,nonce:p.nonce,sourceRevision:10,checkedAt:Date.now()});
+ }
+ assert.ok(['https://api.line.me','https://graph.facebook.com'].includes(u.origin));assert.equal(init?.redirect,'manual');sends++;
+ if(outcome!==200)return Response.json({error:'fixture-only'},{status:outcome});
+ return u.origin==='https://api.line.me'?Response.json({sentMessages:[{id:'fixture-send-'+sends}]}):Response.json({message_id:'fixture-send-'+sends});
+}) as typeof fetch;
+before(async()=>{
+ org=randomUUID();actor=randomUUID();Object.assign(process.env,{DEMO_MODE:'true',D1_LOCAL_DIR:'.data/domestic-'+randomUUID(),CRM_BRIDGE_ENABLED:'true',CRM_BRIDGE_ORG_ID:org,CRM_BRIDGE_SECRET:'synthetic-bridge-secret-never-live-ever',CRM_BRIDGE_ALLOWED_MEMBER_IDS:JSON.stringify([actor]),CRM_DOMESTIC_REVIEW_ENABLED:'true',CRM_DOMESTIC_SOURCE_ORIGIN:'https://sale.test',SOCIAL_CHANNELS_ORG_ID:org,SOCIAL_CHANNELS_OWNER:'crm',SOCIAL_INBOUND_ENABLED:'true',SOCIAL_LIVE_ENABLED:'true',DOMESTIC_LIVE_ENABLED:'true',LINE_LIVE_ENABLED:'true',LINE_BOT_USER_ID:'UfixtureBot',LINE_CHANNEL_ACCESS_TOKEN:'fixture-not-real',LINE_CHANNEL_SECRET:'fixture-secret',META_PAGE_ID:'2234567890',META_PAGE_ACCESS_TOKEN:'fixture-not-real',META_APP_SECRET:'fixture-secret',META_API_VERSION:'v24.0'});
+ await database.query('INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)',[org,org,'Domestic fixture']);await database.query("INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,'Fixture',$3,'not-a-password','Agent')",[actor,org,actor+'@example.invalid']);
+});after(closeDatabase);
+async function fixture(provider:'line'|'facebook'='line',age=1000):Promise<DomesticEnvelope>{
+ number++;const c=readSocialConfig(provider),remote=provider==='line'?'Ufixture'+number:'338888'+number,at=Date.now()-age,mid='fixture-in-'+number;
+ const payload=provider==='line'?{destination:c.accountId,events:[{webhookEventId:'evt-'+mid,type:'message',timestamp:at,source:{type:'user',userId:remote},message:{id:mid,type:'text',text:'คำถามทดสอบ'}}]}:{object:'page',entry:[{id:c.accountId,messaging:[{sender:{id:remote},recipient:{id:c.accountId},timestamp:at,message:{mid,text:'คำถามทดสอบ'}}]}]};
+ const bytes=new TextEncoder().encode(JSON.stringify(payload)),signature=createHmac('sha256',c.secret).update(bytes).digest(provider==='line'?'base64':'hex');await ingestSocialWebhook(provider,bytes,new Headers({[provider==='line'?'x-line-signature':'x-hub-signature-256']:provider==='line'?signature:'sha256='+signature}),c);
+ const identity=(await database.query('SELECT * FROM social_identities WHERE org_id=$1 AND remote_id=$2',[org,remote])).rows[0];await database.query("UPDATE conversations SET status='human_active',assignee_id=$3,version=version+1 WHERE org_id=$1 AND id=$2",[org,identity.conversation_id,actor]);await database.query("UPDATE social_channel_controls SET send_enabled=1,emergency_stop=0,send_mode='live',verified_at=$4,verification_fingerprint=$5,verification_expires_at=$6 WHERE org_id=$1 AND provider=$2 AND account_id=$3",[org,provider,c.accountId,new Date().toISOString(),socialConfigFingerprint(c),new Date(Date.now()+86400000).toISOString()]);
+ const conv=(await database.query('SELECT * FROM conversations WHERE org_id=$1 AND id=$2',[org,identity.conversation_id])).rows[0];return {version:1,kind:'reviewed-domestic-message',commandId:randomUUID(),conversationId:conv.id,expectedVersion:conv.version,expectedCustomerSeq:conv.customer_message_seq,actorId:actor,provider,accountId:c.accountId,remoteId:remote,text:'ข้อความที่พนักงานตรวจแล้ว',source:{system:'rrs-sale-office',workspace:'domestic',messageId:randomUUID(),threadId:randomUUID(),generation:4,messageHash:'1'.repeat(64),knowledgeHash:'2'.repeat(64),reviewedBy:'fixture-owner'}};
+}
+test('LINE and Facebook reviewed messages use canonical CRM history and send exactly once under retries',async()=>{
+ for(const provider of['line','facebook'] as const){const p=await fixture(provider),before=sends;await Promise.all([acceptDomestic(p,{fetch:transport}),acceptDomestic(p,{fetch:transport})]);assert.equal((await domesticStatus(p.commandId)).status,'submitted');assert.equal(sends,before+1);await acceptDomestic(p,{fetch:transport});assert.equal(sends,before+1);assert.equal((await database.query("SELECT COUNT(*) AS n FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role='agent'",[org,p.conversationId])).rows[0].n,1);await assert.rejects(acceptDomestic({...p,text:'changed'},{fetch:transport}),{status:409});}
+});
+test('revoked knowledge proof, stale generation, opt-out and assignment prevent provider sends',async()=>{
+ const before=sends,p=await fixture(),queued=await acceptDomestic(p,{fetch:transport,dispatch:false});valid=false;await assert.rejects(dispatchSocialReply(org,queued.outboundCommandId,{fetch:transport}),{status:409});valid=true;
+ await database.query('UPDATE conversations SET customer_message_seq=customer_message_seq+1 WHERE org_id=$1 AND id=$2',[org,p.conversationId]);await assert.rejects(dispatchSocialReply(org,queued.outboundCommandId,{fetch:transport}),{status:409});
+ const out=await fixture('facebook');await database.query('UPDATE social_identities SET opt_out=1 WHERE org_id=$1 AND conversation_id=$2',[org,out.conversationId]);await assert.rejects(acceptDomestic(out,{fetch:transport}),{status:409});const moved=await fixture();await database.query("UPDATE conversations SET status='waiting_human' WHERE org_id=$1 AND id=$2",[org,moved.conversationId]);await assert.rejects(acceptDomestic(moved,{fetch:transport}),{status:409});assert.equal(sends,before);
+});
+test('current staff role/allowlist, provider account and response windows remain enforced',async()=>{
+ const before=sends,p=await fixture(),queued=await acceptDomestic(p,{fetch:transport,dispatch:false});await database.query("UPDATE members SET active=0 WHERE org_id=$1 AND id=$2",[org,actor]);await assert.rejects(dispatchSocialReply(org,queued.outboundCommandId,{fetch:transport}),{status:403});await database.query("UPDATE members SET active=1 WHERE org_id=$1 AND id=$2",[org,actor]);process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS='[]';await assert.rejects(dispatchSocialReply(org,queued.outboundCommandId,{fetch:transport}),{status:403});process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS=JSON.stringify([actor]);
+ for(const provider of['line','facebook'] as const){const old=await fixture(provider,8*86400000),q=await acceptDomestic(old,{fetch:transport,dispatch:false});await assert.rejects(dispatchSocialReply(org,q.outboundCommandId,{fetch:transport}),{status:409});}
+ await assert.rejects(acceptDomestic({...await fixture(),accountId:'Uwrong'},{fetch:transport}),{status:409});assert.equal(sends,before);
+});
+test('ambiguous send stays unknown across repeat actions and retries',async()=>{const p=await fixture(),before=sends;outcome=503;const accepted=await acceptDomestic(p,{fetch:transport});assert.equal(accepted.status,'unknown');await acceptDomestic(p,{fetch:transport});await dispatchSocialReply(org,accepted.outboundCommandId,{fetch:transport});assert.equal(sends,before+1);outcome=200;});
+test('strict contract and default-off configuration reject arbitrary fields and scope',async()=>{const p=await fixture();assert.throws(()=>parseDomestic({...p,source:{...p.source,workspace:'live'}}),{status:400});assert.throws(()=>parseDomestic({...p,attachments:['https://arbitrary.invalid']}),{status:400});process.env.CRM_DOMESTIC_REVIEW_ENABLED='false';await assert.rejects(acceptDomestic(p,{fetch:transport}),{status:503});process.env.CRM_DOMESTIC_REVIEW_ENABLED='true';assert.ok(proofs>=3);});

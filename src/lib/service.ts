@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
+import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
+import { messageOrder } from './message-order';
 
 const settingsDefaults = {botName:'RRS ผู้ช่วย AI',personality:'สุภาพ กระชับ ถามครั้งละหนึ่งเรื่อง',businessHours:'ทีมงานจะยืนยันเวลาติดต่อกลับ',handoffRule:'ราคา สต็อก ส่วนลด และนัดหมายให้ทีมงานยืนยัน',aiEnabled:true};
 const rows = (items: Row[]) => items.map(camel);
@@ -44,11 +46,12 @@ export async function createVisitor(context:'web'|'widget'='web'): Promise<{toke
   });
 }
 
-export async function conversationDetail(orgId:string,id:string,internal=false) {
+export async function conversationDetail(orgId:string,id:string,internal=false,admin=false) {
   const conversation=await scopedConversation(database,orgId,id);
   const lead=await scopedLead(database,orgId,conversation.lead_id);
-  const messages=await database.query(`SELECT * FROM messages WHERE org_id=$1 AND conversation_id=$2 ${internal?'':"AND role IN ('user','assistant','agent')"} ORDER BY created_at,id`,[orgId,id]);
-  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(messageView)};
+  const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
+  const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
+  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
 export async function visitorDetail(visitor: Visitor) {
   const detail=await conversationDetail(visitor.orgId,visitor.conversationId);
@@ -110,11 +113,19 @@ export async function appointmentConfirm(visitor:Visitor,body:Record<string,unkn
   });
 }
 
-export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>) {
+export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>,bridgeCommand?:{id:string;hash:string}) {
   uuid(id);fields(body,['text']);
   if(!['claim','release','reply','note','resolve','summarize'].includes(action))throw new ApiError(404,'ไม่พบคำสั่ง');
-  await transaction(staff.orgId, async connection=>{
+  const queuedCommand=await transaction(staff.orgId, async connection=>{
+    if(bridgeCommand){
+      const prior=(await connection.query('SELECT payload_hash,actor_id,conversation_id FROM crm_bridge_commands WHERE org_id=$1 AND command_id=$2',[staff.orgId,bridgeCommand.id])).rows[0];
+      if(prior){
+        if(prior.payload_hash!==bridgeCommand.hash||prior.actor_id!==staff.id||prior.conversation_id!==id)throw new ApiError(409,'รหัสคำสั่งนี้ถูกใช้กับข้อมูลอื่นแล้ว');
+        return;
+      }
+    }
     const conversation=await scopedConversation(connection,staff.orgId,id,true);
+    let outboundCommand:string|null=null;
     if(action==='claim') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id)throw new ApiError(409,'มีเจ้าหน้าที่รับผิดชอบแล้ว กรุณาประสานงานก่อนรับช่วง');
       await connection.query("UPDATE conversations SET status='human_active',assignee_id=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,staff.id]);
@@ -125,15 +136,20 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
     } else if(action==='reply'||action==='note') {
       const text=str(body.text,action==='note'?'บันทึก':'ข้อความ',6000,true);
       if(action==='reply'&&(conversation.status!=='human_active'||conversation.assignee_id!==staff.id))throw new ApiError(409,'กรุณารับช่วงบทสนทนาก่อนตอบลูกค้า');
-      await connection.query('INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,$4,$5)',[randomUUID(),staff.orgId,id,action==='reply'?'agent':'note',text]);
+      const messageId=randomUUID();
+      await connection.query('INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,$4,$5)',[messageId,staff.orgId,id,action==='reply'?'agent':'note',text]);
+      if(action==='reply')outboundCommand=(await enqueueSocialReply(connection,staff.orgId,id,messageId,text)).commandId;
       await connection.query(`UPDATE conversations SET updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')${action==='reply'?",first_agent_at=COALESCE(first_agent_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))":''} WHERE org_id=$1 AND id=$2`,[staff.orgId,id]);
     } else if(action==='summarize') {
       const lead=await scopedLead(connection,staff.orgId,conversation.lead_id);
       await connection.query("UPDATE leads SET summary=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,lead.id,JSON.stringify(summarizeFacts(lead.facts))]);
     }
     await audit(connection,staff.orgId,staff.id,`conversation.${action}`,id,{previousStatus:conversation.status,previousAssigneeId:conversation.assignee_id,...(action==='claim'?{nextStatus:'human_active',nextAssigneeId:staff.id}:action==='release'?{nextStatus:'bot_active'}:action==='resolve'?{nextStatus:'resolved'}:{})});
+    if(bridgeCommand)await connection.query('INSERT INTO crm_bridge_commands(org_id,command_id,payload_hash,actor_id,conversation_id,result_json) VALUES($1,$2,$3,$4,$5,$6)',[staff.orgId,bridgeCommand.id,bridgeCommand.hash,staff.id,id,JSON.stringify({ok:true,action})]);
+    return outboundCommand;
   }, staff);
-  return conversationDetail(staff.orgId,id,true);
+  if(queuedCommand)await dispatchSocialReply(staff.orgId,queuedCommand).catch(()=>{console.error('[rrs] social_dispatch_deferred');});
+  return conversationDetail(staff.orgId,id,true,staff.role==='Admin');
 }
 
 export async function adminAction(staff:Staff,body:Record<string,unknown>) {
@@ -247,7 +263,7 @@ function dateRange(url:URL) {
 export async function snapshot(staff:Staff,url:URL) {
   const range=dateRange(url);const p=[staff.orgId,range.start,range.end];
   const results=await Promise.all([
-    database.query(`SELECT c.*,l.name AS lead_name,l.tags,(SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role!='note' ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id WHERE c.org_id=$1 ORDER BY c.updated_at DESC LIMIT 1000`,[staff.orgId]),
+    database.query(`SELECT c.*,l.name AS lead_name,l.tags,(SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent') AND ($2=1 OR m.source_owner_only=0) ORDER BY ${messageOrder('m',true)} LIMIT 1) AS last_message FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id WHERE c.org_id=$1 ORDER BY c.updated_at DESC LIMIT 1000`,[staff.orgId,staff.role==='Admin'?1:0]),
     database.query('SELECT * FROM leads WHERE org_id=$1 ORDER BY updated_at DESC LIMIT 2000',[staff.orgId]),
     database.query('SELECT * FROM tasks WHERE org_id=$1 ORDER BY due_at LIMIT 2000',[staff.orgId]),
     database.query('SELECT * FROM knowledge WHERE org_id=$1 ORDER BY updated_at DESC',[staff.orgId]),
@@ -261,7 +277,8 @@ export async function snapshot(staff:Staff,url:URL) {
   const count=results[6].rows[0];const usage=results[9].rows[0];const stages:Record<string,number>={New:0,Qualified:0,'Follow-up':0,Won:0,Lost:0};
   for(const row of results[7].rows)stages[row.stage]=row.total;
   const nullable=(value:unknown)=>value===null||value===undefined?null:Number(value);
-  return {user:publicMember(staff),conversations:results[0].rows.map(conversationView),leads:results[1].rows.map(leadView),tasks:rows(results[2].rows),knowledge:rows(results[3].rows),members:rows(results[4].rows),settings:await orgSettings(staff.orgId),audit:rows(results[5].rows),integrations:{sheets:'not_connected',drive:'not_connected',channels:'website_only'},
+  const visibleAudit=results[5].rows.filter(row=>staff.role==='Admin'||!/^whatsapp_consent\.|^social_channel\./.test(String(row.action)));
+  return {user:publicMember(staff),conversations:results[0].rows.map(conversationView),leads:results[1].rows.map(leadView),tasks:rows(results[2].rows),knowledge:rows(results[3].rows),members:rows(results[4].rows),settings:await orgSettings(staff.orgId),audit:rows(visibleAudit),integrations:{sheets:'not_connected',drive:'not_connected',channels:'see_channel_settings'},
     metrics:{conversations:count.total,newLeads:Object.values(stages).reduce((a,b)=>a+b,0),stages,dueTasks:results[8].rows[0].total,handoffRate:count.total?count.handed_off/count.total:0,aiFirstResponseMs:nullable(count.ai_ms),humanFirstResponseMs:nullable(count.human_ms),inputTokens:nullable(usage.input_tokens),outputTokens:nullable(usage.output_tokens),estimatedCostUsd:nullable(usage.cost),timezone:'Asia/Bangkok'},range:{from:range.from,to:range.to},
     metricDefinitions:{cohort:'บทสนทนาและลีดที่สร้างในช่วงวันที่กรุงเทพฯ; Pipeline แสดงสถานะปัจจุบันของกลุ่มนี้',handoff:'บทสนทนาในช่วงวันที่ที่เคยส่งต่ออย่างน้อยหนึ่งครั้ง / บทสนทนาทั้งหมดในช่วงวันที่',aiFirstResponse:'เวลาจากข้อความลูกค้าแรกถึงส่วนข้อความ AI แรกที่ส่งได้',humanFirstResponse:'เวลาจากส่งต่อครั้งแรกถึงคำตอบสาธารณะแรกของพนักงาน; ไม่รวมบันทึกภายใน',dueTasks:'งานที่ยังเปิด รอยืนยัน หรือยืนยันแล้ว และถึงกำหนด ณ เวลาปัจจุบัน ทุกช่วงวันที่',usage:'ผลรวม usage ที่ผู้ให้บริการรายงานสำหรับข้อความในช่วงวันที่; null หมายถึงไม่มีข้อมูล'}};
 }
@@ -322,7 +339,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     const version=c.version+1;
     await connection.query("UPDATE conversations SET version=$3,generating_client_id=$4,generation_started_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id,version,clientId]);
     await connection.query("UPDATE messages SET status='generating',generation_version=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3",[visitor.orgId,c.id,clientId,version]);
-    const history=await connection.query("SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY created_at DESC,id DESC LIMIT 30",[visitor.orgId,c.id]);
+    const history=await connection.query(`SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY ${messageOrder('',true)} LIMIT 30`,[visitor.orgId,c.id]);
     const knowledge=await connection.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND (expires_at IS NULL OR expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))",[visitor.orgId]);
     const selected=selectKnowledge(text,rows(knowledge.rows) as BotInput['knowledge']);
     const messages=history.rows.reverse().map(row=>({role:row.role,content:row.content}));

@@ -20,6 +20,7 @@ export default function CustomerChat() {
   const initialize = useCallback(async () => { setError(""); try { await api("/api/chat/session", {}); await load(); } catch (e) { setError((e as Error).message); } }, [load]);
   useEffect(() => { alive.current = true; void initialize(); return () => { alive.current = false; controller.current?.abort(); }; }, [initialize]);
   useEffect(() => { if (!data) return; const timer = setInterval(() => { void load().catch(() => {}); }, 2000); return () => clearInterval(timer); }, [!!data, load]);
+  useEffect(()=>{if(!data)return;const events=new EventSource('/api/chat/events');events.addEventListener('change',()=>void load().catch(()=>{}));events.addEventListener('auth-required',()=>events.close());return()=>events.close();},[!!data,load]);
   useEffect(() => { tail.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [data?.messages.length, stream, optimistic]);
   const send = async (value: string, previous?: Retry) => {
     if (!value.trim() || busy) return; const item = previous || { text: value.trim(), clientId: crypto.randomUUID() }; const aborter = new AbortController(); controller.current = aborter; generationVersion.current = null; setBusy(true); setError(""); setRetry(null); setStream(""); setOptimistic(previous ? "" : item.text); setText("");

@@ -16,6 +16,7 @@ async function bucket():Promise<PrivateBucket> {
   if(!demoMode())throw new Error('Production requires a private R2 binding');
   return (await import('./local-files')).localBucket();
 }
+export const getPrivateBucket = bucket;
 async function scopedLead(staff:Staff,id:string) {
   uuid(id);
   if(!(await database.query('SELECT id FROM leads WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows.length)throw new ApiError(404,'ไม่พบลูกค้า');
@@ -49,7 +50,7 @@ export async function uploadFile(staff:Staff,leadId:string,request:Request) {
   // cannot be downloaded. Failed/ambiguous transfers remain for owner recovery.
   await transaction(staff.orgId,async connection=>{
     if(!(await connection.query('SELECT id FROM leads WHERE org_id=$1 AND id=$2',[staff.orgId,leadId])).rows.length)throw new ApiError(404,'ไม่พบลูกค้า');
-    const used=Number((await connection.query('SELECT COALESCE(sum(size_bytes),0) AS bytes FROM attachments WHERE org_id=$1',[staff.orgId])).rows[0].bytes);
+    const used=Number((await connection.query('SELECT (SELECT COALESCE(sum(size_bytes),0) FROM attachments WHERE org_id=$1)+(SELECT COALESCE(sum(size_bytes),0) FROM social_media_archive WHERE org_id=$1) AS bytes',[staff.orgId])).rows[0].bytes);
     if(used+size>quota)throw new ApiError(409,'พื้นที่ไฟล์ถึงขีดจำกัด กรุณาติดต่อผู้ดูแล');
     await connection.query('INSERT INTO attachments(id,org_id,lead_id,uploaded_by,object_key,filename,content_type,size_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[id,staff.orgId,leadId,staff.id,key,filename,type,size]);
   },staff);

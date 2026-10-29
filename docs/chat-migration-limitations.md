@@ -1,0 +1,35 @@
+# Implemented chat boundaries and release gates
+
+CRM owns canonical channel identities, conversations, messages, provider commands and delivery events. Sale owns sales records, scheduling, shared AI execution and product knowledge authoring. The companion branches implement an authenticated boundary between them. All new send/inference gates default off. Provider validation in these branches uses simulated transports; passing tests do not authorize or prove a production webhook or customer-message switch.
+
+## Implemented boundaries
+
+| Existing behavior | Implementation in the companion branches |
+| --- | --- |
+| Customer inbox and realtime | CRM native Inbox receives signed WhatsApp, LINE and Facebook callbacks and atomically journals changes. Sale `/crm-chat` consumes ordered events with an atomic cursor and idempotent commands. SSE is revision-only, authenticated and uncached; reconnect and polling recover committed history. CRM's existing website AI token stream remains intact. Source shared AI previously awaited a complete JSON response; it did not have a token-stream UI to migrate. |
+| Customer and sales context | Exact provider/account/remote identities and explicit source ID mappings prevent name-based merges. CRM customer changes display alongside Sale fields. Sale remains the owner of deals, quotes and sales edits. Authorized transient transcripts feed retained AI and summaries; unknown/failed/private/removed responses are excluded. |
+| Inbound business reactions and AI drafts | Separate default-off watermark gates create durable sales effects and message-intent draft jobs from new verified inbound messages. History imports never execute old queues. Learning mode, assignment, media review, cancellation, budgets, locks and human result approval remain enforced by the source runtime. |
+| Approved AI replies | Dedicated immutable `approved-ai-text` command, fresh signed source proofs and CRM current Admin/assignment/consent/generation checks. Only provably unattempted source rows can transfer. See [contract and test scope](approved-ai-handoff.md). General analysis, quotation, export and code jobs remain Sale-side. |
+| Reviewed composer and follow-up | A distinct reviewed command binds exact text, original review, facts, consent, recipient and current follow-up rules. BODY-only approved WhatsApp templates require exact language/body and fresh provider verification. Multipart files use signed exact source capabilities, original authorization, hashes, a durable per-part ledger and aggregate receipts. Partial or uncertain sends are quarantined; no automatic resend. |
+| Domestic draft/review | Explicit account-pinned thread mapping projects canonical CRM LINE/Facebook input into retained source draft/review tools. Source model/fact/example versions and revocation remain authoritative. Final reviewed text goes through the CRM sender and its current member/assignment/generation checks. Existing `auto` creates a human-review item; no autonomous social send is introduced. |
+| Provider administration and consent | CRM Admin settings verify account, permissions, callback, token fingerprint and expiry without exposing secrets. Independent test/live/emergency controls and evidence-backed consent reviews are audited. Meta Test Number mode cannot enable general customer sending. Consent is never invented by import. |
+| Historical data and private media | Bounded immutable source snapshots, monotonic delta capture, raw evidence archives, deterministic ID mapping, suppression tombstones and scoped private-file archival are implemented. Old executable rows remain inert. Metadata import alone is not a byte backup. |
+
+Source-specific quotation/review/knowledge tools remain in Sale; CRM is the canonical inbox and transport. The implementation does not claim that all of those sales tool screens have been copied into CRM. Both apps display canonical conversation data and human replies; source-reviewed workflows use dedicated contracts rather than generic human-reply commands.
+
+## Limits that remain material
+
+- Validation uses isolated SQLite/D1/R2 and simulated provider responses. The paired browser harness uses real components and handlers, synthetic authenticated sessions and an HTTP-to-HTTPS internal request adapter. It does not prove actual hosting TLS, login/OAuth, provider delivery or production latency.
+- The Sale projection is refreshed by an active view/API request. With every Sale client closed, CRM still records messages durably; Sale catches up when reopened. There is no independently deployed Sale background sync service in this change.
+- Outside-window WhatsApp templates are restricted to exact approved BODY-only templates without parameters or other components. Templates outside the first provider result page fail closed; no arbitrary provider pagination URL is fetched.
+- Domestic generated replies remain reviewed text with validated source links. Incoming media needs human review. Existing knowledge authoring and private sources remain in Sale. Generic CRM human replies are text; private multipart sending is the reviewed Sale command path.
+- An attempted send with no definitive provider outcome stays `unknown`. There is no general operator retry/re-send button: reconciliation requires provider receipts and a reviewed decision. An abort cannot retract a message already accepted by a provider. `submitted` does not mean `delivered`.
+- Source approval and provider dispatch run on different hosts. Repeated fresh checks and an in-flight monitor reduce revocation races; they are not an atomic distributed lock. Monitor network checks can take up to eight seconds. The two owner flags likewise cannot enforce exclusive ownership against a mistaken dual-enable configuration.
+- Snapshot captures are bounded (7 MiB snapshot, 8 MiB request, 20,000 records). Larger actual workspaces need reviewed chunking before export. Provider media may expire; every original private byte/hash and permission must be reconciled in staging.
+- Native WhatsApp media now has a durable bounded archive queue and explicit scheduler gate; historical imports remain inert. Newly reviewed outgoing files are archived from verified source bytes before customer media send. These copies do not prove all old files were archived. See [archive behavior and activation](media-archive-queue.md).
+
+## Required before a production switch
+
+Build the exact pair of release SHAs and prove staging HTTPS, real sessions, direct page refresh, realtime reconnect and private-file round trips. Verify controlled provider account ownership, signed callbacks, consent and delivered/read receipts without contacting customers. Back up both D1 and R2, restore into isolated resources and compare IDs/counts/timestamps/hashes. Reconcile every source `sending`/`unknown` attempt and ensure one sender before moving any webhook. Retain old data and deployment. See [cutover and rollback](chat-cutover.md).
+
+No local build or passing mock test establishes a completed migration. The separate Sale custom-domain change also requires its own actual DNS/HTTPS test and approval.

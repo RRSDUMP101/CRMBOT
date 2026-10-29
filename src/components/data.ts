@@ -1,7 +1,7 @@
 export type Member = { id: string; name: string; email: string; role: "Admin" | "Agent"; active?: boolean };
 export type Conversation = { id: string; leadId: string; status: string; version: number; assigneeId: string | null; createdAt: string; updatedAt: string; lastMessage?: string; leadName?: string; tags: string[] };
 export type Lead = { id: string; name: string; phone: string; email: string; tags: string[]; interests: string; source: string; market: string; stage: string; assigneeId: string | null; facts: Record<string, string>; summary?: { facts: string[]; unconfirmed: string[] }; createdAt: string; updatedAt: string };
-export type Message = { id: string; role: string; content: string; status: string; createdAt: string; sources: { id: string; title: string; version: number; content: string }[] };
+export type Message = { id: string; role: string; content: string; status: string; createdAt: string; provider?:string|null; deliveryStatus?:string|null; attachments?:{id:string;type:string;state:string;name?:string;deliveryStatus?:string;archiveState?:string;archiveError?:string}[]; sources: { id: string; title: string; version: number; content: string }[] };
 export type Task = { id: string; leadId: string; title: string; dueAt: string; status: string; kind: string; assigneeId: string | null; notes?: string; createdAt: string };
 export type Knowledge = { id: string; title: string; content: string; tags: string[]; status: string; processingStatus: string; error?: string | null; version: number; sourceUrl: string; expiresAt: string | null; updatedAt: string };
 export type Settings = { botName: string; personality: string; businessHours: string; handoffRule: string; aiEnabled: boolean };

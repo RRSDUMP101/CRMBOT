@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { subscribeCRMChanges } from './realtime';
 import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Menu, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe } from "lucide-react";
 import { Button, Card, Badge, Empty, Field, Input } from "./ui";
 import { api, date, number, stages, stageNames, type Member, type Snapshot } from "./data";
@@ -38,6 +39,7 @@ export default function Workspace() {
   const reload = useCallback(async () => { if (!bootstrap?.user) return; setLoading(true); try { const params = new URLSearchParams(); if (from) params.set("from", from); if (to) params.set("to", to); setData(await api<Snapshot>("/api/admin/snapshot?" + params)); setError(""); } catch (e) { setError((e as Error).message); } finally { setLoading(false); } }, [bootstrap?.user, from, to]);
   useEffect(() => { void initialize(); }, [initialize]);
   useEffect(() => { void reload(); }, [reload]);
+  useEffect(()=>bootstrap?.user?subscribeCRMChanges(()=>void reload()):undefined,[bootstrap?.user,reload]);
   useEffect(() => { if (!bootstrap?.user) return; const timer = setInterval(() => void reload(), 15000); return () => clearInterval(timer); }, [bootstrap?.user, reload]);
   if (!bootstrap) return <main className="full-state">{error ? <><h2>เชื่อมต่อระบบไม่สำเร็จ</h2><p role="alert">{error}</p><Button onClick={initialize}>ลองอีกครั้ง</Button></> : <><span className="spinner" /><p>กำลังเตรียมพื้นที่ทำงาน</p></>}</main>;
   if (!bootstrap.user) return <Login demo={bootstrap.demo} onLogin={async () => { setData(null); await initialize(); }} />;

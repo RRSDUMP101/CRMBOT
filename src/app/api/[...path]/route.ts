@@ -6,6 +6,8 @@ import { adminAction, appointmentConfirm, appointmentPreview, conversationAction
 import { providerName } from '@/lib/bot';
 import { adminWidgetConfig, getPublicWidgetConfig, getWidgetEmbedConfig, inbox, inboxSummary, markConversationRead, replyTemplates, saveWidgetConfig, templateAction } from '@/lib/helpdesk';
 import {downloadFile,listFiles,uploadFile} from '@/lib/files';
+import {realtimeResponse} from '@/lib/realtime';
+import {downloadSocialAttachment} from '@/lib/social-media';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -55,7 +57,13 @@ async function handle(request:NextRequest) {
     }
     if(path[0]==='admin') {
       const staff=(await staffSession(request))!;
+      if(path.join('/')==='admin/events'&&method==='GET')return await realtimeResponse(request,'staff');
+      if(path[1]==='social-attachments'&&path.length===3&&method==='GET')return await downloadSocialAttachment(staff.orgId,uuid(path[2]),fetch,staff.role==='Admin');
       if(method==='POST')await rateLimit(`staff:${staff.orgId}:${staff.id}`,120,60);
+      if(path.join('/')==='admin/media-archive'&&method==='GET')return json(await (await import('@/lib/media-archive-queue')).mediaArchiveStatus(staff));
+      if(path.join('/')==='admin/media-archive/retry'&&method==='POST'){
+        const body=await readJson(request);fields(body,['attachmentId']);return json(await (await import('@/lib/media-archive-queue')).retryMediaArchive(staff,uuid(body.attachmentId)));
+      }
       if(path[1]==='leads'&&path.length===4&&path[3]==='files') {
         if(method==='GET')return json(await listFiles(staff,uuid(path[2])));
         if(method==='POST'){await rateLimit(`upload:${staff.orgId}:${staff.id}`,20,3600);return json(await uploadFile(staff,uuid(path[2]),request),201);}
@@ -67,7 +75,7 @@ async function handle(request:NextRequest) {
       if(path.join('/')==='admin/inbox/summary'&&method==='GET')return json(await inboxSummary(staff));
       if(path.join('/')==='admin/reply-templates'&&method==='GET')return json(await replyTemplates(staff));
       if(path[1]==='snapshot'&&path.length===2&&method==='GET')return json(await snapshot(staff,url));
-      if(path[1]==='conversations'&&path.length===3&&method==='GET')return json(await conversationDetail(staff.orgId,uuid(path[2]),true));
+      if(path[1]==='conversations'&&path.length===3&&method==='GET')return json(await conversationDetail(staff.orgId,uuid(path[2]),true,staff.role==='Admin'));
       if(path[1]==='conversations'&&path.length===4&&path[3]==='read'&&method==='POST')return json(await markConversationRead(staff,uuid(path[2]),await readJson(request)));
       if(path[1]==='conversations'&&path.length===4&&method==='POST')return json(await conversationAction(staff,uuid(path[2]),path[3],await readJson(request)));
       if(path[1]==='action'&&path.length===2&&method==='POST') {
@@ -86,6 +94,7 @@ async function handle(request:NextRequest) {
         const created=await createVisitor(widget?'widget':'web');return json(await visitorDetail(created.visitor),201,{'Set-Cookie':setCookie(visitorCookieName(request),created.token,30*86400)});
       }
       const visitor=(await visitorSession(request))!;
+      if(path.join('/')==='chat/events'&&method==='GET')return await realtimeResponse(request,'visitor');
       if(path.length===1&&method==='GET')return json(await visitorDetail(visitor));
       if(method==='POST') {
         const body=await readJson(request);

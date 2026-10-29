@@ -1,0 +1,53 @@
+# Server bindings only. Never add NEXT_PUBLIC_ or commit credentials.
+# These are deliberately disabled. This file is documentation, not a deploy config.
+CRM_BRIDGE_ENABLED=false
+CRM_BRIDGE_ORG_ID=<existing-crm-organization-uuid>
+CRM_BRIDGE_SECRET=<secret-manager-generated-random-value-at-least-32-characters>
+CRM_BRIDGE_ALLOWED_MEMBER_IDS=[]
+CRM_LEGACY_SOURCE_ORIGIN=https://<authorized-source-staging-host>
+CRM_APPROVED_AI_ENABLED=false
+CRM_APPROVED_AI_SOURCE_ORIGIN=https://<authorized-source-staging-host>
+CRM_REVIEWED_SALE_ENABLED=false
+CRM_REVIEWED_SALE_SOURCE_ORIGIN=https://<authorized-source-staging-host>
+
+SOCIAL_CHANNELS_ORG_ID=<same-existing-crm-organization-uuid>
+SOCIAL_CHANNELS_OWNER=disabled
+SOCIAL_INBOUND_ENABLED=false
+SOCIAL_MEDIA_ARCHIVE_ENABLED=false
+# When enabled for CRM-owned WhatsApp inbound, the ignored deployment config
+# must include triggers.crons=["* * * * *"]. Disabled releases keep crons=[].
+SOCIAL_LIVE_ENABLED=false
+WHATSAPP_LIVE_ENABLED=false
+LINE_LIVE_ENABLED=false
+DOMESTIC_LIVE_ENABLED=false
+WHATSAPP_PHONE_NUMBER_ID=<verified-meta-phone-number-id>
+WHATSAPP_APP_ID=<verified-meta-app-id>
+WHATSAPP_WABA_ID=<verified-meta-business-account-id>
+WHATSAPP_API_VERSION=<verified-supported-version>
+WHATSAPP_APP_SECRET=<secret-manager>
+WHATSAPP_VERIFY_TOKEN=<secret-manager>
+WHATSAPP_ACCESS_TOKEN=<secret-manager>
+WHATSAPP_TEST_RECIPIENT=<authorized-test-number-country-code-and-digits-only>
+# Default business mode pins the existing RRS business sender. For isolated Meta
+# test accounts only, use meta-test and set the exact test sender from Meta.
+# This mode cannot enable general customer sending, even after test delivery.
+WHATSAPP_ACCOUNT_MODE=business
+# WHATSAPP_EXPECTED_DISPLAY_PHONE=<meta-test-sender-country-code-and-digits-only>
+LINE_BOT_USER_ID=<verified-line-destination>
+LINE_CHANNEL_SECRET=<secret-manager>
+LINE_CHANNEL_ACCESS_TOKEN=<secret-manager>
+LINE_TEST_RECIPIENT=<authorized-test-line-user-id>
+META_PAGE_ID=<verified-facebook-page-id>
+META_API_VERSION=<verified-supported-version>
+META_APP_SECRET=<secret-manager>
+META_VERIFY_TOKEN=<secret-manager>
+META_PAGE_ACCESS_TOKEN=<secret-manager>
+META_TEST_RECIPIENT=<authorized-test-page-scoped-user-id>
+# Existing Sale domestic knowledge review; CRM performs final LINE/Facebook send.
+CRM_DOMESTIC_REVIEW_ENABLED=false
+CRM_DOMESTIC_SOURCE_ORIGIN=https://<authorized-sale-staging-host>
+
+# Operator import CLI only; never browser configuration.
+CRM_BRIDGE_ORIGIN=https://<authorized-crm-staging-host>
+# APP_ORIGIN must match the actual target host; retain independent SESSION_SECRET,
+# existing DB and private BUCKET bindings. Use isolated DB/BUCKET for staging.

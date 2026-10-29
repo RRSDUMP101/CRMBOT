@@ -1,6 +1,7 @@
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {readdir,readFile} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
+import {DatabaseSync} from 'node:sqlite';
 import {seedDemoDatabase} from '../src/lib/seed-demo';
 const origin='http://127.0.0.1:8787';
 const mf=new Miniflare(convertV4MiniflareOptions({
@@ -15,9 +16,18 @@ async function run(file:string){await new Promise<void>((resolve,reject)=>{
 });}
 async function main(){try {
   await mf.ready;const db=await mf.getD1Database('DB');
-  for(const name of (await readdir('migrations/d1')).filter(n=>n.endsWith('.sql')).sort()){
-    const sql=await readFile('migrations/d1/'+name,'utf8');await db.batch(sql.split(';').map(s=>s.trim()).filter(Boolean).map(s=>db.prepare(s)));
-  }
+  // Let SQLite parse complete statements: a trigger body contains semicolons.
+  // The mirror contains only the empty fixture schema and lives in memory.
+  const parser=new DatabaseSync(':memory:');
+  try{for(const name of (await readdir('migrations/d1')).filter(n=>n.endsWith('.sql')).sort()){
+    let remaining=await readFile('migrations/d1/'+name,'utf8');const statements:string[]=[];
+    while((remaining=remaining.replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)+/,''))){
+      const statement=parser.prepare(remaining),source=statement.sourceSQL;
+      if(!source)throw new Error(`Migration parser made no progress: ${name}`);
+      statement.run();statements.push(source);remaining=remaining.slice(source.length);
+    }
+    if(statements.length)await db.batch(statements.map(sql=>db.prepare(sql)));
+  }}finally{parser.close();}
   await seedDemoDatabase(db as any);
   const health=await mf.dispatchFetch(origin+'/api/health');if(health.status!==200)throw new Error(`Worker health: ${health.status} ${await health.text()}`);
   const page=await mf.dispatchFetch(origin+'/login');if(page.status!==200)throw new Error(`Worker login page: ${page.status}`);
