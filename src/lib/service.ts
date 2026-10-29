@@ -3,6 +3,7 @@ import { database, transaction, camel, demoMode, type Executor, type Row } from 
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
+import { messageOrder } from './message-order';
 
 const settingsDefaults = {botName:'RRS ผู้ช่วย AI',personality:'สุภาพ กระชับ ถามครั้งละหนึ่งเรื่อง',businessHours:'ทีมงานจะยืนยันเวลาติดต่อกลับ',handoffRule:'ราคา สต็อก ส่วนลด และนัดหมายให้ทีมงานยืนยัน',aiEnabled:true};
 const rows = (items: Row[]) => items.map(camel);
@@ -48,9 +49,9 @@ export async function createVisitor(context:'web'|'widget'='web'): Promise<{toke
 export async function conversationDetail(orgId:string,id:string,internal=false,admin=false) {
   const conversation=await scopedConversation(database,orgId,id);
   const lead=await scopedLead(database,orgId,conversation.lead_id);
-  const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY m.created_at,m.id`,[orgId,id,admin?1:0]);
+  const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
-  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>({id:a.id,type:a.media_type,state:a.storage_state}))}:{})}))};
+  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{})};})}:{})}))};
 }
 export async function visitorDetail(visitor: Visitor) {
   const detail=await conversationDetail(visitor.orgId,visitor.conversationId);
@@ -262,7 +263,7 @@ function dateRange(url:URL) {
 export async function snapshot(staff:Staff,url:URL) {
   const range=dateRange(url);const p=[staff.orgId,range.start,range.end];
   const results=await Promise.all([
-    database.query(`SELECT c.*,l.name AS lead_name,l.tags,(SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent') AND ($2=1 OR m.source_owner_only=0) ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id WHERE c.org_id=$1 ORDER BY c.updated_at DESC LIMIT 1000`,[staff.orgId,staff.role==='Admin'?1:0]),
+    database.query(`SELECT c.*,l.name AS lead_name,l.tags,(SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent') AND ($2=1 OR m.source_owner_only=0) ORDER BY ${messageOrder('m',true)} LIMIT 1) AS last_message FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id WHERE c.org_id=$1 ORDER BY c.updated_at DESC LIMIT 1000`,[staff.orgId,staff.role==='Admin'?1:0]),
     database.query('SELECT * FROM leads WHERE org_id=$1 ORDER BY updated_at DESC LIMIT 2000',[staff.orgId]),
     database.query('SELECT * FROM tasks WHERE org_id=$1 ORDER BY due_at LIMIT 2000',[staff.orgId]),
     database.query('SELECT * FROM knowledge WHERE org_id=$1 ORDER BY updated_at DESC',[staff.orgId]),
@@ -338,7 +339,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     const version=c.version+1;
     await connection.query("UPDATE conversations SET version=$3,generating_client_id=$4,generation_started_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id,version,clientId]);
     await connection.query("UPDATE messages SET status='generating',generation_version=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3",[visitor.orgId,c.id,clientId,version]);
-    const history=await connection.query("SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY created_at DESC,id DESC LIMIT 30",[visitor.orgId,c.id]);
+    const history=await connection.query(`SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY ${messageOrder('',true)} LIMIT 30`,[visitor.orgId,c.id]);
     const knowledge=await connection.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND (expires_at IS NULL OR expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))",[visitor.orgId]);
     const selected=selectKnowledge(text,rows(knowledge.rows) as BotInput['knowledge']);
     const messages=history.rows.reverse().map(row=>({role:row.role,content:row.content}));

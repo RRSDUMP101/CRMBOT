@@ -4,6 +4,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
 import { database, transaction, closeDatabase } from '../src/lib/db';
 import { ingestSocialWebhook, enqueueSocialReply, dispatchSocialReply, readSocialConfig, readSocialBody, socialVerificationChallenge,socialConfigFingerprint, type SocialChannelConfig, type SocialProvider } from '../src/lib/social-channels';
+import { conversationDetail } from '../src/lib/service';
 
 let org:string,staff:string,otherOrg:string;
 const stamp=()=>Date.now()-1000;
@@ -128,6 +129,54 @@ test('receipt before send response is retained and applied when provider ID is l
     return Response.json({messages:[{id:'fast-mid'}]});
   }) as typeof fetch;
   assert.equal((await dispatchSocialReply(org,command.commandId,{config:c,fetch:transport})).status,'delivered');
+});
+
+test('Facebook echo before response becomes one visible reply with preserved audit and projection tombstone',async()=>{
+  const c={...config('facebook'),liveEnabled:true},remote='fb-early-echo',mid='fb-early-echo-output';
+  await ingest(fb(remote,'fb-early-echo-input'),c);await enableControl(c);const command=await approvedReply(c,remote);
+  const payload={object:'page',entry:[{id:c.accountId,messaging:[{sender:{id:c.accountId},recipient:{id:remote},timestamp:stamp(),message:{mid,is_echo:true,text:'Provider echo text retained as evidence',attachments:[{type:'image',payload:{attachment_id:'synthetic-echo-attachment'}}]}}]}]};
+  let echoId='',calls=0;
+  const transport=(async()=>{calls++;await ingest(payload,c);echoId=(await provenance(mid)).message_id;assert.notEqual(echoId,command.messageId);return Response.json({message_id:mid});}) as typeof fetch;
+  assert.equal((await dispatchSocialReply(org,command.commandId,{config:c,fetch:transport})).status,'sent');
+  assert.equal((await provenance(mid)).message_id,command.messageId);
+  const duplicate=(await database.query('SELECT m.*,p.metadata,p.removed_at FROM messages m JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.id=$2',[org,echoId])).rows[0];
+  assert.equal(duplicate.role,'note');assert.equal(duplicate.source_owner_only,1);assert.ok(duplicate.removed_at);assert.equal(duplicate.metadata.reconciledIntoMessageId,command.messageId);assert.equal(duplicate.metadata.originalProviderMessageId,mid);
+  const customer=await conversationDetail(org,command.conversationId),owner=await conversationDetail(org,command.conversationId,true,true);
+  assert.deepEqual(customer.messages.filter(m=>m.role==='agent').map(m=>m.id),[command.messageId]);assert.ok(!customer.messages.some(m=>m.id===echoId));
+  assert.equal(owner.messages.find(m=>m.id===echoId)?.content,'[หลักฐาน Facebook echo รวมกับข้อความที่อนุมัติแล้ว]');
+  const audit=(await database.query("SELECT metadata FROM audit_events WHERE org_id=$1 AND action='social.facebook_echo_reconciled' AND entity_id=$2",[org,command.messageId])).rows;
+  assert.equal(audit.length,1);assert.equal(audit[0].metadata.echo.content,'Provider echo text retained as evidence');assert.equal(audit[0].metadata.echo.metadata.is_echo,true);
+  const attachment=(await database.query('SELECT * FROM social_message_attachments WHERE org_id=$1 AND message_id=$2',[org,command.messageId])).rows[0];assert.equal(attachment.provider_ref,'synthetic-echo-attachment');
+  const history=(await database.query('SELECT entity,record_id,record_json FROM crm_bridge_events WHERE org_id=$1 ORDER BY sequence',[org])).rows;
+  const projection=new Map<string,Record<string,any>>();for(const event of history)projection.set(event.entity+':'+event.record_id,JSON.parse(event.record_json));
+  assert.ok(history.some(e=>e.entity==='message'&&e.record_id===echoId&&JSON.parse(e.record_json).content==='Provider echo text retained as evidence'));
+  const active=[...projection.entries()].filter(([key,m])=>key.startsWith('message:')&&m.conversation_id===command.conversationId&&m.role==='agent'&&!m.source_owner_only&&!projection.get('messageProvenance:'+m.id)?.removed_at);
+  assert.deepEqual(active.map(([,m])=>m.id),[command.messageId]);assert.equal(projection.get('message:'+echoId)?.role,'note');assert.equal(projection.get('messageProvenance:'+echoId)?.metadata.includes(command.messageId),true);
+  assert.equal((await ingest(payload,c)).duplicates,1);await dispatchSocialReply(org,command.commandId,{config:c,fetch:transport});assert.equal(calls,1);
+  await ingest({object:'page',entry:[{id:c.accountId,messaging:[{sender:{id:remote},recipient:{id:c.accountId},timestamp:stamp(),delivery:{mids:[mid]}}]}]},c);assert.equal((await provenance(mid)).delivery_status,'delivered');
+});
+
+test('Facebook reconciliation isolates org/account and never joins equal message text',async()=>{
+  const c={...config('facebook'),liveEnabled:true},remote='fb-echo-scope',mid='fb-echo-shared-id';
+  await ingest(fb(remote,'fb-echo-scope-input'),c);await enableControl(c);const command=await approvedReply(c,remote);
+  const scopes=[config('facebook','3344556677'),config('facebook',c.accountId,otherOrg)];
+  const echoPayload=(scope:SocialChannelConfig,id:string)=>({object:'page',entry:[{id:scope.accountId,messaging:[{sender:{id:scope.accountId},recipient:{id:remote},timestamp:stamp(),message:{mid:id,is_echo:true,text:'Human approved fixture reply'}}]}]});
+  for(const scope of scopes)await ingest(echoPayload(scope,mid),scope);
+  const transport=(async()=>{await ingest(echoPayload(c,'fb-different-provider-id'),c);return Response.json({message_id:mid});}) as typeof fetch;
+  assert.equal((await dispatchSocialReply(org,command.commandId,{config:c,fetch:transport})).status,'submitted');
+  for(const scope of [...scopes,c]){const p=(await database.query('SELECT * FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[scope.orgId,'facebook',scope.accountId,scope===c?'fb-different-provider-id':mid])).rows[0];assert.ok(p);assert.equal(p.removed_at,null);assert.equal(p.delivery_status,'sent');}
+  assert.equal((await database.query("SELECT count(*) AS n FROM audit_events WHERE org_id=$1 AND action='social.facebook_echo_reconciled' AND entity_id=$2",[org,command.messageId])).rows[0].n,0);
+});
+
+test('Facebook provider ID collision for another remote is quarantined without merging or retry',async()=>{
+  const c={...config('facebook'),liveEnabled:true},remote='fb-echo-conflict',mid='fb-conflicting-provider-id';
+  await ingest(fb(remote,'fb-echo-conflict-input'),c);await enableControl(c);const command=await approvedReply(c,remote);let calls=0;
+  const transport=(async()=>{calls++;await ingest({object:'page',entry:[{id:c.accountId,messaging:[{sender:{id:c.accountId},recipient:{id:'different-customer'},timestamp:stamp(),message:{mid,is_echo:true,text:'Human approved fixture reply'}}]}]},c);return Response.json({message_id:mid});}) as typeof fetch;
+  assert.equal((await dispatchSocialReply(org,command.commandId,{config:c,fetch:transport})).status,'unknown');
+  const p=await provenance(mid);assert.equal(p.remote_id,'different-customer');assert.equal(p.removed_at,null);assert.equal(p.delivery_status,'sent');
+  const own=(await database.query('SELECT provider_message_id,error_code FROM social_outbound_commands WHERE org_id=$1 AND id=$2',[org,command.commandId])).rows[0];assert.equal(own.provider_message_id,null);assert.equal(own.error_code,'provider_message_id_conflict');
+  assert.equal((await dispatchSocialReply(org,command.commandId,{config:c,fetch:transport})).status,'unknown');assert.equal(calls,1);
+  assert.equal((await database.query("SELECT count(*) AS n FROM audit_events WHERE org_id=$1 AND action='social.provider_identity_conflict' AND entity_id=$2",[org,command.messageId])).rows[0].n,1);
 });
 
 test('Facebook read watermark applies to a sent attempt, never an earlier queued draft',async()=>{

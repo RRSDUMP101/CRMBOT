@@ -10,6 +10,8 @@ import { conversationAction } from '../src/lib/service';
 import { readBridgeEvents } from '../src/lib/chat-bridge';
 import { realtimeResponse } from '../src/lib/realtime';
 import { POST } from '../src/app/api/bridge/[...path]/route';
+import { GET as getApi } from '../src/app/api/[...path]/route';
+import { NextRequest } from 'next/server';
 
 const origin = 'http://localhost';
 const secret = 'synthetic-command-and-stream-test-secret-32-characters';
@@ -103,6 +105,17 @@ async function cookieSession(f:Awaited<ReturnType<typeof fixture>>,kind:'staff'|
 function streamRequest(session:{token:string;cookie:string},signal?:AbortSignal,headers:Record<string,string>={}) {
   return new Request(`${origin}/api/realtime`,{signal,headers:{cookie:`${session.cookie}=${session.token}`,origin,...headers}});
 }
+test('authenticated transcript and inbox resolve equal provider timestamps by customer sequence, preserving history time',async()=>{
+  const f=await fixture(),session=await cookieSession(f,'staff'),at='2026-10-28T10:00:00.000000Z';
+  const first='ffffffff-ffff-4fff-8fff-fffffffffff1',second='00000000-0000-4000-8000-000000000002',historic=randomUUID();
+  for(const [id,content,seq,time] of [[first,'First customer message',1,at],[second,'Second customer message',2,at],[historic,'Older imported history',99,'2020-01-01T00:00:00.000000Z']])await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content,customer_seq,created_at) VALUES($1,$2,$3,'user',$4,$5,$6)",[id,f.org,f.conversation,content,seq,time]);
+  const get=async(path:string)=>{const response=await getApi(new NextRequest(origin+path,{headers:{cookie:`${session.cookie}=${session.token}`,origin}}));assert.equal(response.status,200);return response.json();};
+  const detail=await get('/api/admin/conversations/'+f.conversation);assert.deepEqual(detail.messages.map((m:{id:string})=>m.id),[historic,first,second]);assert.equal(detail.messages[0].createdAt,'2020-01-01T00:00:00.000000Z');
+  const inbox=await get('/api/admin/inbox');assert.equal(inbox.items.find((c:{id:string})=>c.id===f.conversation).lastMessage,'Second customer message');
+  const snapshot=await get('/api/admin/snapshot');assert.equal(snapshot.conversations.find((c:{id:string})=>c.id===f.conversation).lastMessage,'Second customer message');
+  const reply=randomUUID();await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content,created_at) VALUES($1,$2,$3,'agent','Reply at the same timestamp',$4)",[reply,f.org,f.conversation,at]);
+  assert.deepEqual((await get('/api/admin/conversations/'+f.conversation)).messages.map((m:{id:string})=>m.id),[historic,first,second,reply]);
+});
 async function chunk(reader:ReadableStreamDefaultReader<Uint8Array>) {
   let timer:ReturnType<typeof setTimeout>|undefined;
   try { return await Promise.race([reader.read(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('Timed out waiting for synthetic SSE event')),2500);})]); }

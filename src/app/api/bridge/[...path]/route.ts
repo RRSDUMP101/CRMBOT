@@ -19,7 +19,23 @@ async function handle(request: Request) {
     const config = bridgeConfig();
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\/bridge\//, '');
-    const { body } = await verifyBridgeRequest(request, config, path === 'import' ? 8 * 1024 * 1024 : 64_000);
+    const { body } = await verifyBridgeRequest(request, config, path === 'import' ? 8 * 1024 * 1024 : path==='approved-commands'?512_000:64_000);
+    if(path==='reviewed-templates'&&request.method==='GET'){
+      if(url.search)throw new BridgeError(400,'Unexpected template query');
+      return json(await (await import('@/lib/reviewed-sale-messages')).reviewedSaleTemplates());
+    }
+    if(path==='reviewed-messages'&&request.method==='GET'){
+      if([...url.searchParams.keys()].some(key=>key!=='commandId')||url.searchParams.getAll('commandId').length!==1)throw new BridgeError(400,'Invalid reviewed query');
+      return json(await (await import('@/lib/reviewed-sale-messages')).reviewedSaleStatus(url.searchParams.get('commandId')!));
+    }
+    if(path==='domestic-messages'&&request.method==='GET'){
+      if([...url.searchParams.keys()].some(key=>key!=='commandId')||url.searchParams.getAll('commandId').length!==1)throw new BridgeError(400,'Invalid domestic query');
+      return json(await (await import('@/lib/reviewed-domestic-messages')).domesticStatus(url.searchParams.get('commandId')!));
+    }
+    if(path==='approved-commands'&&request.method==='GET'){
+      if([...url.searchParams.keys()].some(key=>key!=='commandId')||url.searchParams.getAll('commandId').length!==1)throw new BridgeError(400,'Invalid approved command query');
+      const {approvedAiStatus}=await import('@/lib/approved-ai');return json(await approvedAiStatus(url.searchParams.get('commandId')!));
+    }
     if (path === 'events' && request.method === 'GET') {
       if ([...url.searchParams.keys()].some(key => !['after', 'limit'].includes(key)) || [...new Set(url.searchParams.keys())].some(key => url.searchParams.getAll(key).length !== 1)) throw new BridgeError(400, 'Invalid event query');
       return json(await readBridgeEvents(config.orgId, bridgeInteger(url.searchParams.get('after') ?? '0', 'cursor'), bridgeInteger(url.searchParams.get('limit') ?? '100', 'limit', 100, 1)));
@@ -30,6 +46,12 @@ async function handle(request: Request) {
       return await downloadSocialAttachment(config.orgId,path.slice('attachments/'.length),fetch,url.searchParams.get('owner')==='true');
     }
     if (url.search) throw new BridgeError(400, 'Unexpected bridge query');
+    if(path==='domestic-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-domestic-messages')).acceptDomestic(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','source'])));
+    if(path==='reviewed-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-sale-messages')).acceptReviewedSale(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','template','source'])));
+    if(path==='approved-commands'&&request.method==='POST'){
+      const {acceptApprovedAi}=await import('@/lib/approved-ai');
+      return json(await acceptApprovedAi(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','actorId','provider','accountId','remoteId','text','source'])));
+    }
     if(path==='dispatch'&&request.method==='POST'){
       objectBody(body,[]);
       const {dispatchPendingSocialReplies}=await import('@/lib/social-channels');

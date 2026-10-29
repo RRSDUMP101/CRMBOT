@@ -7,6 +7,7 @@ export type SocialChannelConfig = {
   provider: SocialProvider; orgId: string; accountId: string; wabaId?: string;
   secret: string; verifyToken?: string; accessToken?: string; apiVersion?: string;
   appId?: string; webhookUrl?: string; testRecipient?: string;
+  whatsappAccountMode?: string; expectedDisplayPhone?: string;
   owner: string; inboundEnabled: boolean; liveEnabled: boolean;
 };
 type Attachment = { type: string; ref: string; metadata: Record<string, unknown> };
@@ -33,13 +34,13 @@ export function readSocialConfig(provider: SocialProvider, env: Record<string,st
     inboundEnabled:env.SOCIAL_INBOUND_ENABLED === 'true',webhookUrl:env.APP_ORIGIN?env.APP_ORIGIN+'/api/channels/'+provider:'',
     testRecipient:env[provider==='whatsapp'?'WHATSAPP_TEST_RECIPIENT':provider==='line'?'LINE_TEST_RECIPIENT':'META_TEST_RECIPIENT']||'',
     liveEnabled:env.SOCIAL_LIVE_ENABLED === 'true' && env[provider === 'whatsapp' ? 'WHATSAPP_LIVE_ENABLED' : provider === 'line' ? 'LINE_LIVE_ENABLED' : 'DOMESTIC_LIVE_ENABLED'] === 'true' && (provider !== 'line' || env.DOMESTIC_LIVE_ENABLED === 'true')};
-  if (provider === 'whatsapp') return {...common,accountId:env.WHATSAPP_PHONE_NUMBER_ID || '',wabaId:env.WHATSAPP_WABA_ID || '',appId:env.WHATSAPP_APP_ID||'',secret:env.WHATSAPP_APP_SECRET || '',verifyToken:env.WHATSAPP_VERIFY_TOKEN,accessToken:env.WHATSAPP_ACCESS_TOKEN,apiVersion:env.WHATSAPP_API_VERSION};
+  if (provider === 'whatsapp') return {...common,accountId:env.WHATSAPP_PHONE_NUMBER_ID || '',wabaId:env.WHATSAPP_WABA_ID || '',appId:env.WHATSAPP_APP_ID||'',secret:env.WHATSAPP_APP_SECRET || '',verifyToken:env.WHATSAPP_VERIFY_TOKEN,accessToken:env.WHATSAPP_ACCESS_TOKEN,apiVersion:env.WHATSAPP_API_VERSION,whatsappAccountMode:env.WHATSAPP_ACCOUNT_MODE||'business',expectedDisplayPhone:env.WHATSAPP_EXPECTED_DISPLAY_PHONE};
   if (provider === 'line') return {...common,accountId:env.LINE_BOT_USER_ID || '',secret:env.LINE_CHANNEL_SECRET || '',accessToken:env.LINE_CHANNEL_ACCESS_TOKEN};
   return {...common,accountId:env.META_PAGE_ID || '',secret:env.META_APP_SECRET || '',verifyToken:env.META_VERIFY_TOKEN,accessToken:env.META_PAGE_ACCESS_TOKEN,apiVersion:env.META_API_VERSION};
 }
 /** A one-way server-only fingerprint binds evidence to the exact current account and credentials. */
 export function socialConfigFingerprint(config:SocialChannelConfig){
-  return digest(JSON.stringify([config.provider,config.orgId,config.accountId,config.wabaId||'',config.appId||'',config.secret,config.accessToken||'',config.verifyToken||'',config.apiVersion||'',config.webhookUrl||'',config.testRecipient||'']));
+  return digest(JSON.stringify([config.provider,config.orgId,config.accountId,config.wabaId||'',config.appId||'',config.secret,config.accessToken||'',config.verifyToken||'',config.apiVersion||'',config.webhookUrl||'',config.testRecipient||'',config.whatsappAccountMode||'business',config.expectedDisplayPhone||'']));
 }
 export function socialVerificationReady(control:Row|undefined,config:SocialChannelConfig){
   const fp=socialConfigFingerprint(config);
@@ -138,7 +139,7 @@ function normalize(payload: Record<string,any>, config: SocialChannelConfig): Ev
         for(const receipt of array(value.statuses || [])) {
           const r=object(receipt),mid=identifier(r.id),at=timestamp(r.timestamp,true);
           if(!['sent','delivered','read','failed'].includes(r.status)) continue;
-          result.push({id:`receipt:${mid}:${r.status}:${r.timestamp}`,kind:'receipt',remote:typeof r.recipient_id === 'string' ? identifier(r.recipient_id,200) : '',mid,at,status:r.status});
+          result.push({id:`receipt:${mid}:${r.status}:${r.timestamp}`,kind:'receipt',remote:typeof r.recipient_id === 'string' ? identifier(r.recipient_id,200) : '',mid,at,status:r.status,metadata:typeof r.biz_opaque_callback_data==='string'?{attemptId:r.biz_opaque_callback_data}:{}});
         }
       }
     }
@@ -193,6 +194,7 @@ async function updateReceipt(c: Executor, config: SocialChannelConfig, event: Ev
   const args=[config.orgId,config.provider,config.accountId,event.mid!,event.remote,event.status!,deliveryRank[event.status!],event.at,now()];
   await c.query(`INSERT INTO social_delivery_receipts(org_id,provider,account_id,provider_message_id,remote_id,status,rank,provider_timestamp,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
     ON CONFLICT(org_id,provider,account_id,provider_message_id) DO UPDATE SET status=excluded.status,rank=excluded.rank,updated_at=excluded.updated_at WHERE excluded.rank>=social_delivery_receipts.rank`,args);
+  if(await (await import('./reviewed-sale-media')).applyReviewedSaleReceipt(c,config,event))return;
   const matched=(await c.query('SELECT * FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[...args.slice(0,4)])).rows[0];
   if(matched && matched.direction === 'out' && (!event.remote || event.remote === matched.remote_id) && deliveryRank[matched.delivery_status] <= deliveryRank[event.status!]) {
     await c.query('UPDATE social_message_provenance SET delivery_status=$3 WHERE org_id=$1 AND message_id=$2',[config.orgId,matched.message_id,event.status!]);
@@ -312,13 +314,18 @@ async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig
   if(!controls || !controls.send_enabled || controls.emergency_stop || !socialVerificationReady(controls,config)||controls.webhook_fingerprint!==socialConfigFingerprint(config)) throw new ApiError(503,'Channel send control is disabled or unverified');
   if(controls.send_mode==='test'&&(!controls.test_recipient||controls.test_recipient!==command.remote_id))throw new ApiError(409,'Test mode allows only the configured test recipient');
   if(!['test','live'].includes(controls.send_mode))throw new ApiError(503,'Channel sending mode is disabled');
+  if(command.provider==='whatsapp'&&config.whatsappAccountMode&&(!['business','meta-test'].includes(config.whatsappAccountMode)||config.whatsappAccountMode==='meta-test'&&controls.send_mode!=='test'))throw new ApiError(409,'Meta test accounts allow only the configured test recipient');
   if(epoch !== undefined && controls.epoch !== epoch) throw new ApiError(409,'Channel control changed');
   const identity=(await c.query('SELECT * FROM social_identities WHERE org_id=$1 AND id=$2',[command.org_id,command.identity_id])).rows[0];
   if(!identity || identity.opt_out || identity.remote_id !== command.remote_id || identity.account_id !== command.account_id || identity.provider !== command.provider || identity.conversation_id !== command.conversation_id) throw new ApiError(409,'Recipient identity changed or opted out');
   const inbound=(await c.query("SELECT MAX(provider_timestamp) AS last_inbound FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND remote_id=$4 AND direction='in' AND removed_at IS NULL",[command.org_id,command.provider,command.account_id,command.remote_id])).rows[0]?.last_inbound;
   const elapsed=Date.now()-Date.parse(inbound || '');
+  const reviewed=await (await import('./reviewed-sale-messages')).reviewedSalePayload(c,command.org_id,command.id);
+  const domestic=await (await import('./reviewed-domestic-messages')).domesticPayload(c,command.org_id,command.id);
+  if(domestic&&(domestic.actorId!==command.approved_by||domestic.provider!==command.provider||domestic.accountId!==command.account_id||domestic.remoteId!==command.remote_id||domestic.text!==command.body))throw new ApiError(409,'Domestic reviewed command linkage changed');
+  if(reviewed&&(reviewed.actorId!==command.approved_by||reviewed.accountId!==command.account_id||reviewed.remoteId!==command.remote_id||reviewed.text!==command.body))throw new ApiError(409,'Reviewed Sale command linkage changed');
   if(command.provider === 'whatsapp' || command.provider === 'facebook') {
-    if(!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 86_400_000) throw new ApiError(409,'Verified inbound message required within the 24 hour reply window; templates are not enabled');
+    if(!(command.provider==='whatsapp'&&reviewed?.template)&&(!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 86_400_000)) throw new ApiError(409,'Verified inbound message required within the 24 hour reply window or an exact reviewed template');
   } else {
     const friendship=(await c.query("SELECT event_kind FROM social_events WHERE org_id=$1 AND provider='line' AND account_id=$2 AND remote_id=$3 AND event_kind IN ('follow','unfollow') ORDER BY received_at DESC,event_id DESC LIMIT 1",[command.org_id,command.account_id,command.remote_id])).rows[0];
     if(friendship?.event_kind !== 'follow' && (!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 7*86_400_000)) throw new ApiError(409,'Verified LINE follow or inbound within seven days required');
@@ -329,8 +336,15 @@ async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig
   }
   const conversation=(await c.query('SELECT * FROM conversations WHERE org_id=$1 AND id=$2',[command.org_id,command.conversation_id])).rows[0];
   if(!conversation || conversation.version !== command.conversation_version || conversation.status !== 'human_active' || conversation.assignee_id !== command.approved_by) throw new ApiError(409,'Human approval is stale after takeover or new input');
-  const member=(await c.query('SELECT active FROM members WHERE org_id=$1 AND id=$2',[command.org_id,command.approved_by])).rows[0];
+  if(reviewed&&conversation.customer_message_seq!==reviewed.expectedCustomerSeq)throw new ApiError(409,'Reviewed Sale customer generation changed');
+  if(domestic&&conversation.customer_message_seq!==domestic.expectedCustomerSeq)throw new ApiError(409,'Domestic customer generation changed');
+  const member=(await c.query('SELECT active,role FROM members WHERE org_id=$1 AND id=$2',[command.org_id,command.approved_by])).rows[0];
   if(!member?.active) throw new ApiError(409,'Approving staff member is inactive');
+  const aiApproval=(await c.query('SELECT actor_id FROM crm_approved_ai_commands WHERE org_id=$1 AND outbound_command_id=$2',[command.org_id,command.id])).rows[0];
+  if(aiApproval){
+    let allowed:unknown;try{allowed=JSON.parse(process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS||'[]');}catch{throw new ApiError(409,'AI approving Admin configuration changed');}
+    if(member.role!=='Admin'||aiApproval.actor_id!==command.approved_by||!Array.isArray(allowed)||!allowed.includes(command.approved_by))throw new ApiError(409,'AI approving Admin changed');
+  }
   const message=(await c.query('SELECT role,content,status FROM messages WHERE org_id=$1 AND conversation_id=$2 AND id=$3',[command.org_id,command.conversation_id,command.message_id])).rows[0];
   if(!message || message.role !== 'agent' || message.status !== 'complete' || message.content !== command.body) throw new ApiError(409,'Approved message changed');
   return controls;
@@ -344,7 +358,7 @@ function providerRequest(config: SocialChannelConfig,command: Row,signal: AbortS
   } else {
     // Fixed provider host; untrusted message media URLs are never fetched by this module.
     url=`https://graph.facebook.com/${config.apiVersion}/${encodeURIComponent(config.accountId)}/messages`;
-    body=config.provider === 'whatsapp' ? {messaging_product:'whatsapp',recipient_type:'individual',to:command.remote_id,type:'text',text:{preview_url:false,body:command.body},biz_opaque_callback_data:command.attempt_id} : {recipient:{id:command.remote_id},messaging_type:'RESPONSE',message:{text:command.body}};
+    body=config.provider === 'whatsapp' ? {messaging_product:'whatsapp',recipient_type:'individual',to:command.remote_id,...(command.reviewed_template?{type:'template',template:{name:command.reviewed_template.name,language:{code:command.reviewed_template.language}}}:{type:'text',text:{preview_url:false,body:command.body}}),biz_opaque_callback_data:command.attempt_id} : {recipient:{id:command.remote_id},messaging_type:'RESPONSE',message:{text:command.body}};
   }
   return {url,init:{method:'POST',headers,body:JSON.stringify(body),redirect:'manual',signal}};
 }
@@ -354,6 +368,11 @@ async function setCommandStatus(c: Executor,command: Row,status: string,errorCod
 }
 /** One durable claim permits at most one attempt. No timer, 5xx, unknown result or restart resends it. */
 export async function dispatchSocialReply(orgId: string,commandId: string,options: DispatchOptions = {}): Promise<{commandId:string;status:string}> {
+  const pending=(await database.query('SELECT status FROM social_outbound_commands WHERE org_id=$1 AND id=$2',[orgId,commandId])).rows[0];
+  if(pending?.status==='queued')await (await import('./approved-ai-proof')).validateApprovedAiDispatch(orgId,commandId,options.fetch);
+  if(pending?.status==='queued')await (await import('./reviewed-sale-messages')).validateReviewedSaleDispatch(orgId,commandId,options.fetch);
+  if(pending?.status==='queued')await (await import('./reviewed-domestic-messages')).validateDomesticDispatch(orgId,commandId,options.fetch);
+  const multipart=await (await import('./reviewed-sale-media')).dispatchReviewedSaleMultipart(orgId,commandId,{...options,guard:outboundGuard});if(multipart)return multipart;
   const claimed=await transaction<Row & {claimed:boolean}>(orgId,async c=>{
     const command=(await c.query('SELECT * FROM social_outbound_commands WHERE org_id=$1 AND id=$2',[orgId,commandId])).rows[0];
     if(!command) throw new ApiError(404,'Social command not found');
@@ -367,12 +386,16 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
     await c.query("UPDATE social_outbound_commands SET status='sending',attempt_id=$3,control_epoch=$4,lease_expires_at=$5,updated_at=$6 WHERE org_id=$1 AND id=$2",[orgId,commandId,attempt,control.epoch,expires,now()]);
     // Messenger read watermarks compare against the send attempt, never an earlier queued draft time.
     await c.query("UPDATE social_message_provenance SET delivery_status='sending',provider_timestamp=$3 WHERE org_id=$1 AND message_id=$2",[orgId,command.message_id,now()]);
-    return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,claimed:true};
+    const reviewed=await (await import('./reviewed-sale-messages')).reviewedSalePayload(c,orgId,commandId);
+    return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,reviewed_template:reviewed?.template,claimed:true};
   });
   if(!claimed.claimed) return {commandId,status:claimed.status};
   const config=options.config || readSocialConfig(claimed.provider);
   try {
     checkOutboundConfig(config,claimed);
+    await (await import('./approved-ai-proof')).validateApprovedAiDispatch(orgId,commandId,options.fetch);
+    await (await import('./reviewed-sale-messages')).validateReviewedSaleDispatch(orgId,commandId,options.fetch);
+    await (await import('./reviewed-domestic-messages')).validateDomesticDispatch(orgId,commandId,options.fetch);
     // Re-read the generation fence and emergency stop immediately before the external effect.
     await transaction(orgId,c=>outboundGuard(c,claimed,config,claimed.control_epoch));
   } catch {
@@ -384,7 +407,7 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
   const deadline=setTimeout(()=>abort.abort(),20_000);
   const monitor=setInterval(async()=>{
     if(polling)return;polling=true;
-    try {const current=options.config || readSocialConfig(claimed.provider);checkOutboundConfig(current,claimed);await outboundGuard(database,claimed,current,claimed.control_epoch);}
+    try {const current=options.config || readSocialConfig(claimed.provider);checkOutboundConfig(current,claimed);await outboundGuard(database,claimed,current,claimed.control_epoch);await (await import('./approved-ai-proof')).validateApprovedAiDispatch(orgId,commandId,options.fetch);await (await import('./reviewed-sale-messages')).validateReviewedSaleDispatch(orgId,commandId,options.fetch);await (await import('./reviewed-domestic-messages')).validateDomesticDispatch(orgId,commandId,options.fetch);}
     catch {abort.abort();}
     finally {polling=false;}
   },500);
@@ -415,11 +438,22 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
       if(receipt && (!receipt.remote_id || receipt.remote_id === command.remote_id) && receipt.rank >= deliveryRank[finalStatus]) finalStatus=receipt.status;
       const identity=(await c.query('SELECT read_watermark_ms FROM social_identities WHERE org_id=$1 AND id=$2',[orgId,command.identity_id])).rows[0];
       if(command.provider === 'facebook' && Number(identity?.read_watermark_ms) >= Date.parse(command.updated_at) && ['submitted','sent','delivered'].includes(finalStatus)) finalStatus='read';
-      // A verified Facebook echo may arrive before the HTTP response. Merge only by the exact provider ID.
-      const echo=(await c.query('SELECT message_id,delivery_status FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND remote_id=$4 AND provider_message_id=$5',[orgId,command.provider,command.account_id,command.remote_id,providerMessageId])).rows[0];
+      // A verified Facebook echo may arrive before the HTTP response. Never match content or names.
+      const echo=(await c.query('SELECT p.*,m.conversation_id,m.role,m.content,m.created_at FROM social_message_provenance p JOIN messages m ON m.org_id=p.org_id AND m.id=p.message_id WHERE p.org_id=$1 AND p.provider=$2 AND p.account_id=$3 AND p.provider_message_id=$4',[orgId,command.provider,command.account_id,providerMessageId])).rows[0];
       if(echo && echo.message_id !== command.message_id) {
-        // Keep both native records for audit; transfer provider identity to the approved command, not by content/name.
-        await c.query('UPDATE social_message_provenance SET provider_message_id=NULL WHERE org_id=$1 AND message_id=$2',[orgId,echo.message_id]);
+        if(command.provider!=='facebook'||echo.remote_id!==command.remote_id||echo.conversation_id!==command.conversation_id||echo.direction!=='out'||echo.role!=='agent'||echo.metadata?.is_echo!==true||echo.removed_at){
+          await c.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),orgId,command.approved_by,'social.provider_identity_conflict',command.message_id,JSON.stringify({provider:command.provider,accountId:command.account_id,remoteId:command.remote_id,providerMessageId,existingMessageId:echo.message_id,attemptId:command.attempt_id})]);
+          await setCommandStatus(c,command,'unknown','provider_message_id_conflict');return 'unknown';
+        }
+        const canonical=(await c.query('SELECT metadata FROM social_message_provenance WHERE org_id=$1 AND message_id=$2',[orgId,command.message_id])).rows[0];
+        const reconciledAt=now();
+        // Keep the signed event, original message snapshot and a private audit record. The duplicate
+        // becomes an explicit internal tombstone, so it cannot appear as a second customer reply.
+        await c.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),orgId,command.approved_by,'social.facebook_echo_reconciled',command.message_id,JSON.stringify({providerMessageId,accountId:command.account_id,remoteId:command.remote_id,attemptId:command.attempt_id,echo})]);
+        await c.query("UPDATE messages SET role='note',source_owner_only=1,content='[หลักฐาน Facebook echo รวมกับข้อความที่อนุมัติแล้ว]' WHERE org_id=$1 AND id=$2",[orgId,echo.message_id]);
+        await c.query("UPDATE social_message_provenance SET provider_message_id=NULL,delivery_status='cancelled',removed_at=$3,metadata=$4 WHERE org_id=$1 AND message_id=$2",[orgId,echo.message_id,reconciledAt,JSON.stringify({...echo.metadata,sourceOwnerOnly:true,reconciledIntoMessageId:command.message_id,originalProviderMessageId:providerMessageId,reconciledAt})]);
+        await c.query('UPDATE social_message_provenance SET metadata=$3 WHERE org_id=$1 AND message_id=$2',[orgId,command.message_id,JSON.stringify({...canonical?.metadata,reconciledEcho:{messageId:echo.message_id,providerTimestamp:echo.provider_timestamp,providerType:echo.provider_type,metadata:echo.metadata}})]);
+        await c.query('UPDATE social_message_attachments SET message_id=$3 WHERE org_id=$1 AND message_id=$2 AND provider=$4 AND account_id=$5',[orgId,echo.message_id,command.message_id,command.provider,command.account_id]);
         if(deliveryRank[echo.delivery_status] > deliveryRank[finalStatus]) finalStatus=echo.delivery_status;
       }
     }

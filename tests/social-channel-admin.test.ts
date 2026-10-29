@@ -149,3 +149,34 @@ test('Admin route requires HTTPS, authenticated Admin and same-origin POST',asyn
     assert.equal((await POST(new Request('https://crm.example.invalid/api/admin/social-channels/line',{method:'POST',headers:{...headers,Origin:'https://attacker.example.invalid'},body:JSON.stringify({action:'disable'})}),context)).status,403);
   }
 });
+
+test('Meta test account verifies its exact sender and cannot enable customer sending or bypass the dispatcher test fence',async()=>{
+  const c={...config('whatsapp'),accountId:'1234509876',whatsappAccountMode:'meta-test',expectedDisplayPhone:'15550001111'};
+  const fake=(async(input,init)=>{
+    const response=await providerFetch(c,input,init),body=await response.json(),url=new URL(String(input));
+    if(url.pathname.endsWith('/phone_numbers'))body.data[0].display_phone_number='+1 555 000 1111';
+    else if(url.pathname.endsWith('/'+c.accountId))body.display_phone_number='+1 555 000 1111';
+    return Response.json(body);
+  }) as typeof fetch;
+  const verified=await socialChannelAction(admin,'whatsapp',{action:'verify'},{config:c,fetch:fake});
+  assert.equal(verified.verified,true);assert.equal(verified.testAccount,true);assert.equal(verified.sendMode,'disabled');
+  await probe(c);
+  assert.equal((await socialChannelAction(admin,'whatsapp',{action:'enable-test',confirm:true},{config:c})).sendMode,'test');
+  await assert.rejects(socialChannelAction(admin,'whatsapp',{action:'enable',confirm:true},{config:c}),/test_account_cannot_enable_customer_sending/);
+  const reply=await queued(c);
+  await database.query("UPDATE social_channel_controls SET send_mode='live' WHERE org_id=$1 AND provider='whatsapp' AND account_id=$2",[c.orgId,c.accountId]);
+  await assert.rejects(dispatchSocialReply(c.orgId,reply.commandId!,{config:c,fetch:failFetch}),/Meta test accounts allow only/);
+  assert.equal((await socialChannelStatus(admin,'whatsapp',{config:{...c,expectedDisplayPhone:'15550002222'}})).verified,false);
+  assert.equal((await socialChannelStatus(admin,'whatsapp',{config:{...c,whatsappAccountMode:'business'}})).verified,false);
+});
+
+test('test account sender must be explicitly configured and verified; business sender pin is preserved',async()=>{
+  const c={...config('whatsapp'),whatsappAccountMode:'meta-test'};
+  const status=await socialChannelStatus(admin,'whatsapp',{config:c});
+  assert.equal(status.configured,false);assert.ok(status.missing.includes('WHATSAPP_EXPECTED_DISPLAY_PHONE'));
+  await assert.rejects(socialChannelAction(admin,'whatsapp',{action:'verify'},{config:c,fetch:failFetch}),/configuration_missing/);
+  await assert.rejects(socialChannelAction(admin,'whatsapp',{action:'verify'},{config:{...c,expectedDisplayPhone:'15550001111'},fetch:transport(c)}),/sender_mismatch/);
+  await assert.rejects(socialChannelAction(admin,'whatsapp',{action:'verify'},{config:{...c,whatsappAccountMode:'anything',expectedDisplayPhone:'15550001111'},fetch:failFetch}),/account_mode_invalid/);
+  const business={...config('whatsapp'),expectedDisplayPhone:'15550001111'};
+  assert.equal((await socialChannelAction(admin,'whatsapp',{action:'verify'},{config:business,fetch:transport(business)})).verified,true);
+});

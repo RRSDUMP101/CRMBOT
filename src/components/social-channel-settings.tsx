@@ -4,7 +4,7 @@ import {api,date} from './data';
 import {Badge,Button,Card} from './ui';
 
 type Provider='whatsapp'|'line'|'facebook';
-type Status={provider:Provider;accountId:string;configured:boolean;missing:string[];expectedWebhookUrl:string;owner:string;inboundEnabled:boolean;environmentLiveEnabled:boolean;sendMode:'disabled'|'test'|'live';emergencyStop:boolean;verified:boolean;verifiedAt:string|null;verificationExpiresAt:string|null;webhookVerified:boolean;lastWebhookAt:string|null;testRecipient:string|null;testPassed:boolean;errorCode:string|null};
+type Status={provider:Provider;accountId:string;configured:boolean;missing:string[];expectedWebhookUrl:string;owner:string;inboundEnabled:boolean;environmentLiveEnabled:boolean;sendMode:'disabled'|'test'|'live';emergencyStop:boolean;verified:boolean;verifiedAt:string|null;verificationExpiresAt:string|null;webhookVerified:boolean;lastWebhookAt:string|null;testRecipient:string|null;testPassed:boolean;errorCode:string|null;testAccount:boolean};
 const labels:Record<Provider,string>={whatsapp:'WhatsApp',line:'LINE OA',facebook:'Facebook'};
 export function SocialChannelSettings({isAdmin}:{isAdmin:boolean}){
   if(!isAdmin)return <p className="helper-text">ผู้ดูแลระบบตรวจสอบและจัดการการเชื่อมต่อ WhatsApp, LINE OA และ Facebook ได้</p>;
@@ -26,10 +26,11 @@ function Channel({provider}:{provider:Provider}){
     {error&&<p role="alert" className="error-text">{error}</p>}{notice&&<p role="status">{notice}</p>}
     {status&&<><dl><dt>บัญชีช่องทาง</dt><dd>{status.accountId||'ยังไม่ได้ตั้งค่า'}</dd><dt>ตรวจบัญชี</dt><dd>{status.verified?'ผ่าน · '+date(status.verifiedAt):'ยังไม่ผ่าน หรือหมดอายุ'}</dd><dt>รับข้อความจากช่องทาง</dt><dd>{status.webhookVerified?'ยืนยันแล้ว · '+date(status.lastWebhookAt):'รอข้อความทดสอบจากช่องทาง'}</dd><dt>ผลการตอบทดสอบ</dt><dd>{status.testPassed?'ผ่าน':'ยังไม่ผ่าน'}</dd><dt>ผู้รับทดสอบ</dt><dd>{status.testRecipient||'ยังไม่ได้กำหนด'}</dd></dl>
     {!status.environmentLiveEnabled&&<p className="helper-text">การส่งยังถูกปิดไว้ในการตั้งค่าระบบ</p>}
+    {status.testAccount&&<p className="helper-text">บัญชี Meta สำหรับทดสอบ · ส่งได้เฉพาะผู้รับทดสอบที่กำหนด</p>}
     <details><summary>รายละเอียดสำหรับเชื่อมช่องทาง</summary><p>ลิงก์รับข้อความ</p><code style={{overflowWrap:'anywhere'}}>{status.expectedWebhookUrl}</code>{status.missing.length>0&&<p>ยังขาดการตั้งค่า: {status.missing.join(', ')}</p>}{status.errorCode&&<p>รหัสตรวจสอบ: {status.errorCode}</p>}<p className="helper-text">ตั้งค่ากุญแจเชื่อมต่อผ่านระบบจัดเก็บความลับของเซิร์ฟเวอร์</p></details>
     <div className="button-row"><Button variant="secondary" disabled={busy||!status.configured} onClick={()=>void act('verify')}>ตรวจบัญชี</Button><Button variant="destructive" disabled={busy} onClick={()=>void act('disable')}>หยุดการส่ง</Button></div>
     <label className="field"><span><input type="checkbox" checked={review} disabled={busy||!ready} onChange={e=>setReview(e.target.checked)}/> ฉันตรวจบัญชีและผู้รับทดสอบแล้ว และยืนยันว่าระบบเดิมหยุดส่งแล้ว</span></label>
-    <div className="button-row"><Button variant="secondary" disabled={busy||!ready||!review||!status.testRecipient} onClick={()=>void act('enable-test')}>เปิดเฉพาะผู้รับทดสอบ</Button><Button disabled={busy||!ready||!review||!status.testPassed} onClick={()=>void act('enable')}>เปิดการตอบลูกค้า</Button></div></>}
+    <div className="button-row"><Button variant="secondary" disabled={busy||!ready||!review||!status.testRecipient} onClick={()=>void act('enable-test')}>เปิดเฉพาะผู้รับทดสอบ</Button><Button disabled={busy||!ready||!review||!status.testPassed||status.testAccount} onClick={()=>void act('enable')}>เปิดการตอบลูกค้า</Button></div></>}
     <Button variant="ghost" size="sm" disabled={busy} onClick={()=>void load()}>ตรวจสถานะล่าสุด</Button>
   </Card>;
 }

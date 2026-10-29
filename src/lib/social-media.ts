@@ -79,6 +79,7 @@ export async function downloadSocialAttachment(orgId:string,id:string,transport:
   let archived=(await database.query("SELECT * FROM social_media_archive WHERE org_id=$1 AND attachment_id=$2 AND status='ready'",[orgId,id])).rows[0];
   if(!archived){
     const file=await providerMedia(row,transport,allowOwnerOnly),key=`${orgId}/${id}`,hash=createHash('sha256').update(file.bytes).digest('hex');
+    if(metadata.reviewedSale&&(hash!==metadata.sha256||file.bytes.length!==metadata.size||file.type!==metadata.mime))throw new ApiError(409,'Reviewed attachment bytes no longer match the approved source');
     await transaction(orgId,async c=>{
       if(!(await c.query('SELECT id FROM social_message_attachments WHERE org_id=$1 AND id=$2 AND removed_at IS NULL',[orgId,id])).rows.length)throw new ApiError(404,'Attachment removed');
       const existing=(await c.query('SELECT * FROM social_media_archive WHERE org_id=$1 AND attachment_id=$2',[orgId,id])).rows[0];
