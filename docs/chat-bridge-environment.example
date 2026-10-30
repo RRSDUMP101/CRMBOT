@@ -4,6 +4,11 @@ CRM_BRIDGE_ENABLED=false
 CRM_BRIDGE_ORG_ID=<existing-crm-organization-uuid>
 CRM_BRIDGE_SECRET=<secret-manager-generated-random-value-at-least-32-characters>
 CRM_BRIDGE_ALLOWED_MEMBER_IDS=[]
+# Wake the Sale background consumer after commits and reconcile from the minute
+# cron. Exact HTTPS URL, no query. Requires triggers.crons=["* * * * *"] in the
+# ignored deployment config and RRS_CRM_BACKGROUND_SYNC_ENABLED=true on Sale.
+CRM_SALE_SYNC_ENABLED=false
+CRM_SALE_SYNC_URL=https://<authorized-sale-staging-host>/api/rrs/crm/sync
 CRM_LEGACY_SOURCE_ORIGIN=https://<authorized-source-staging-host>
 CRM_APPROVED_AI_ENABLED=false
 CRM_APPROVED_AI_SOURCE_ORIGIN=https://<authorized-source-staging-host>
