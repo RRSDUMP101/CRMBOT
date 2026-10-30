@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { subscribeCRMChanges } from './realtime';
-import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Menu, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe } from "lucide-react";
+import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartColumn, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Menu, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe } from "lucide-react";
 import { Button, Card, Badge, Empty, Field, Input } from "./ui";
 import { api, date, number, stages, stageNames, type Member, type Snapshot } from "./data";
 import { Customers, Tasks, KnowledgePanel, SettingsPanel, MembersPanel } from "./workspace-panels";
@@ -9,12 +9,14 @@ import { InboxWorkspace } from "./inbox-workspace";
 import { useFocusScope } from "./focus-scope";
 import { ReplyTemplatesPanel } from "./reply-templates";
 import { WidgetSettingsPanel } from "./widget-settings";
+import { ReportsPanel } from "./reports-panel";
 
 const nav = [
   { id: "inbox", label: "กล่องข้อความ", short: "แชต", icon: MessageSquare },
   { id: "customers", label: "ลูกค้าและโอกาสขาย", short: "ลูกค้า", icon: Users },
   { id: "tasks", label: "งานและนัดหมาย", short: "ติดตาม", icon: CalendarDays },
-  { id: "dashboard", label: "รายงานภาพรวม", short: "รายงาน", icon: ChartNoAxesCombined },
+  { id: "dashboard", label: "รายงานภาพรวม", short: "ภาพรวม", icon: ChartNoAxesCombined },
+  { id: "reports", label: "รายงาน", short: "รายงาน", icon: ChartColumn },
   { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark },
   { id: "knowledge", label: "คลังความรู้", short: "ความรู้", icon: BookOpen },
   { id: "settings", label: "ตั้งค่าผู้ช่วย AI", short: "ผู้ช่วย AI", icon: Sparkles },
@@ -49,15 +51,15 @@ export default function Workspace() {
     {mobile && <button className="mobile-shade" aria-label="ปิดเมนู" onClick={() => setMobile(false)} />}
     <aside ref={railRef} tabIndex={-1} role={mobile ? "dialog" : undefined} aria-modal={mobile || undefined} aria-label="เมนูพื้นที่ทำงาน" className={`app-rail ${mobile ? "is-open" : ""}`}>
       <a href="/" className="rail-brand" title="RRS Connect"><span>R</span><small>RRS</small></a>
-      <nav aria-label="เมนูหลัก">{nav.map((item, index) => <div key={item.id}>{index === 5 && <div className="rail-divider"><span>AI</span></div>}{index === 7 && <div className="rail-divider" />}<button title={item.label} aria-label={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobile(false); }} className={`rail-item ${view === item.id ? "active" : ""}`}><item.icon size={21} /><span>{item.short}</span></button></div>)}</nav>
+      <nav aria-label="เมนูหลัก">{nav.map(item => <div key={item.id}>{item.id === "knowledge" && <div className="rail-divider"><span>AI</span></div>}{item.id === "members" && <div className="rail-divider" />}<button title={item.label} aria-label={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobile(false); }} className={`rail-item ${view === item.id ? "active" : ""}`}><item.icon size={21} /><span>{item.short}</span></button></div>)}</nav>
       <div className="rail-account"><span className="user-avatar" title={`${bootstrap.user.name} · ${bootstrap.user.role}`}>{bootstrap.user.name.slice(0, 1)}</span><button title="ออกจากระบบ" aria-label="ออกจากระบบ" onClick={async () => { try { await api("/api/auth/logout", {}); setData(null); await initialize(); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div>
     </aside>
     <div className="workspace-body" inert={mobile || undefined}><header className="workspace-topbar"><div className="workspace-brandline"><button id="workspace-menu-trigger" className="mobile-menu" aria-label="เปิดเมนู" onClick={() => setMobile(true)}><Menu size={21} /></button><strong>RRS Connect</strong><span className="topbar-divider" /><span>รุ่งเรืองดั๊มพ์ 101</span></div><div className="workspace-topbar-actions"><Badge tone="green"><Globe size={12} />เว็บไซต์</Badge>{(bootstrap.demo || bootstrap.provider === "demo") && <span className="workspace-demo-label" title={bootstrap.provider === "demo" ? "ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อม AI ภายนอก ใช้ฐานข้อมูลสาธิต"}>{bootstrap.provider === "demo" ? "Demo · AI จำลอง" : "ฐานข้อมูลสาธิต"}</span>}{bootstrap.provider === "disabled" && <span className="workspace-demo-label">แชตกับทีมงาน · AI ยังไม่เปิด</span>}<a href="/chat" target="_blank" rel="noreferrer" className="button button-secondary button-sm">เปิดแชตลูกค้า <ArrowUpRight size={15} /></a></div></header>
       <main className={`main-content ${view === "inbox" ? "inbox-main" : ""}`}>
-        {view !== "inbox" && <><div className="page-heading"><div><h1>{active.label}</h1><p>{view === "dashboard" ? "ติดตามทุกบทสนทนาและโอกาสขาย ด้วยข้อมูลจริงของทีม" : view === "templates" ? "คำตอบที่ใช้บ่อย ช่วยทีมตอบได้เร็วและสม่ำเสมอ" : "จัดการข้อมูลของทีมในที่เดียว"}</p></div><Button variant="secondary" size="sm" disabled={loading} onClick={reload}><RefreshCw size={15} className={loading ? "spin" : ""} />รีเฟรช</Button></div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
+        {view !== "inbox" && <><div className="page-heading"><div><h1>{active.label}</h1><p>{view === "dashboard" ? "ติดตามทุกบทสนทนาและโอกาสขาย ด้วยข้อมูลจริงของทีม" : view === "templates" ? "คำตอบที่ใช้บ่อย ช่วยทีมตอบได้เร็วและสม่ำเสมอ" : view === "reports" ? "เวลาตอบกลับ งานค้าง และผลงานรายช่องทาง คำนวณจากข้อมูลจริงเท่านั้น" : "จัดการข้อมูลของทีมในที่เดียว"}</p></div>{view !== "reports" && <Button variant="secondary" size="sm" disabled={loading} onClick={reload}><RefreshCw size={15} className={loading ? "spin" : ""} />รีเฟรช</Button>}</div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
         {error && <div className="alert alert-error" role="alert">{error}<Button variant="ghost" size="sm" onClick={reload}>ลองอีกครั้ง</Button></div>}
         {!data && !error && <div className="workspace-loading"><span className="spinner" /><p>กำลังเปิดพื้นที่ทำงาน…</p></div>}
-        {props && <>{view === "inbox" && <InboxWorkspace {...props} />}{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={setView} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "settings" && <SettingsPanel {...props} />}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
+        {props && <>{view === "inbox" && <InboxWorkspace {...props} />}{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={setView} />}{view === "reports" && <ReportsPanel user={data!.user} members={data!.members} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "settings" && <SettingsPanel {...props} />}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
       </main>{view !== "inbox" && <footer className="workspace-footer">RRS Connect <span>เขตเวลา Asia/Bangkok (UTC+7)</span></footer>}
     </div>{toast && <div className="toast" role="status"><ShieldCheck size={18} />{toast}<button onClick={() => setToast("")} aria-label="ปิดข้อความ"><X size={14} /></button></div>}
   </div>;
@@ -75,7 +77,7 @@ function auditActionLabel(action: string, metadata?: Record<string, unknown>) {
     "conversation.claim": "รับช่วงสนทนา", "conversation.release": "ส่งกลับให้ผู้ช่วย AI",
     "conversation.resolve": "จบการสนทนา", "conversation.handoff": "ส่งต่อเจ้าหน้าที่",
     "conversation.summarize": "สรุปความต้องการ", "lead.contact": "บันทึกข้อมูลติดต่อ",
-    "widget.updated": "ปรับตั้งค่าวิดเจ็ต", updateLead: "อัปเดตข้อมูลลูกค้า",
+    "widget.updated": "ปรับตั้งค่าวิดเจ็ต", "report.exported": "ส่งออกรายงาน", updateLead: "อัปเดตข้อมูลลูกค้า",
     saveReplyTemplate: "บันทึกข้อความสำเร็จรูป", deleteReplyTemplate: "ลบข้อความสำเร็จรูป",
     createTask: "สร้างงานติดตาม", updateTask: "อัปเดตงานหรือนัดหมาย",
     saveKnowledge: "บันทึกคลังความรู้", deleteKnowledge: "ลบเนื้อหาความรู้",
