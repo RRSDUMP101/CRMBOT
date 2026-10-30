@@ -52,6 +52,24 @@ META_APP_SECRET=<secret-manager>
 META_VERIFY_TOKEN=<secret-manager>
 META_PAGE_ACCESS_TOKEN=<secret-manager>
 META_TEST_RECIPIENT=<authorized-test-page-scoped-user-id>
+# Multi-account channel registry + "เชื่อมต่อช่องทาง" wizard (registry/onboarding only;
+# inbound routing and outbound dispatch still use the single-account variables above).
+SOCIAL_ACCOUNTS_ENABLED=false
+# JSON map of key version -> base64 32-byte random key, e.g. {"1":"<base64>"}. Keep an old
+# version until POST /api/admin/social-accounts/rotate-keys reports remaining=0 (+30 minutes).
+SOCIAL_TOKEN_KEYS=<secret-manager>
+SOCIAL_TOKEN_KEY_CURRENT=<current-key-version>
+META_APP_ID=<verified-meta-app-id>
+# META_APP_SECRET above is reused for the code exchange and debug_token checks.
+# Must equal APP_ORIGIN + /api/admin/social-accounts/oauth/callback exactly.
+META_OAUTH_REDIRECT_URI=https://<app-origin>/api/admin/social-accounts/oauth/callback
+META_GRAPH_VERSION=<verified-supported-version-vNN.N>
+# Reviewed scopes only; a comma list for all Meta channels or a JSON map
+# {"facebook":"...","instagram":"...","whatsapp":"..."}. Nothing is hardcoded.
+META_OAUTH_SCOPES=<reviewed-scope-list>
+# Optional Facebook Login for Business configuration for WhatsApp Embedded Signup.
+# META_WHATSAPP_CONFIG_ID=<embedded-signup-configuration-id>
+
 # Existing Sale domestic knowledge review; CRM performs final LINE/Facebook send.
 CRM_DOMESTIC_REVIEW_ENABLED=false
 CRM_DOMESTIC_SOURCE_ORIGIN=https://<authorized-sale-staging-host>

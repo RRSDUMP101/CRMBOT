@@ -2,13 +2,14 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {api,date} from './data';
 import {Badge,Button,Card} from './ui';
+import {SocialAccountsWizard} from './social-accounts-wizard';
 
 type Provider='whatsapp'|'line'|'facebook';
 type Status={provider:Provider;accountId:string;configured:boolean;missing:string[];expectedWebhookUrl:string;owner:string;inboundEnabled:boolean;environmentLiveEnabled:boolean;sendMode:'disabled'|'test'|'live';emergencyStop:boolean;verified:boolean;verifiedAt:string|null;verificationExpiresAt:string|null;webhookVerified:boolean;lastWebhookAt:string|null;testRecipient:string|null;testPassed:boolean;errorCode:string|null;testAccount:boolean};
 const labels:Record<Provider,string>={whatsapp:'WhatsApp',line:'LINE OA',facebook:'Facebook'};
 export function SocialChannelSettings({isAdmin}:{isAdmin:boolean}){
   if(!isAdmin)return <p className="helper-text">ผู้ดูแลระบบตรวจสอบและจัดการการเชื่อมต่อ WhatsApp, LINE OA และ Facebook ได้</p>;
-  return <section aria-label="ช่องทางข้อความลูกค้า"><h2>ช่องทางข้อความลูกค้า</h2><p className="helper-text">ตรวจบัญชีและการรับข้อความก่อนเปิดให้ทีมตอบ การตรวจบัญชีไม่ส่งข้อความถึงลูกค้า</p><div className="knowledge-grid">{(['whatsapp','line','facebook'] as Provider[]).map(provider=><Channel key={provider} provider={provider}/>)}</div></section>;
+  return <section aria-label="ช่องทางข้อความลูกค้า"><h2>ช่องทางข้อความลูกค้า</h2><p className="helper-text">ตรวจบัญชีและการรับข้อความก่อนเปิดให้ทีมตอบ การตรวจบัญชีไม่ส่งข้อความถึงลูกค้า</p><div className="knowledge-grid">{(['whatsapp','line','facebook'] as Provider[]).map(provider=><Channel key={provider} provider={provider}/>)}</div><SocialAccountsWizard/></section>;
 }
 function Channel({provider}:{provider:Provider}){
   const [status,setStatus]=useState<Status|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[review,setReview]=useState(false);

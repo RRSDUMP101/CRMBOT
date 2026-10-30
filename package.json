@@ -23,7 +23,7 @@
     "test:deployment": "node --import tsx --test tests/deployment.test.ts tests/sale-sync.test.ts",
     "test:integrity": "node --import tsx --test tests/d1-integrity.test.ts",
     "test:worker": "node --import tsx tests/worker-acceptance.ts",
-    "test:chat": "node --import tsx --test tests/chat-bridge.test.ts tests/chat-runtime.test.ts tests/legacy-chat-import.test.ts tests/social-channels.test.ts tests/social-channel-admin.test.ts tests/social-consent.test.ts tests/social-media.test.ts tests/media-archive-queue.test.ts tests/approved-ai.test.ts tests/reviewed-sale-messages.test.ts tests/reviewed-sale-media.test.ts tests/reviewed-domestic-messages.test.ts tests/sale-context.test.ts tests/d1-limits.test.ts"
+    "test:chat": "node --import tsx --test tests/chat-bridge.test.ts tests/chat-runtime.test.ts tests/legacy-chat-import.test.ts tests/social-channels.test.ts tests/social-channel-admin.test.ts tests/social-accounts.test.ts tests/social-consent.test.ts tests/social-media.test.ts tests/media-archive-queue.test.ts tests/approved-ai.test.ts tests/reviewed-sale-messages.test.ts tests/reviewed-sale-media.test.ts tests/reviewed-domestic-messages.test.ts tests/sale-context.test.ts tests/d1-limits.test.ts"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-thai": "5.3.0",

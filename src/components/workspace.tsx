@@ -38,6 +38,8 @@ export default function Workspace() {
   const initialize = useCallback(async () => { setError(""); try { setBootstrap(await api<Bootstrap>("/api/bootstrap")); } catch (e) { setError((e as Error).message); } }, []);
   const reload = useCallback(async () => { if (!bootstrap?.user) return; setLoading(true); try { const params = new URLSearchParams(); if (from) params.set("from", from); if (to) params.set("to", to); setData(await api<Snapshot>("/api/admin/snapshot?" + params)); setError(""); } catch (e) { setError((e as Error).message); } finally { setLoading(false); } }, [bootstrap?.user, from, to]);
   useEffect(() => { void initialize(); }, [initialize]);
+  // The channel connection wizard returns here from the provider's consent screen.
+  useEffect(() => { if (window.location.hash === "#social-accounts") setView("integrations"); }, []);
   useEffect(() => { void reload(); }, [reload]);
   useEffect(()=>bootstrap?.user?subscribeCRMChanges(()=>void reload()):undefined,[bootstrap?.user,reload]);
   useEffect(() => { if (!bootstrap?.user) return; const timer = setInterval(() => void reload(), 15000); return () => clearInterval(timer); }, [bootstrap?.user, reload]);

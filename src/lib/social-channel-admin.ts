@@ -7,7 +7,7 @@ type Options={config?:SocialChannelConfig;fetch?:typeof fetch};
 const now=()=>new Date().toISOString().replace(/(\.\d{3})Z$/,(_,fraction)=>fraction+'000Z');
 const expiry=(ms:number)=>new Date(ms).toISOString().replace(/(\.\d{3})Z$/,(_,fraction)=>fraction+'000Z');
 const expectedBusinessPhone='66815441815'; // Existing source's owner-selected RRS business sender.
-function expectedPhone(config:SocialChannelConfig){return config.whatsappAccountMode==='meta-test'?config.expectedDisplayPhone||'':expectedBusinessPhone;}
+function expectedPhone(config:SocialChannelConfig,registered?:string){return registered!==undefined?registered:config.whatsappAccountMode==='meta-test'?config.expectedDisplayPhone||'':expectedBusinessPhone;}
 const code=(message:string,status=409)=>new ApiError(status,message);
 function missing(config:SocialChannelConfig){
   const values:Record<string,unknown>={SOCIAL_CHANNELS_ORG_ID:config.orgId,APP_ORIGIN:config.webhookUrl};
@@ -17,13 +17,13 @@ function missing(config:SocialChannelConfig){
   if(config.provider==='whatsapp'&&config.whatsappAccountMode==='meta-test')values.WHATSAPP_EXPECTED_DISPLAY_PHONE=config.expectedDisplayPhone;
   return Object.keys(values).filter(key=>!values[key]);
 }
-function validConfig(config:SocialChannelConfig){
+function validConfig(config:SocialChannelConfig,registeredPhone?:string){
   if(missing(config).length)throw code('configuration_missing',503);
   let url:URL;try{url=new URL(config.webhookUrl!);}catch{throw code('callback_configuration_invalid',503);}
   if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||url.pathname!=='/api/channels/'+config.provider)throw code('callback_configuration_invalid',503);
   if(config.provider!=='line'&&(!/^v\d+\.\d+$/.test(config.apiVersion!)||!/^\d{5,40}$/.test(config.accountId)))throw code('account_configuration_invalid',503);
   if(config.provider==='whatsapp'&&(!/^\d{5,40}$/.test(config.appId!)||!/^\d{5,40}$/.test(config.wabaId!)))throw code('account_configuration_invalid',503);
-  if(config.provider==='whatsapp'&&(!['business','meta-test'].includes(config.whatsappAccountMode||'business')||!/^\+?[1-9]\d{7,14}$/.test(expectedPhone(config))))throw code('whatsapp_account_mode_invalid',503);
+  if(config.provider==='whatsapp'&&(!['business','meta-test'].includes(config.whatsappAccountMode||'business')||!/^\+?[1-9]\d{7,14}$/.test(expectedPhone(config,registeredPhone))))throw code('whatsapp_account_mode_invalid',503);
 }
 async function authorized(staff:Staff){requireAdmin(staff);await transaction(staff.orgId,async()=>{},staff);}
 async function audit(c:Executor,staff:Staff,provider:SocialProvider,action:string,detail:Record<string,unknown>={}){
@@ -52,8 +52,8 @@ async function providerJson(url:string,token:string,transport:typeof fetch){
   try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.length;if(size>128000){await reader.cancel();throw code('provider_response_invalid',502);}text+=decoder.decode(part.value,{stream:true});}text+=decoder.decode();}finally{reader.releaseLock();}
   try{const value=JSON.parse(text);if(!value||typeof value!=='object'||Array.isArray(value))throw Error();return value as Record<string,any>;}catch{throw code('provider_response_invalid',502);}
 }
-async function verifyProvider(config:SocialChannelConfig,transport:typeof fetch){
-  validConfig(config);const token=config.accessToken!;
+async function verifyProvider(config:SocialChannelConfig,transport:typeof fetch,registeredPhone?:string){
+  validConfig(config,registeredPhone);const token=config.accessToken!;
   if(config.provider==='line'){
     const info=await providerJson('https://api.line.me/v2/bot/info',token,transport);
     if(info.userId!==config.accountId)throw code('provider_account_mismatch');
@@ -77,9 +77,9 @@ async function verifyProvider(config:SocialChannelConfig,transport:typeof fetch)
   for(const field of ['expires_at','data_access_expires_at'])if(data[field]!==undefined&&data[field]!==0){const milliseconds=Number(data[field])*1000;if(!Number.isFinite(milliseconds)||milliseconds<=Date.now())throw code('provider_token_expired');expires=Math.min(expires,milliseconds);}
   const numbers=await providerJson(base+config.wabaId+'/phone_numbers?fields=id,display_phone_number,verified_name&limit=100',token,transport);
   const selected=Array.isArray(numbers.data)&&numbers.data.find((phone:any)=>String(phone.id)===config.accountId);
-  if(!selected||String(selected.display_phone_number||'').replace(/\D/g,'')!==expectedPhone(config).replace(/^\+/,''))throw code('provider_business_sender_mismatch');
+  if(!selected||String(selected.display_phone_number||'').replace(/\D/g,'')!==expectedPhone(config,registeredPhone).replace(/^\+/,''))throw code('provider_business_sender_mismatch');
   const phone=await providerJson(base+config.accountId+'?fields=id,display_phone_number,status,platform_type,code_verification_status,is_on_biz_app',token,transport);
-  if(String(phone.id)!==config.accountId||String(phone.display_phone_number||'').replace(/\D/g,'')!==expectedPhone(config).replace(/^\+/,'' )||phone.status!=='CONNECTED'||phone.platform_type!=='CLOUD_API')throw code('provider_phone_not_connected');
+  if(String(phone.id)!==config.accountId||String(phone.display_phone_number||'').replace(/\D/g,'')!==expectedPhone(config,registeredPhone).replace(/^\+/,'' )||phone.status!=='CONNECTED'||phone.platform_type!=='CLOUD_API')throw code('provider_phone_not_connected');
   let app:Record<string,any>|undefined,after='';
   for(let page=0;page<5;page++){
     const body=await providerJson(base+config.wabaId+'/subscribed_apps?limit=100'+(after?'&after='+encodeURIComponent(after):''),token,transport);
@@ -93,6 +93,16 @@ async function verifyProvider(config:SocialChannelConfig,transport:typeof fetch)
   const hook=Array.isArray(subscriptions.data)&&subscriptions.data.find((item:any)=>item.object==='whatsapp_business_account');
   if(!hook||hook.active!==true||!Array.isArray(hook.fields)||!hook.fields.some((field:any)=>(typeof field==='string'?field:field?.name)==='messages')||hook.callback_url!==config.webhookUrl&&app.override_callback_uri!==config.webhookUrl)throw code('provider_callback_mismatch');
   return {expires,detail:{accountMatched:true,businessSenderMatched:true,permissionsChecked:true,callbackMatched:true}};
+}
+
+/**
+ * Read-only provider checks for a registry account (multi-account wizard). Reuses the
+ * exact fixed-host GET checks above; a registered WhatsApp account is pinned to the
+ * business sender selected during authorization instead of the env-configured sender.
+ * Never writes social_channel_controls and never enables sending.
+ */
+export async function verifyRegisteredChannel(config:SocialChannelConfig,transport:typeof fetch,registeredPhone?:string){
+  return verifyProvider(config,transport,config.provider==='whatsapp'?registeredPhone??'':undefined);
 }
 
 export async function socialChannelAction(staff:Staff,provider:SocialProvider,input:Record<string,unknown>,options:Options={}){
