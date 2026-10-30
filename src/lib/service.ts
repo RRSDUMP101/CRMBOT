@@ -176,6 +176,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       if(next.phone&&!/^\+?[0-9 ()-]{7,32}$/.test(next.phone))throw new ApiError(400,'เบอร์โทรไม่ถูกต้อง');
       if(next.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
       await connection.query("UPDATE leads SET name=$3,phone=$4,email=$5,tags=$6,interests=$7,market=$8,stage=$9,assignee_id=$10,source=$11,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,old.id,next.name,next.phone,next.email,JSON.stringify(next.tags),next.interests,next.market,next.stage,next.assignee_id,next.source]);
+      if(process.env.FLOWS_ENABLED==='true')await (await import('./flows')).recordLeadChange(connection,staff.orgId,old.id,{tags:old.tags,stage:old.stage},{tags:next.tags,stage:next.stage});
     } else if(action==='createTask') {
       fields(values,['leadId','title','dueAt','kind','assigneeId','notes']);
       const lead=await scopedLead(connection,staff.orgId,uuid(values.leadId));

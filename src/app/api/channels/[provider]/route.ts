@@ -17,7 +17,8 @@ export async function POST(request: Request,context: Context) {
     if(new URL(request.url).protocol !== 'https:') throw new ApiError(400,'HTTPS required');
     const provider=socialProvider((await context.params).provider);
     await rateLimit('social-webhook:'+provider,provider === 'whatsapp' ? 600 : 300,60);
-    const result=await ingestSocialWebhook(provider,await readSocialBody(request),request.headers,readSocialConfig(provider));
+    const worker=process.env.RRS_WORKERS==='true'&&process.env.FLOWS_ENABLED==='true'?(await import('@opennextjs/cloudflare')).getCloudflareContext().ctx:undefined;
+    const result=await ingestSocialWebhook(provider,await readSocialBody(request),request.headers,readSocialConfig(provider),{defer:worker?task=>worker.waitUntil(task):undefined});
     if(provider==='whatsapp'&&process.env.SOCIAL_MEDIA_ARCHIVE_ENABLED==='true'&&process.env.RRS_WORKERS==='true'){
       const {getCloudflareContext}=await import('@opennextjs/cloudflare');
       const {runMediaArchiveJobs}=await import('@/lib/media-archive-queue');
