@@ -255,7 +255,11 @@ async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Even
     if(archive)await (await import('./media-archive-queue')).enqueueInboundMediaArchive(c,config,attachmentId);
   }
   const optOut=/^(stop|unsubscribe|หยุดติดต่อ|หยุด|ยกเลิกการติดต่อ)(?:$|\s|[.!])/i.test(event.text!.trim());
-  if(optOut) await c.query('UPDATE social_identities SET opt_out=1,updated_at=$3 WHERE org_id=$1 AND id=$2',[config.orgId,identity.id,time]);
+  if(optOut) {
+    await c.query('UPDATE social_identities SET opt_out=1,updated_at=$3 WHERE org_id=$1 AND id=$2',[config.orgId,identity.id,time]);
+    // A keyword opt-out durably suppresses broadcasts even if a later follow clears opt_out.
+    await c.query("INSERT OR IGNORE INTO broadcast_suppressions(org_id,provider,remote_id,reason,created_at) VALUES($1,$2,$3,'opt_out_keyword',$4)",[config.orgId,config.provider,event.remote,time]);
+  }
   await c.query(`UPDATE conversations SET customer_message_seq=customer_message_seq+$3,first_customer_at=CASE WHEN $3=1 THEN COALESCE(first_customer_at,$4) ELSE first_customer_at END,updated_at=$5 WHERE org_id=$1 AND id=$2`,[config.orgId,identity.conversation_id,event.echo ? 0 : 1,event.at,time]);
   await cancelGeneration(c,config.orgId,identity.conversation_id,event.echo ? 'External employee reply' : 'New customer message',false);
   return true;
@@ -326,10 +330,12 @@ async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig
   const elapsed=Date.now()-Date.parse(inbound || '');
   const reviewed=await (await import('./reviewed-sale-messages')).reviewedSalePayload(c,command.org_id,command.id);
   const domestic=await (await import('./reviewed-domestic-messages')).domesticPayload(c,command.org_id,command.id);
+  // Broadcast intents carry their own Admin approval instead of a human conversation claim.
+  const broadcast=await (await import('./broadcast')).broadcastCommandGuard(c,command,config);
   if(domestic&&(domestic.actorId!==command.approved_by||domestic.provider!==command.provider||domestic.accountId!==command.account_id||domestic.remoteId!==command.remote_id||domestic.text!==command.body))throw new ApiError(409,'Domestic reviewed command linkage changed');
   if(reviewed&&(reviewed.actorId!==command.approved_by||reviewed.accountId!==command.account_id||reviewed.remoteId!==command.remote_id||reviewed.text!==command.body))throw new ApiError(409,'Reviewed Sale command linkage changed');
   if(command.provider === 'whatsapp' || command.provider === 'facebook') {
-    if(!(command.provider==='whatsapp'&&reviewed?.template)&&(!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 86_400_000)) throw new ApiError(409,'Verified inbound message required within the 24 hour reply window or an exact reviewed template');
+    if(!(command.provider==='whatsapp'&&(reviewed?.template||broadcast?.template))&&(!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 86_400_000)) throw new ApiError(409,'Verified inbound message required within the 24 hour reply window or an exact reviewed template');
   } else {
     const friendship=(await c.query("SELECT event_kind FROM social_events WHERE org_id=$1 AND provider='line' AND account_id=$2 AND remote_id=$3 AND event_kind IN ('follow','unfollow') ORDER BY received_at DESC,event_id DESC LIMIT 1",[command.org_id,command.account_id,command.remote_id])).rows[0];
     if(friendship?.event_kind !== 'follow' && (!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 7*86_400_000)) throw new ApiError(409,'Verified LINE follow or inbound within seven days required');
@@ -339,7 +345,7 @@ async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig
     if(!lead?.contact_consent_at || !lead.contact_consent_version) throw new ApiError(409,'Recorded WhatsApp contact consent evidence required');
   }
   const conversation=(await c.query('SELECT * FROM conversations WHERE org_id=$1 AND id=$2',[command.org_id,command.conversation_id])).rows[0];
-  if(!conversation || conversation.version !== command.conversation_version || conversation.status !== 'human_active' || conversation.assignee_id !== command.approved_by) throw new ApiError(409,'Human approval is stale after takeover or new input');
+  if(!conversation || conversation.version !== command.conversation_version || !broadcast && (conversation.status !== 'human_active' || conversation.assignee_id !== command.approved_by)) throw new ApiError(409,'Human approval is stale after takeover or new input');
   if(reviewed&&conversation.customer_message_seq!==reviewed.expectedCustomerSeq)throw new ApiError(409,'Reviewed Sale customer generation changed');
   if(domestic&&conversation.customer_message_seq!==domestic.expectedCustomerSeq)throw new ApiError(409,'Domestic customer generation changed');
   const member=(await c.query('SELECT active,role FROM members WHERE org_id=$1 AND id=$2',[command.org_id,command.approved_by])).rows[0];
@@ -362,7 +368,7 @@ function providerRequest(config: SocialChannelConfig,command: Row,signal: AbortS
   } else {
     // Fixed provider host; untrusted message media URLs are never fetched by this module.
     url=`https://graph.facebook.com/${config.apiVersion}/${encodeURIComponent(config.accountId)}/messages`;
-    body=config.provider === 'whatsapp' ? {messaging_product:'whatsapp',recipient_type:'individual',to:command.remote_id,...(command.reviewed_template?{type:'template',template:{name:command.reviewed_template.name,language:{code:command.reviewed_template.language}}}:{type:'text',text:{preview_url:false,body:command.body}}),biz_opaque_callback_data:command.attempt_id} : {recipient:{id:command.remote_id},messaging_type:'RESPONSE',message:{text:command.body}};
+    body=config.provider === 'whatsapp' ? {messaging_product:'whatsapp',recipient_type:'individual',to:command.remote_id,...(command.reviewed_template?{type:'template',template:{name:command.reviewed_template.name,language:{code:command.reviewed_template.language},...(command.reviewed_template.components?{components:command.reviewed_template.components}:{})}}:{type:'text',text:{preview_url:false,body:command.body}}),biz_opaque_callback_data:command.attempt_id} : {recipient:{id:command.remote_id},messaging_type:'RESPONSE',message:{text:command.body}};
   }
   return {url,init:{method:'POST',headers,body:JSON.stringify(body),redirect:'manual',signal}};
 }
@@ -391,7 +397,8 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
     // Messenger read watermarks compare against the send attempt, never an earlier queued draft time.
     await c.query("UPDATE social_message_provenance SET delivery_status='sending',provider_timestamp=$3 WHERE org_id=$1 AND message_id=$2",[orgId,command.message_id,now()]);
     const reviewed=await (await import('./reviewed-sale-messages')).reviewedSalePayload(c,orgId,commandId);
-    return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,reviewed_template:reviewed?.template,claimed:true};
+    const template=reviewed?.template||await (await import('./broadcast')).broadcastTemplate(c,orgId,commandId)||undefined;
+    return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,reviewed_template:template,claimed:true};
   });
   if(!claimed.claimed) return {commandId,status:claimed.status};
   const config=options.config || readSocialConfig(claimed.provider);
