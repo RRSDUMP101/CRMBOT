@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { subscribeCRMChanges } from './realtime';
-import { ArrowLeft, ArrowUpRight, Bookmark, Check, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X } from "lucide-react";
-import { api, date, stageNames, stages, statusNames, type Detail } from "./data";
+import { ArrowLeft, ArrowUpRight, Bookmark, Check, ClipboardList, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X } from "lucide-react";
+import { api, date, stageNames, stages, statusNames, type Detail, type SaleContext } from "./data";
 import { emptyCounts, queueNames, type InboxItem, type InboxQueue, type InboxResult, type ReplyTemplate } from "./inbox-data";
 import { Badge, Button, Empty, Input, Select, Textarea } from "./ui";
 import { ChatMessage, LeadEditor, Modal, Summary } from "./workspace-panels";
@@ -114,6 +114,7 @@ export function InboxWorkspace({ data, reload, notify }: PanelProps) {
       <dl className="profile-fields"><dt>เบอร์โทร</dt><dd>{activeDetail.lead.phone || "ยังไม่ระบุ"}</dd><dt>อีเมล</dt><dd>{activeDetail.lead.email || "ยังไม่ระบุ"}</dd><dt>ตลาด</dt><dd>{activeDetail.lead.market === "export" ? "ส่งออก" : activeDetail.lead.market === "domestic" ? "ในประเทศ" : "ยังไม่ยืนยัน"}</dd><dt>ความสนใจ</dt><dd>{activeDetail.lead.interests || "กำลังเก็บข้อมูล"}</dd><dt>ผู้ดูแลลูกค้า</dt><dd>{data.members.find(member => member.id === activeDetail.lead.assigneeId)?.name || "ยังไม่มอบหมาย"}</dd></dl>
       {data.user.role === 'Admin' && <WhatsAppConsent key={activeDetail.conversation.id} conversationId={activeDetail.conversation.id}/>}
       <div className="profile-section"><h3>แท็ก <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>แก้ไข</Button></h3><div className="tag-list">{activeDetail.lead.tags.length ? activeDetail.lead.tags.map(tag => <Badge key={tag}>{tag}</Badge>) : <span className="profile-placeholder">ยังไม่มีแท็ก</span>}</div></div>
+      {activeDetail.saleContext && <SaleContextSection context={activeDetail.saleContext} />}
       <div className="profile-section"><h3><Sparkles size={16} />สรุปความต้องการ</h3><Button variant="secondary" size="sm" className="full-width" disabled={busy} onClick={() => act("summarize")}>สรุปจากข้อมูลลูกค้า</Button>{activeDetail.lead.summary ? <Summary lead={activeDetail.lead} /> : <p className="profile-placeholder">สรุปจะแยกข้อเท็จจริงและสิ่งที่ต้องตรวจสอบ</p>}</div>
       <details className="profile-facts"><summary>ข้อมูลจากบทสนทนา <ChevronDown size={14} /></summary>{Object.entries(activeDetail.lead.facts || {}).length ? Object.entries(activeDetail.lead.facts).map(([key, value]) => <p key={key}><strong>{key}</strong><span>{value}</span></p>) : <p>ยังไม่มีข้อมูลที่จับจากบทสนทนา</p>}</details>
     </div>
@@ -149,4 +150,23 @@ export function InboxWorkspace({ data, reload, notify }: PanelProps) {
     {profileOpen && <button className="profile-backdrop" aria-label="ปิดข้อมูลลูกค้า" onClick={() => setProfileOpen(false)} />}
     {editing && activeDetail && <Modal title="แก้ไขข้อมูลลูกค้า" close={() => setEditing(false)}><LeadEditor lead={activeDetail.lead} data={data} reload={async () => { await Promise.all([reload(), loadDetail(selected), refreshList()]); }} notify={notify} close={() => setEditing(false)} /></Modal>}
   </section>;
+}
+
+const quotationNames: Record<string, string> = { draft: "ร่าง", review: "รอผู้บริหารตรวจ", approved: "อนุมัติแล้ว", sent: "ส่งแล้ว", accepted: "ลูกค้ายอมรับ", expired: "หมดอายุ", cancelled: "ยกเลิก" };
+const productionNames: Record<string, string> = { planned: "วางแผน", producing: "กำลังผลิต", qc: "รอ QC", qc_passed: "ผ่าน QC", delivered: "ส่งมอบแล้ว", cancelled: "ยกเลิก" };
+const shipmentNames: Record<string, string> = { preparing: "เตรียมส่ง", active: "กำลังขนส่ง", completed: "ส่งถึงแล้ว", cancelled: "ยกเลิก" };
+/** Read-only Sale Office facts. Editing stays in Sale Office; nothing here is sent to the customer. */
+function SaleContextSection({ context }: { context: SaleContext }) {
+  return <div className="profile-section" aria-label="ข้อมูลฝ่ายขายจาก Sale Office"><h3><ClipboardList size={16} />ข้อมูลฝ่ายขาย (Sale Office)</h3>
+    {!context.deals.length ? <p className="profile-placeholder">ยังไม่มีดีลที่เชื่อมกับลูกค้ารายนี้</p> : context.deals.map(deal => <dl className="sale-context" key={deal.dealId}>
+      <dt>ดีล</dt><dd>{deal.title} · {deal.workspace === "domestic" ? "ในประเทศ" : "ส่งออก"}</dd>
+      <dt>สถานะ</dt><dd>{deal.salesStatus || "—"}{deal.waitingLabel ? ` · ${deal.waitingLabel}` : ""}</dd>
+      <dt>งานถัดไป</dt><dd>{deal.nextAction || "—"}{deal.followDate ? ` · ${deal.followDate}` : ""}</dd>
+      <dt>ใบเสนอราคา</dt><dd>{deal.quotation ? `${deal.quotation.number} r${deal.quotation.revision} · ${quotationNames[deal.quotation.status] || deal.quotation.status}` : "—"}</dd>
+      <dt>ใบสั่งขาย</dt><dd>{deal.salesOrder ? deal.salesOrder.number : "—"}</dd>
+      <dt>การชำระเงิน</dt><dd>{deal.payments.confirmed} ยืนยันแล้ว · {deal.payments.reported} รอตรวจ</dd>
+      <dt>ผลิต / ขนส่ง</dt><dd>{deal.production ? productionNames[deal.production.status] || deal.production.status : "—"} / {deal.shipment ? shipmentNames[deal.shipment.status] || deal.shipment.status : "—"}</dd>
+    </dl>)}
+    <p className="helper-text">{context.error ? "ซิงก์จาก Sale ล่าสุดไม่สำเร็จ ข้อมูลอาจไม่ใช่ล่าสุด" : context.syncedAt ? `ซิงก์จาก Sale ${date(context.syncedAt)}` : "ยังไม่เคยซิงก์จาก Sale"} · แก้ไขได้ใน Sale Office เท่านั้น</p>
+  </div>;
 }

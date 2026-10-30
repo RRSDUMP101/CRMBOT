@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
+import { database, transaction, camel, demoMode, getDatabase, type Executor, type Row } from './db';
+import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
@@ -49,9 +50,11 @@ export async function createVisitor(context:'web'|'widget'='web'): Promise<{toke
 export async function conversationDetail(orgId:string,id:string,internal=false,admin=false) {
   const conversation=await scopedConversation(database,orgId,id);
   const lead=await scopedLead(database,orgId,conversation.lead_id);
+  // Staff only: Sale-owned deal context. Visitor responses never include it.
+  let saleContext=null;if(internal){const binding=await getDatabase();await refreshSaleContextIfStale(binding,process.env).catch(()=>undefined);saleContext=await saleContextForLead(binding,orgId,lead.id).catch(()=>null);}
   const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
-  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
+  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
 export async function visitorDetail(visitor: Visitor) {
   const detail=await conversationDetail(visitor.orgId,visitor.conversationId);
@@ -173,6 +176,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       if(next.phone&&!/^\+?[0-9 ()-]{7,32}$/.test(next.phone))throw new ApiError(400,'เบอร์โทรไม่ถูกต้อง');
       if(next.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
       await connection.query("UPDATE leads SET name=$3,phone=$4,email=$5,tags=$6,interests=$7,market=$8,stage=$9,assignee_id=$10,source=$11,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,old.id,next.name,next.phone,next.email,JSON.stringify(next.tags),next.interests,next.market,next.stage,next.assignee_id,next.source]);
+      if(process.env.FLOWS_ENABLED==='true')await (await import('./flows')).recordLeadChange(connection,staff.orgId,old.id,{tags:old.tags,stage:old.stage},{tags:next.tags,stage:next.stage});
     } else if(action==='createTask') {
       fields(values,['leadId','title','dueAt','kind','assigneeId','notes']);
       const lead=await scopedLead(connection,staff.orgId,uuid(values.leadId));
@@ -277,7 +281,7 @@ export async function snapshot(staff:Staff,url:URL) {
   const count=results[6].rows[0];const usage=results[9].rows[0];const stages:Record<string,number>={New:0,Qualified:0,'Follow-up':0,Won:0,Lost:0};
   for(const row of results[7].rows)stages[row.stage]=row.total;
   const nullable=(value:unknown)=>value===null||value===undefined?null:Number(value);
-  const visibleAudit=results[5].rows.filter(row=>staff.role==='Admin'||!/^whatsapp_consent\.|^social_channel\./.test(String(row.action)));
+  const visibleAudit=results[5].rows.filter(row=>staff.role==='Admin'||!/^whatsapp_consent\.|^social_channel\.|^social_account\.|^broadcast\./.test(String(row.action)));
   return {user:publicMember(staff),conversations:results[0].rows.map(conversationView),leads:results[1].rows.map(leadView),tasks:rows(results[2].rows),knowledge:rows(results[3].rows),members:rows(results[4].rows),settings:await orgSettings(staff.orgId),audit:rows(visibleAudit),integrations:{sheets:'not_connected',drive:'not_connected',channels:'see_channel_settings'},
     metrics:{conversations:count.total,newLeads:Object.values(stages).reduce((a,b)=>a+b,0),stages,dueTasks:results[8].rows[0].total,handoffRate:count.total?count.handed_off/count.total:0,aiFirstResponseMs:nullable(count.ai_ms),humanFirstResponseMs:nullable(count.human_ms),inputTokens:nullable(usage.input_tokens),outputTokens:nullable(usage.output_tokens),estimatedCostUsd:nullable(usage.cost),timezone:'Asia/Bangkok'},range:{from:range.from,to:range.to},
     metricDefinitions:{cohort:'บทสนทนาและลีดที่สร้างในช่วงวันที่กรุงเทพฯ; Pipeline แสดงสถานะปัจจุบันของกลุ่มนี้',handoff:'บทสนทนาในช่วงวันที่ที่เคยส่งต่ออย่างน้อยหนึ่งครั้ง / บทสนทนาทั้งหมดในช่วงวันที่',aiFirstResponse:'เวลาจากข้อความลูกค้าแรกถึงส่วนข้อความ AI แรกที่ส่งได้',humanFirstResponse:'เวลาจากส่งต่อครั้งแรกถึงคำตอบสาธารณะแรกของพนักงาน; ไม่รวมบันทึกภายใน',dueTasks:'งานที่ยังเปิด รอยืนยัน หรือยืนยันแล้ว และถึงกำหนด ณ เวลาปัจจุบัน ทุกช่วงวันที่',usage:'ผลรวม usage ที่ผู้ให้บริการรายงานสำหรับข้อความในช่วงวันที่; null หมายถึงไม่มีข้อมูล'}};

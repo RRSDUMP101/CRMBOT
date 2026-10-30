@@ -8,6 +8,7 @@ import { adminWidgetConfig, getPublicWidgetConfig, getWidgetEmbedConfig, inbox, 
 import {downloadFile,listFiles,uploadFile} from '@/lib/files';
 import {realtimeResponse} from '@/lib/realtime';
 import {downloadSocialAttachment} from '@/lib/social-media';
+import {buildReport,exportReport} from '@/lib/reports';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -60,6 +61,7 @@ async function handle(request:NextRequest) {
       if(path.join('/')==='admin/events'&&method==='GET')return await realtimeResponse(request,'staff');
       if(path[1]==='social-attachments'&&path.length===3&&method==='GET')return await downloadSocialAttachment(staff.orgId,uuid(path[2]),fetch,staff.role==='Admin');
       if(method==='POST')await rateLimit(`staff:${staff.orgId}:${staff.id}`,120,60);
+      if(path[1]==='flows')return json(await (await import('@/lib/flows')).flowsApi(staff,method,path.slice(2),method==='POST'?await readJson(request):undefined));
       if(path.join('/')==='admin/media-archive'&&method==='GET')return json(await (await import('@/lib/media-archive-queue')).mediaArchiveStatus(staff));
       if(path.join('/')==='admin/media-archive/retry'&&method==='POST'){
         const body=await readJson(request);fields(body,['attachmentId']);return json(await (await import('@/lib/media-archive-queue')).retryMediaArchive(staff,uuid(body.attachmentId)));
@@ -73,6 +75,13 @@ async function handle(request:NextRequest) {
       if(path.join('/')==='admin/widget'&&method==='POST')return json(await saveWidgetConfig(staff,await readJson(request)));
       if(path.join('/')==='admin/inbox'&&method==='GET')return json(await inbox(staff,url));
       if(path.join('/')==='admin/inbox/summary'&&method==='GET')return json(await inboxSummary(staff));
+      // Read-only reports: Admin and Agent may view (Agents get org aggregates plus only their own row); CSV export is Admin-only and audited.
+      if(path.join('/')==='admin/reports'&&method==='GET'){await rateLimit(`report:${staff.orgId}:${staff.id}`,60,60);return json(await buildReport(staff,url));}
+      if(path.join('/')==='admin/reports/export'&&method==='GET'){
+        await rateLimit(`report-export:${staff.orgId}:${staff.id}`,20,600);
+        const file=await exportReport(staff,url);
+        return new Response(file.body,{status:200,headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="${file.filename}"`,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+      }
       if(path.join('/')==='admin/reply-templates'&&method==='GET')return json(await replyTemplates(staff));
       if(path[1]==='snapshot'&&path.length===2&&method==='GET')return json(await snapshot(staff,url));
       if(path[1]==='conversations'&&path.length===3&&method==='GET')return json(await conversationDetail(staff.orgId,uuid(path[2]),true,staff.role==='Admin'));
