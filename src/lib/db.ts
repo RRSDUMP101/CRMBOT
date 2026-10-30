@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { ApiError } from './errors';
 
@@ -39,7 +40,17 @@ async function execute<T extends Row = Row>(binding: D1Binding, sql: string, par
   const rows = (result.results || []).map(decode) as T[];
   return { rows, rowCount: /^(SELECT|WITH)\b/i.test(sql.trim()) ? rows.length : result.meta?.changes ?? rows.length };
 }
+const scopedBinding = new AsyncLocalStorage<D1Binding>();
+/**
+ * Runs trusted server work against an explicit D1 binding, e.g. the scheduled handler, which
+ * has env.DB but no OpenNext request context. Request handlers keep using the context binding.
+ */
+export function withDatabase<T>(binding: D1Binding, work: () => Promise<T>): Promise<T> {
+  return scopedBinding.run(binding.withSession?.('first-primary') || binding, work);
+}
 export async function getDatabase(): Promise<D1Binding> {
+  const scoped = scopedBinding.getStore();
+  if (scoped) return scoped;
   if (process.env.RRS_WORKERS === 'true') {
     if (demoMode()) throw new Error('Demo database is unavailable in deployed Workers');
     if ((process.env.SESSION_SECRET || '').length < 32) throw new Error('SESSION_SECRET is required');

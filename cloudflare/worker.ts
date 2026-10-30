@@ -21,6 +21,8 @@ export default {
     if(sale.status!=='disabled'&&sale.status!=='sent')console.warn('Sale reconcile '+sale.status+(sale.httpStatus?' '+sale.httpStatus:''));
     // Sale-owned deal context for agents; independent of the archive runner below.
     if(env.DB){const context=await pullSaleContext(env.DB as D1Binding,env,saleFetcher(env)).catch(()=>({status:'error'}));if(context.status==='error')console.warn('Sale context pull failed');}
+    // Flow Builder runner (default off). Runs alongside, never blocks or fails, the archive runner below.
+    if(env.FLOWS_ENABLED==='true'&&env.DB)ctx.waitUntil(import('../src/lib/flows').then(flows=>flows.runFlows(env.DB as D1Binding,env)).then(result=>{if(result.status==='error')console.warn('Flow runner partially failed');},()=>console.warn('Flow runner failed')));
     if(env.SOCIAL_MEDIA_ARCHIVE_ENABLED!=='true'||env.SOCIAL_CHANNELS_OWNER!=='crm'||env.SOCIAL_INBOUND_ENABLED!=='true')return;
     if(typeof env.APP_ORIGIN!=='string'||typeof env.SESSION_SECRET!=='string')throw new Error('Archive runner configuration unavailable');
     const response=await application.fetch(applicationRequest(mediaArchiveRunnerRequest(env.APP_ORIGIN,env.SESSION_SECRET)),{...env,ASSETS:env.ASSETS||bundledAssets},ctx);

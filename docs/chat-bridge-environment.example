@@ -78,6 +78,12 @@ BROADCAST_MAX_RECIPIENTS=1000
 CRM_DOMESTIC_REVIEW_ENABLED=false
 CRM_DOMESTIC_SOURCE_ORIGIN=https://<authorized-sale-staging-host>
 
+# Flow Builder ("ระบบอัตโนมัติ"). Engine, inbound hook and minute-cron runner are off by default.
+# Customer sends also need FLOWS_SEND_ENABLED and still pass every social outbound gate above.
+FLOWS_ENABLED=false
+FLOWS_SEND_ENABLED=false
+FLOWS_DAILY_SEND_LIMIT=200
+
 # Operator import CLI only; never browser configuration.
 CRM_BRIDGE_ORIGIN=https://<authorized-crm-staging-host>
 # APP_ORIGIN must match the actual target host; retain independent SESSION_SECRET,
