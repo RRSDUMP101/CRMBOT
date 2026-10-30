@@ -68,7 +68,7 @@ describe('Database upgrade and durable inbox state', {concurrency:false},()=>{
     assert.equal((await readItem()).unreadCount,0);
     assert.equal((await readItem(ids.secondMember)).unreadCount,2);
     const versions=await database.query('SELECT version FROM schema_migrations ORDER BY version');
-    assert.deepEqual(versions.rows.map(row=>row.version),[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,18]);
+    assert.deepEqual(versions.rows.map(row=>row.version),[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,18]);
   });
 
   test('cursor pagination preserves microseconds and UUID tie-breaks without skipping records',async()=>{
