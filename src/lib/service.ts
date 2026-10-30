@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
+import { database, transaction, camel, demoMode, getDatabase, type Executor, type Row } from './db';
+import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
@@ -49,9 +50,11 @@ export async function createVisitor(context:'web'|'widget'='web'): Promise<{toke
 export async function conversationDetail(orgId:string,id:string,internal=false,admin=false) {
   const conversation=await scopedConversation(database,orgId,id);
   const lead=await scopedLead(database,orgId,conversation.lead_id);
+  // Staff only: Sale-owned deal context. Visitor responses never include it.
+  let saleContext=null;if(internal){const binding=await getDatabase();await refreshSaleContextIfStale(binding,process.env).catch(()=>undefined);saleContext=await saleContextForLead(binding,orgId,lead.id).catch(()=>null);}
   const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
-  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
+  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
 export async function visitorDetail(visitor: Visitor) {
   const detail=await conversationDetail(visitor.orgId,visitor.conversationId);

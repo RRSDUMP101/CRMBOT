@@ -20,7 +20,7 @@ test('Sale sync is default off and rejects unsafe targets', async () => {
 
 test('wake carries the committed head once, retries after failure, and is verifiable by Sale', async () => {
   resetSaleSyncForTest();const bodies:Record<string,unknown>[]=[];let status=500;
-  const fetcher=(async(u:string,init:RequestInit)=>{const request=new Request(u,init);assert.equal(request.headers.get('origin'),null);const {body}=await verifyBridgeRequest(request,{secret,orgId},4096);bodies.push(JSON.parse(body));assert.equal(init.redirect,'error');return new Response('{}',{status});}) as unknown as typeof fetch;
+  const fetcher=(async(u:string,init:RequestInit)=>{const request=new Request(u,init);assert.equal(request.headers.get('origin'),null);const {body}=await verifyBridgeRequest(request,{secret,orgId},4096);bodies.push(JSON.parse(body));assert.equal(init.redirect,'manual','Workers rejects redirect:error; manual + non-2xx check never follows');return new Response('{}',{status});}) as unknown as typeof fetch;
   assert.deepEqual(await notifySale(enabled(7),'wake',fetcher),{status:'failed',httpStatus:500});
   status=200;assert.deepEqual(await notifySale(enabled(7),'wake',fetcher),{status:'sent',httpStatus:200},'a failed wake is retried on the next commit');
   assert.deepEqual(await notifySale(enabled(7),'wake',fetcher),{status:'unchanged'},'same head is not resent');

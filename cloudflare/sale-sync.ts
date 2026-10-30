@@ -24,7 +24,7 @@ export async function notifySale(env:Env,reason:'wake'|'reconcile',fetcher:typeo
     headSequence=Number(row?.head??0);if(!Number.isSafeInteger(headSequence)||headSequence<=notified)return {status:'unchanged'} as const;
   }
   const body=JSON.stringify(headSequence===undefined?{version:1,reason}:{version:1,reason,headSequence});
-  const response=await fetcher(config.url,{method:'POST',headers:await signBridgeRequest(config.url,{secret:config.secret,orgId:config.orgId,method:'POST',body}),body,redirect:'error',signal:AbortSignal.timeout(25000)});
+  const response=await fetcher(config.url,{method:'POST',headers:await signBridgeRequest(config.url,{secret:config.secret,orgId:config.orgId,method:'POST',body}),body,redirect:'manual',signal:AbortSignal.timeout(25000)});
   await response.body?.cancel();
   // A failed wake is not remembered, so the next commit or the cron tries again.
   if(response.ok&&headSequence!==undefined)notified=Math.max(notified,headSequence);

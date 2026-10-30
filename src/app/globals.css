@@ -345,3 +345,6 @@ button, input, textarea, select { font: inherit; } button, a, summary { -webkit-
   .workspace-v2 .date-filters .input { width: 100%; min-width: 0; }
   .workspace-v2 .date-filters > .button { margin-left: auto; }
 }
+.sale-context{display:grid;grid-template-columns:max-content 1fr;gap:4px 10px;margin:0 0 10px;font-size:.86rem}
+.sale-context dt{color:var(--muted-foreground,#667085)}
+.sale-context dd{margin:0;overflow-wrap:anywhere}

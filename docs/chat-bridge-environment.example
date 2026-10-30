@@ -9,6 +9,10 @@ CRM_BRIDGE_ALLOWED_MEMBER_IDS=[]
 # ignored deployment config and RRS_CRM_BACKGROUND_SYNC_ENABLED=true on Sale.
 CRM_SALE_SYNC_ENABLED=false
 CRM_SALE_SYNC_URL=https://<authorized-sale-staging-host>/api/rrs/crm/sync
+# Read-only Sale deal context (statuses/counts, no prices) for the Inbox panel.
+# Pulled by the minute cron and on staff conversation view (at most every 15 s).
+CRM_SALE_CONTEXT_ENABLED=false
+CRM_SALE_CONTEXT_ORIGIN=https://<authorized-sale-staging-host>
 CRM_LEGACY_SOURCE_ORIGIN=https://<authorized-source-staging-host>
 CRM_APPROVED_AI_ENABLED=false
 CRM_APPROVED_AI_SOURCE_ORIGIN=https://<authorized-source-staging-host>

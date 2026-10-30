@@ -4,11 +4,23 @@ import {applicationRequest,canonicalRedirect,protectResponse} from './edge-polic
 import {bundledAssets} from './static-assets';
 import {mediaArchiveRunnerRequest} from '../src/lib/media-archive-auth';
 import {notifySale} from './sale-sync';
+import {pullSaleContext} from '../src/lib/sale-context';
+import type {D1Binding} from '../src/lib/db';
 type Context={waitUntil(task:Promise<unknown>):void};
+type ServiceBinding={fetch(request:Request):Promise<Response>};
+/** Same-account Workers cannot fetch each other on one zone; SALE_SERVICE is the binding for that case. */
+function saleFetcher(env:Record<string,unknown>):typeof fetch{
+  const binding=env.SALE_SERVICE as ServiceBinding|undefined;
+  return (binding&&typeof binding.fetch==='function'?((input:RequestInfo|URL,init?:RequestInit)=>binding.fetch(new Request(input,init))):fetch) as typeof fetch;
+}
 export default {
   async scheduled(_event:unknown,env:Record<string,unknown>,ctx:Context) {
     // Sale reconciliation is independent of the archive runner and never blocks it.
-    const sale=await notifySale(env,'reconcile').catch(()=>({status:'error'}));if(sale.status!=='disabled'&&sale.status!=='sent')console.warn('Sale reconcile '+sale.status);
+    const sale:{status:string;httpStatus?:number}=await notifySale(env,'reconcile',saleFetcher(env)).catch((error:unknown)=>({status:'error:'+(error instanceof Error?error.name:'unknown')}));
+    // Status codes only; never request bodies, URLs with secrets or credentials.
+    if(sale.status!=='disabled'&&sale.status!=='sent')console.warn('Sale reconcile '+sale.status+(sale.httpStatus?' '+sale.httpStatus:''));
+    // Sale-owned deal context for agents; independent of the archive runner below.
+    if(env.DB){const context=await pullSaleContext(env.DB as D1Binding,env,saleFetcher(env)).catch(()=>({status:'error'}));if(context.status==='error')console.warn('Sale context pull failed');}
     if(env.SOCIAL_MEDIA_ARCHIVE_ENABLED!=='true'||env.SOCIAL_CHANNELS_OWNER!=='crm'||env.SOCIAL_INBOUND_ENABLED!=='true')return;
     if(typeof env.APP_ORIGIN!=='string'||typeof env.SESSION_SECRET!=='string')throw new Error('Archive runner configuration unavailable');
     const response=await application.fetch(applicationRequest(mediaArchiveRunnerRequest(env.APP_ORIGIN,env.SESSION_SECRET)),{...env,ASSETS:env.ASSETS||bundledAssets},ctx);
@@ -24,7 +36,7 @@ export default {
     if(staticResponse.status===200)return protectResponse(request,staticResponse);
     const response=await application.fetch(trustedRequest,{...env,ASSETS:env.ASSETS||bundledAssets},ctx);
     // Any committed mutation may have appended bridge events; wake Sale after the response.
-    if(!['GET','HEAD','OPTIONS'].includes(request.method)&&response.status<500)ctx.waitUntil(notifySale(env,'wake').catch(()=>undefined));
+    if(!['GET','HEAD','OPTIONS'].includes(request.method)&&response.status<500)ctx.waitUntil(notifySale(env,'wake',saleFetcher(env)).catch(()=>undefined));
     return protectResponse(request,response);
   },
 };
