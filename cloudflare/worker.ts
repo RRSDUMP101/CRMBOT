@@ -5,6 +5,7 @@ import {bundledAssets} from './static-assets';
 import {mediaArchiveRunnerRequest} from '../src/lib/media-archive-auth';
 import {notifySale} from './sale-sync';
 import {pullSaleContext} from '../src/lib/sale-context';
+import {handleSaleContextSync,SALE_CONTEXT_SYNC_PATH} from './sale-context-sync';
 import type {D1Binding} from '../src/lib/db';
 type Context={waitUntil(task:Promise<unknown>):void};
 type ServiceBinding={fetch(request:Request):Promise<Response>};
@@ -34,6 +35,8 @@ export default {
       return protectResponse(request,new Response('Service configuration is incomplete',{status:503}));
     }
     const trustedRequest=applicationRequest(request);
+    // This signed read-side wake must bypass the application mutation notifier.
+    if(new URL(request.url).pathname===SALE_CONTEXT_SYNC_PATH)return protectResponse(request,await handleSaleContextSync(trustedRequest,env,saleFetcher(env)));
     const staticResponse=await bundledAssets.fetch(trustedRequest);
     if(staticResponse.status===200)return protectResponse(request,staticResponse);
     const response=await application.fetch(trustedRequest,{...env,ASSETS:env.ASSETS||bundledAssets},ctx);

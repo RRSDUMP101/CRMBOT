@@ -5,6 +5,7 @@ import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, iso
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
 import { messageOrder } from './message-order';
+import type { WebFlowInboundSignal } from './flows';
 
 const settingsDefaults = {botName:'RRS ผู้ช่วย AI',personality:'สุภาพ กระชับ ถามครั้งละหนึ่งเรื่อง',businessHours:'ทีมงานจะยืนยันเวลาติดต่อกลับ',handoffRule:'ราคา สต็อก ส่วนลด และนัดหมายให้ทีมงานยืนยัน',aiEnabled:true};
 const rows = (items: Row[]) => items.map(camel);
@@ -287,7 +288,7 @@ export async function snapshot(staff:Staff,url:URL) {
     metricDefinitions:{cohort:'บทสนทนาและลีดที่สร้างในช่วงวันที่กรุงเทพฯ; Pipeline แสดงสถานะปัจจุบันของกลุ่มนี้',handoff:'บทสนทนาในช่วงวันที่ที่เคยส่งต่ออย่างน้อยหนึ่งครั้ง / บทสนทนาทั้งหมดในช่วงวันที่',aiFirstResponse:'เวลาจากข้อความลูกค้าแรกถึงส่วนข้อความ AI แรกที่ส่งได้',humanFirstResponse:'เวลาจากส่งต่อครั้งแรกถึงคำตอบสาธารณะแรกของพนักงาน; ไม่รวมบันทึกภายใน',dueTasks:'งานที่ยังเปิด รอยืนยัน หรือยืนยันแล้ว และถึงกำหนด ณ เวลาปัจจุบัน ทุกช่วงวันที่',usage:'ผลรวม usage ที่ผู้ให้บริการรายงานสำหรับข้อความในช่วงวันที่; null หมายถึงไม่มีข้อมูล'}};
 }
 
-type Prepared = {conversationId:string;orgId:string;clientId:string;version:number;input:BotInput;sources:Row[];skip?:boolean};
+type Prepared = {conversationId:string;orgId:string;clientId:string;version:number;input:BotInput;sources:Row[];skip?:boolean;inbound?:WebFlowInboundSignal};
 async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promise<Prepared> {
   fields(body,['text','clientId','retry']);const text=str(body.text,'ข้อความ',4000,true);const clientId=str(body.clientId,'รหัสข้อความ',100,true);
   if(!/^[a-zA-Z0-9_-]{8,100}$/.test(clientId))throw new ApiError(400,'รหัสข้อความไม่ถูกต้อง');
@@ -295,6 +296,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
   await rateLimit(`chat:${visitor.orgId}:${visitor.conversationId}`,30,60);
   return transaction(visitor.orgId, async connection=>{
     const c=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);
+    let inbound:WebFlowInboundSignal|undefined;
     const lead=await scopedLead(connection,visitor.orgId,c.lead_id);const settings=await orgSettings(visitor.orgId,connection);
     const existing=(await connection.query("SELECT * FROM messages WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND role='user'",[visitor.orgId,c.id,clientId])).rows[0];
     if(existing&&existing.content!==text)throw new ApiError(409,'รหัสข้อความนี้ใช้กับข้อความอื่นแล้ว');
@@ -316,7 +318,11 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       }
       const seq=Number(c.customer_message_seq)+1;
       await connection.query('UPDATE conversations SET customer_message_seq=$3 WHERE org_id=$1 AND id=$2',[visitor.orgId,c.id,seq]);
-      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,client_id,status,customer_seq) VALUES($1,$2,$3,'user',$4,$5,'complete',$6)",[randomUUID(),visitor.orgId,c.id,text,clientId,seq]);
+      const messageId=randomUUID();
+      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,client_id,status,customer_seq) VALUES($1,$2,$3,'user',$4,$5,'complete',$6)",[messageId,visitor.orgId,c.id,text,clientId,seq]);
+      // Only newly committed input triggers flows. A client retry must not cancel
+      // a wait started by this same message or execute another greeting/task.
+      inbound={orgId:visitor.orgId,provider:'web',accountId:'',eventId:'web:'+messageId,kind:'message',conversationId:c.id,leadId:lead.id,messageId,text,fresh:seq===1,optOut:false};
       const facts=extractFacts(text,lead.facts||{});
       // Contact fields are saved only through the explicit consent endpoint; fact extraction is requirement memory.
       for(const key of Object.keys(facts))if(/phone|email|name|โทร|อีเมล|ชื่อ/i.test(key))delete facts[key];
@@ -330,14 +336,14 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       await audit(connection,visitor.orgId,'system','ai.disabled.handoff',c.id);
       c.status='waiting_human';c.version=Number(c.version)+1;
     }
-    if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
+    if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
     const cap=Math.max(1,Math.min(10000,Number.parseInt(process.env.AI_DAILY_CALL_LIMIT||'500',10)||500));
     const day=new Date(Date.now()+7*3600000).toISOString().slice(0,10);
     const usage=(await connection.query('SELECT calls FROM ai_daily_usage WHERE org_id=$1 AND day=$2',[visitor.orgId,day])).rows[0];
     if(Number(usage?.calls||0)>=cap) {
       await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
       await audit(connection,visitor.orgId,'system','ai.daily_cap.handoff',c.id);
-      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
+      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
     }
     await connection.query('INSERT INTO ai_daily_usage(org_id,day,calls) VALUES($1,$2,1) ON CONFLICT(org_id,day) DO UPDATE SET calls=ai_daily_usage.calls+1',[visitor.orgId,day]);
     const version=c.version+1;
@@ -348,12 +354,29 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     const selected=selectKnowledge(text,rows(knowledge.rows) as BotInput['knowledge']);
     const messages=history.rows.reverse().map(row=>({role:row.role,content:row.content}));
     if(!existing)messages.push({role:'user',content:text});
-    return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:messages.slice(-30),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content}))};
+    return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:messages.slice(-30),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content})),inbound};
   });
 }
 
 export async function messageStream(visitor:Visitor,body:Record<string,unknown>,signal:AbortSignal):Promise<Response> {
   const prepared=await prepareMessage(visitor,body);const encoder=new TextEncoder();
+  if(prepared.inbound&&process.env.FLOWS_ENABLED==='true') {
+    // Match social ingestion's post-commit hook. Flow sending remains subject to
+    // the existing non-social-channel guard; this hook never sends to providers.
+    // This best-effort trigger has no durable inbound receipt yet. Once started,
+    // executions/waits are durable, but a failed hook needs operator investigation.
+    try {await (await import('./flows')).onInboundSignal(prepared.inbound);}
+    catch {console.error('[rrs] web_flow_inbound_failed');}
+    if(!prepared.skip) {
+      // A flow can hand off/close/assign before generation. Do not invoke the AI
+      // provider using a generation lease that the flow has already invalidated.
+      const active=(await database.query("SELECT id FROM conversations WHERE org_id=$1 AND id=$2 AND status='bot_active' AND version=$3 AND generating_client_id=$4",[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId])).rows.length>0;
+      if(!active) {
+        prepared.skip=true;
+        await transaction(prepared.orgId,c=>c.query("UPDATE messages SET status='interrupted' WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$4 AND status='generating'",[prepared.orgId,prepared.conversationId,prepared.clientId,prepared.version]));
+      }
+    }
+  }
   const stream=new ReadableStream({async start(controller) {
     let text='';let closed=false;let first=true;let usage:{inputTokens:number;outputTokens:number;estimatedCostUsd:number|null}|undefined;
     const abort=new AbortController();signal.addEventListener('abort',()=>abort.abort(),{once:true});
