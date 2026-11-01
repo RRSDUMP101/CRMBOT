@@ -254,8 +254,11 @@ async function cancelExecutionRow(c: Executor, row: Row, reason: string, at: str
   await logStep(c, row.org_id, row.id, Number(row.step_index), 'execution', 'cancel', 'cancelled', { reason }, at);
 }
 /** Set-based, so the D1 batch stays two statements however many executions are pending. */
-async function cancelConversationExecutions(c: Executor, orgId: string, conversationId: string, scope: 'active' | 'reply', reason: string, at: string, exceptId = '') {
-  const filter = scope === 'active' ? "status IN ('running','waiting')" : "status='waiting' AND cancel_on_reply=1", where = `org_id=$1 AND conversation_id=$2 AND id!=$3 AND ${filter}`;
+async function cancelConversationExecutions(c: Executor, orgId: string, conversationId: string, scope: 'active' | 'reply', reason: string, at: string, exceptId = '', replySeq?: number) {
+  // A delayed inbound hook must not cancel a wait created after that message.
+  // replySeq comes from the committed message row, never request input.
+  const beforeReply = scope === 'reply' && Number.isSafeInteger(replySeq) ? ` AND wait_customer_seq < ${replySeq}` : '';
+  const filter = scope === 'active' ? "status IN ('running','waiting')" : "status='waiting' AND cancel_on_reply=1", where = `org_id=$1 AND conversation_id=$2 AND id!=$3 AND ${filter}${beforeReply}`;
   const count = Number((await c.query(`SELECT count(*) AS n FROM flow_executions WHERE ${where}`, [orgId, conversationId, exceptId])).rows[0].n);
   if (!count) return 0;
   // Log first: the batch runs in order, so the log reads the rows before they are cancelled.
@@ -527,13 +530,17 @@ async function advanceExecution(ctx: Ctx, orgId: string, executionId: string): P
   }
 }
 
-/** Inbound hook, called only after the social inbound transaction has committed. */
-export async function onInboundSignal(signal: FlowInboundSignal, options: FlowEngineOptions = {}) {
+export type WebFlowInboundSignal = Omit<FlowInboundSignal, 'provider'> & { provider: 'web' };
+/** Inbound hook, called only after the social or visitor message transaction has committed. */
+export async function onInboundSignal(signal: FlowInboundSignal | WebFlowInboundSignal, options: FlowEngineOptions = {}) {
   const ctx = context(options);
   if (!flowsEnabled(ctx.env)) return { status: 'disabled' as const, started: 0, cancelled: 0 };
   const { orgId, conversationId } = signal, at = stamp(ctx.now());
   const reason = signal.optOut ? 'opted_out' : signal.kind === 'message' ? 'customer_replied' : '';
-  const cancelled = !reason ? 0 : await transaction(orgId, c => cancelConversationExecutions(c, orgId, conversationId, signal.optOut ? 'active' : 'reply', reason, at));
+  const cancelled = !reason ? 0 : await transaction(orgId, async c => {
+    const message = signal.messageId ? (await c.query("SELECT customer_seq FROM messages WHERE org_id=$1 AND conversation_id=$2 AND id=$3 AND role='user'", [orgId, conversationId, signal.messageId])).rows[0] : undefined;
+    return cancelConversationExecutions(c, orgId, conversationId, signal.optOut ? 'active' : 'reply', reason, at, '', message ? Number(message.customer_seq) : undefined);
+  });
   if (signal.optOut || await globallyPaused(database, orgId)) return { status: 'ok' as const, started: 0, cancelled };
   const started: string[] = [];
   for (const flow of await publishedFlows(database, orgId)) {
