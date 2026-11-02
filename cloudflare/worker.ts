@@ -7,6 +7,7 @@ import {notifySale} from './sale-sync';
 import {pullSaleContext} from '../src/lib/sale-context';
 import {handleSaleContextSync,SALE_CONTEXT_SYNC_PATH} from './sale-context-sync';
 import type {D1Binding} from '../src/lib/db';
+import {observeAutomation} from '../src/lib/automation-health';
 type Context={waitUntil(task:Promise<unknown>):void};
 type ServiceBinding={fetch(request:Request):Promise<Response>};
 /** Same-account Workers cannot fetch each other on one zone; SALE_SERVICE is the binding for that case. */
@@ -17,13 +18,16 @@ function saleFetcher(env:Record<string,unknown>):typeof fetch{
 export default {
   async scheduled(_event:unknown,env:Record<string,unknown>,ctx:Context) {
     // Sale reconciliation is independent of the archive runner and never blocks it.
-    const sale:{status:string;httpStatus?:number}=await notifySale(env,'reconcile',saleFetcher(env)).catch((error:unknown)=>({status:'error:'+(error instanceof Error?error.name:'unknown')}));
+    const sale:{status:string;httpStatus?:number}=await observeAutomation(env,'sale-push',()=>notifySale(env,'reconcile',saleFetcher(env))).catch((error:unknown)=>({status:'error:'+(error instanceof Error?error.name:'unknown')}));
     // Status codes only; never request bodies, URLs with secrets or credentials.
     if(sale.status!=='disabled'&&sale.status!=='sent')console.warn('Sale reconcile '+sale.status+(sale.httpStatus?' '+sale.httpStatus:''));
     // Sale-owned deal context for agents; independent of the archive runner below.
-    if(env.DB){const context=await pullSaleContext(env.DB as D1Binding,env,saleFetcher(env)).catch(()=>({status:'error'}));if(context.status==='error')console.warn('Sale context pull failed');}
+    if(env.DB){const context=await observeAutomation(env,'sale-context',()=>pullSaleContext(env.DB as D1Binding,env,saleFetcher(env))).catch(()=>({status:'error'}));if(context.status==='error')console.warn('Sale context pull failed');}
     // Flow Builder runner (default off). Runs alongside, never blocks or fails, the archive runner below.
-    if(env.FLOWS_ENABLED==='true'&&env.DB)ctx.waitUntil(import('../src/lib/flows').then(flows=>flows.runFlows(env.DB as D1Binding,env)).then(result=>{if(result.status==='error')console.warn('Flow runner partially failed');},()=>console.warn('Flow runner failed')));
+    if(env.FLOWS_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'flows',()=>import('../src/lib/flows').then(flows=>flows.runFlows(env.DB as D1Binding,env))).then(result=>{if(result.status==='error')console.warn('Flow runner partially failed');},()=>console.warn('Flow runner failed')));
+    if(env.BROADCAST_ENABLED==='true'&&env.BROADCAST_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'broadcast',()=>import('../src/lib/broadcast').then(broadcast=>broadcast.runBroadcasts(env.DB as D1Binding,env as Record<string,string|undefined>))).then(()=>undefined,()=>console.warn('Broadcast runner failed')));
+    if(env.CRM_PUBLIC_WEBHOOKS_ENABLED==='true'&&env.CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'webhooks',()=>import('../src/lib/public-integrations').then(integrations=>integrations.runPublicWebhooks(env.DB as D1Binding,env))).then(()=>undefined,()=>console.warn('Public webhook runner failed')));
+    if(env.EXTERNAL_CONNECTORS_ENABLED==='true'&&env.EXTERNAL_CONNECTOR_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'connectors',()=>import('../src/lib/external-sync').then(connectors=>connectors.runExternalConnectors(env.DB as D1Binding,env as Record<string,string|undefined>))).then(()=>undefined,()=>console.warn('External connector runner failed')));
     if(env.SOCIAL_MEDIA_ARCHIVE_ENABLED!=='true'||env.SOCIAL_CHANNELS_OWNER!=='crm'||env.SOCIAL_INBOUND_ENABLED!=='true')return;
     if(typeof env.APP_ORIGIN!=='string'||typeof env.SESSION_SECRET!=='string')throw new Error('Archive runner configuration unavailable');
     const response=await application.fetch(applicationRequest(mediaArchiveRunnerRequest(env.APP_ORIGIN,env.SESSION_SECRET)),{...env,ASSETS:env.ASSETS||bundledAssets},ctx);

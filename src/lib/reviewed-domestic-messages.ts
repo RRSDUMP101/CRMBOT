@@ -1,14 +1,14 @@
 import {randomUUID} from 'node:crypto';
 import {ApiError,fields,uuid,type Staff} from './auth';
 import {database,transaction,type Row,type Executor} from './db';
-import {bridgePayloadHash,signBridgeRequest} from './bridge-protocol';
+import {bridgePayloadHash,signBridgeRequest,bridgeKeyConfig} from './bridge-protocol';
 import {enqueueSocialReply,dispatchSocialReply} from './social-channels';
 
 export type DomesticEnvelope={version:1;kind:'reviewed-domestic-message';commandId:string;conversationId:string;expectedVersion:number;expectedCustomerSeq:number;actorId:string;provider:'line'|'facebook';accountId:string;remoteId:string;text:string;source:{system:'rrs-sale-office';workspace:'domestic';messageId:string;threadId:string;generation:number;messageHash:string;knowledgeHash:string;reviewedBy:string}};
 export function domesticConfig(){
  if(process.env.CRM_DOMESTIC_REVIEW_ENABLED!=='true'||process.env.CRM_BRIDGE_ENABLED!=='true')throw new ApiError(503,'Domestic review forwarding is disabled');
  const orgId=process.env.CRM_BRIDGE_ORG_ID||'',secret=process.env.CRM_BRIDGE_SECRET||'',origin=process.env.CRM_DOMESTIC_SOURCE_ORIGIN||'';let url:URL;try{url=new URL(origin);}catch{throw new ApiError(503,'Domestic source is not configured');}
- if(!orgId||secret.length<32||url.protocol!=='https:'||url.origin!==origin||url.username||url.password)throw new ApiError(503,'Domestic source is not configured');return {orgId,secret,origin};
+ if(!orgId||secret.length<32||url.protocol!=='https:'||url.origin!==origin||url.username||url.password)throw new ApiError(503,'Domestic source is not configured');return {orgId,secret,origin,...bridgeKeyConfig(process.env)};
 }
 function object(p:unknown):Row{if(!p||typeof p!=='object'||Array.isArray(p))throw new ApiError(400,'Invalid domestic message');return p as Row;}
 export function parseDomestic(raw:unknown):DomesticEnvelope{

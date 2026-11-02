@@ -24,6 +24,10 @@ type RequestRecord={path:string;options:RequestInit};
 const response=(data:unknown,status=200)=>Response.json(data,{status});
 const data=(version=1,status='bot_active',messages:unknown[]=[])=>({conversation:{id:'conversation',version,status},messages,settings:{aiEnabled:true},demo:true,provider:'demo'});
 const settle=()=>new Promise<void>(resolve=>setImmediate(resolve));
+test('English widget translates consent and escapes configured icebreakers without executable markup',()=>{
+ const html=widgetDocument({title:'RRS',greeting:'Hello',accentColor:'#0f766e',position:'right',enabled:true,language:'en',prechatRequired:true,icebreakers:['</script><script>attack()</script>']});
+ assert.match(html,/lang="en"/);assert.match(html,/I consent to saving these details/);assert.doesNotMatch(html,/<script>attack/);assert.match(html,/prechatRequired/);
+});
 function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return {promise,resolve};}
 
 function runtime(handler:(request:RequestRecord)=>Promise<Response>|Response) {

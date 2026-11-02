@@ -12,6 +12,12 @@ import { WidgetSettingsPanel } from "./widget-settings";
 import { ReportsPanel } from "./reports-panel";
 import { BroadcastPanel } from "./broadcast-panel";
 import { FlowsPanel } from "./flows-panel";
+import { AiLifecyclePanel } from "./ai-lifecycle-panel";
+import { WhatsappTemplatesPanel } from './whatsapp-templates';
+import { IntegrationsApiPanel } from './integrations-api-panel';
+import { OperatorWorkspace } from './operator-workspace';
+import {SystemHealthPanel} from './system-health';
+import {ConnectorsPanel} from './connectors-panel';
 
 const nav = [
   { id: "inbox", label: "กล่องข้อความ", short: "แชต", icon: MessageSquare },
@@ -21,10 +27,16 @@ const nav = [
   { id: "dashboard", label: "รายงานภาพรวม", short: "ภาพรวม", icon: ChartNoAxesCombined },
   { id: "reports", label: "รายงาน", short: "รายงาน", icon: ChartColumn },
   { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark },
+  { id: "wa-templates", label: "เทมเพลต WhatsApp", short: "เทมเพลต", icon: MessageSquare },
   { id: "flows", label: "ระบบอัตโนมัติ", short: "อัตโนมัติ", icon: Zap },
   { id: "knowledge", label: "คลังความรู้", short: "ความรู้", icon: BookOpen },
+  { id: "ai-lifecycle", label: "ฐานความรู้และ AI", short: "ทดสอบ AI", icon: Sparkles },
   { id: "settings", label: "ตั้งค่าผู้ช่วย AI", short: "ผู้ช่วย AI", icon: Sparkles },
   { id: "members", label: "สมาชิกและสิทธิ์", short: "ทีม", icon: ShieldCheck },
+  { id: "operators", label: "เครื่องมือทีมและการจัดสรรงาน", short: "จัดทีม", icon: Users },
+  { id: "public-api", label: "API และ Webhooks", short: "API", icon: Workflow },
+  { id: "connectors", label: "อีเมลและร้านค้า", short: "เชื่อมต่อ", icon: Globe },
+  { id: "system-health", label: "สถานะซิงก์และงานอัตโนมัติ", short: "สถานะ", icon: RefreshCw },
   { id: "integrations", label: "เว็บไซต์และช่องทาง", short: "เว็บแชต", icon: Workflow },
 ];
 type Bootstrap = { demo: boolean; provider: string; user: Member | null };
@@ -65,7 +77,7 @@ export default function Workspace() {
         {view !== "inbox" && <><div className="page-heading"><div><h1>{active.label}</h1><p>{view === "dashboard" ? "ติดตามทุกบทสนทนาและโอกาสขาย ด้วยข้อมูลจริงของทีม" : view === "templates" ? "คำตอบที่ใช้บ่อย ช่วยทีมตอบได้เร็วและสม่ำเสมอ" : view === "flows" ? "ติดแท็ก มอบหมาย สร้างงาน และส่งข้อความตามเงื่อนไข ทดสอบก่อนเผยแพร่ทุกครั้ง" : view === "broadcast" ? "ส่งข่าวสารถึงลูกค้า WhatsApp และ LINE ที่ยินยอมแล้วเท่านั้น ปิดไว้เป็นค่าเริ่มต้น" : view === "reports" ? "เวลาตอบกลับ งานค้าง และผลงานรายช่องทาง คำนวณจากข้อมูลจริงเท่านั้น" : "จัดการข้อมูลของทีมในที่เดียว"}</p></div>{view !== "reports" && <Button variant="secondary" size="sm" disabled={loading} onClick={reload}><RefreshCw size={15} className={loading ? "spin" : ""} />รีเฟรช</Button>}</div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
         {error && <div className="alert alert-error" role="alert">{error}<Button variant="ghost" size="sm" onClick={reload}>ลองอีกครั้ง</Button></div>}
         {!data && !error && <div className="workspace-loading"><span className="spinner" /><p>กำลังเปิดพื้นที่ทำงาน…</p></div>}
-        {props && <>{view === "inbox" && <InboxWorkspace {...props} />}{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={setView} />}{view === "reports" && <ReportsPanel user={data!.user} members={data!.members} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "broadcast" && <BroadcastPanel isAdmin={data!.user.role === "Admin"} />}{view === "flows" && <FlowsPanel {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "settings" && <SettingsPanel {...props} />}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
+        {props && <>{view === "inbox" && <InboxWorkspace {...props} />}{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={setView} />}{view === "reports" && <ReportsPanel user={data!.user} members={data!.members} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "broadcast" && <BroadcastPanel isAdmin={data!.user.role === "Admin"} />}{view === "flows" && <FlowsPanel {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "ai-lifecycle" && <AiLifecyclePanel />}{view === "wa-templates" && <WhatsappTemplatesPanel isAdmin={data!.user.role === "Admin"} />}{view === "operators" && <OperatorWorkspace />}{view === "public-api" && data!.user.role === "Admin" && <IntegrationsApiPanel />}{view === "connectors" && <ConnectorsPanel />}{view === "system-health" && data!.user.role === "Admin" && <SystemHealthPanel />}{view === "settings" && <SettingsPanel {...props} />}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
       </main>{view !== "inbox" && <footer className="workspace-footer">RRS Connect <span>เขตเวลา Asia/Bangkok (UTC+7)</span></footer>}
     </div>{toast && <div className="toast" role="status"><ShieldCheck size={18} />{toast}<button onClick={() => setToast("")} aria-label="ปิดข้อความ"><X size={14} /></button></div>}
   </div>;

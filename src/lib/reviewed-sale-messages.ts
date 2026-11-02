@@ -1,8 +1,9 @@
 import {randomUUID} from 'node:crypto';
 import {ApiError,fields,uuid,type Staff} from './auth';
 import {database,transaction,type Row,type Executor} from './db';
-import {bridgePayloadHash,signBridgeRequest} from './bridge-protocol';
+import {bridgePayloadHash,signBridgeRequest,bridgeKeyConfig} from './bridge-protocol';
 import {enqueueSocialReply,dispatchSocialReply,readSocialConfig} from './social-channels';
+import {resolveSocialConfig} from './social-account-runtime';
 import {parseReviewedParts,stageReviewedSaleParts,type ReviewedSalePart} from './reviewed-sale-media';
 
 export type ReviewedSaleEnvelope={version:1;kind:'reviewed-sale-message';commandId:string;conversationId:string;expectedVersion:number;expectedCustomerSeq:number;actorId:string;provider:'whatsapp';accountId:string;remoteId:string;text:string;template:null|{name:string;language:string};parts?:ReviewedSalePart[];source:{system:'rrs-sale-office';workspace:'live'|'domestic';messageId:string;messageHash:string;consentHash:string;ruleHash:string;reviewedBy:string;mode:'manual'|'followup';reviewAuditId:string}};
@@ -10,7 +11,7 @@ export function reviewedSaleConfig(){
   if(process.env.CRM_REVIEWED_SALE_ENABLED!=='true'||process.env.CRM_BRIDGE_ENABLED!=='true')throw new ApiError(503,'Reviewed Sale forwarding is disabled');
   const orgId=process.env.CRM_BRIDGE_ORG_ID||'',secret=process.env.CRM_BRIDGE_SECRET||'',origin=process.env.CRM_REVIEWED_SALE_SOURCE_ORIGIN||'';
   let url:URL;try{url=new URL(origin);}catch{throw new ApiError(503,'Reviewed Sale source is not configured');}
-  if(!orgId||secret.length<32||url.protocol!=='https:'||url.origin!==origin||url.username||url.password)throw new ApiError(503,'Reviewed Sale source is not configured');return {orgId,secret,origin};
+  if(!orgId||secret.length<32||url.protocol!=='https:'||url.origin!==origin||url.username||url.password)throw new ApiError(503,'Reviewed Sale source is not configured');return {orgId,secret,origin,...bridgeKeyConfig(process.env)};
 }
 function object(p:unknown):Row{if(!p||typeof p!=='object'||Array.isArray(p))throw new ApiError(400,'Invalid reviewed message');return p as Row;}
 function string(p:unknown,max:number){if(typeof p!=='string'||!p||p.length>max)throw new ApiError(400,'Invalid reviewed message field');return p;}
@@ -27,8 +28,8 @@ export function parseReviewedSale(raw:unknown):ReviewedSaleEnvelope{
   parseReviewedParts(p.parts,{text:p.text,template:p.template});return p as ReviewedSaleEnvelope;
 }
 async function bounded(response:Response,max=256000){const reader=response.body?.getReader();if(!reader)throw new ApiError(502,'Empty reviewed response');let text='',n=0;const decoder=new TextDecoder();try{while(true){const r=await reader.read();if(r.done)break;n+=r.value.length;if(n>max){await reader.cancel();throw new ApiError(502,'Reviewed response exceeds limit');}text+=decoder.decode(r.value,{stream:true});}return JSON.parse(text+decoder.decode());}finally{reader.releaseLock();}}
-export async function reviewedSaleTemplates(transport:typeof fetch=fetch){
-  const bridge=reviewedSaleConfig(),config=readSocialConfig('whatsapp');
+export async function reviewedSaleTemplates(transport:typeof fetch=fetch,accountId?:string){
+  const bridge=reviewedSaleConfig(),config=await resolveSocialConfig(bridge.orgId,'whatsapp',accountId||readSocialConfig('whatsapp').accountId);
   if(config.orgId!==bridge.orgId||config.owner!=='crm'||!config.accessToken||!/^\d{5,40}$/.test(config.wabaId||'')||!/^v\d+\.\d+$/.test(config.apiVersion||''))throw new ApiError(503,'CRM WhatsApp template account is not configured');
   const response=await transport(`https://graph.facebook.com/${config.apiVersion}/${config.wabaId}/message_templates?fields=name,status,language,components&limit=100`,{headers:{Authorization:'Bearer '+config.accessToken},redirect:'manual',cache:'no-store',signal:AbortSignal.timeout(8000)});
   if(!response.ok){await response.body?.cancel();throw new ApiError(503,'Template verification unavailable');}const result=await bounded(response);
@@ -37,7 +38,7 @@ export async function reviewedSaleTemplates(transport:typeof fetch=fetch){
 }
 async function templateProof(payload:ReviewedSaleEnvelope,transport:typeof fetch){
   if(!payload.template)return;
-  const list=await reviewedSaleTemplates(transport),t=list.templates.find((t:Row)=>t.name===payload.template!.name&&t.language===payload.template!.language&&t.status==='APPROVED');
+  const list=await reviewedSaleTemplates(transport,payload.accountId),t=list.templates.find((t:Row)=>t.name===payload.template!.name&&t.language===payload.template!.language&&t.status==='APPROVED');
   if(!t||!Array.isArray(t.components)||t.components.length!==1||t.components[0].type!=='BODY'||typeof t.components[0].text!=='string'||t.components[0].text.includes('{{')||t.components[0].text!==payload.text)throw new ApiError(409,'Current approved BODY-only template must exactly match the reviewed text');
 }
 async function verifySource(row:Row,transport:typeof fetch=fetch){

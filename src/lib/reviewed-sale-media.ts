@@ -3,12 +3,13 @@ import {ApiError} from './errors';
 import {database,transaction,type Executor,type Row} from './db';
 import {signBridgeRequest} from './bridge-protocol';
 import {readSocialConfig,type SocialChannelConfig} from './social-channels';
+import {resolveSocialConfig} from './social-account-runtime';
 import {archiveSocialAttachmentBytes} from './social-media';
 
 export type ReviewedPrivateFile={kind:'private-file';fileId:string;sourceRecordKind:'media'|'quote';sourceRecordId:string;sha256:string;size:number;mime:string;name:string;ownerOnly?:true};
 export type ReviewedSalePart={kind:'text';text:string}|ReviewedPrivateFile;
 type Guard=(c:Executor,command:Row,config:SocialChannelConfig,epoch?:number)=>Promise<Row>;
-type Options={config?:SocialChannelConfig;fetch?:typeof fetch;guard:Guard};
+type Options={config?:SocialChannelConfig;fetch?:typeof fetch;guard:Guard;readConfig?:(connection?:Executor)=>Promise<SocialChannelConfig>};
 const now=()=>new Date().toISOString().replace(/(\.\d{3})Z$/,(_,f)=>f+'000Z');
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const accepted=new Set(['submitted','sent','delivered','read']);
@@ -43,7 +44,7 @@ export async function stageReviewedSaleParts(c:Executor,orgId:string,outbound:{i
  if(parts.length===1&&parts[0].kind==='text')return;
  for(const [index,part] of parts.entries()){const payload=JSON.stringify(part);await c.query("INSERT INTO crm_reviewed_sale_parts(org_id,outbound_command_id,part_index,provider,account_id,remote_id,payload_json,payload_hash,created_at,updated_at) VALUES($1,$2,$3,'whatsapp',$4,$5,$6,$7,$8,$8)",[orgId,outbound.id,index,outbound.accountId,outbound.remoteId,payload,sha(payload),now()]);}
 }
-function mediaContainer(bytes:Uint8Array,mime:string){
+export function mediaContainer(bytes:Uint8Array,mime:string){
  const text=(from:number,to:number)=>new TextDecoder('latin1').decode(bytes.subarray(from,to));
  if(mime==='application/pdf'){if(text(0,5)!=='%PDF-')throw new ApiError(415,'Invalid PDF bytes');return;}
  if(mime==='image/png'){if(Buffer.from(bytes.subarray(0,8)).toString('hex')!=='89504e470d0a1a0a'||text(12,16)!=='IHDR'||bytes[24]!==8||![2,6].includes(bytes[25]))throw new ApiError(415,'PNG requires8-bit RGB/RGBA');return;}
@@ -142,7 +143,7 @@ export async function dispatchReviewedSaleMultipart(orgId:string,commandId:strin
    return {...command,status:await summarize(c,command,parts,'part_lease_expired'),claimed:false};
   }
   if(command.status!=='queued')return {...command,claimed:false};
-  const config=options.config||readSocialConfig('whatsapp');configMatches(config,command);const control=await options.guard(c,command,config),attempt=randomUUID(),lease=new Date(Date.now()+90_000).toISOString().replace(/(\.\d{3})Z$/,(_,f)=>f+'000Z');
+  const config=options.readConfig?await options.readConfig(c):options.config||await resolveSocialConfig(orgId,'whatsapp',command.account_id,{connection:c});configMatches(config,command);const control=await options.guard(c,command,config),attempt=randomUUID(),lease=new Date(Date.now()+90_000).toISOString().replace(/(\.\d{3})Z$/,(_,f)=>f+'000Z');
   await c.query("UPDATE social_outbound_commands SET status='sending',attempt_id=$3,control_epoch=$4,lease_expires_at=$5,updated_at=$6 WHERE org_id=$1 AND id=$2",[orgId,commandId,attempt,control.epoch,lease,now()]);
   await c.query("UPDATE social_message_provenance SET delivery_status='sending',provider_timestamp=$3 WHERE org_id=$1 AND message_id=$2",[orgId,command.message_id,now()]);
   return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,claimed:true};
@@ -154,12 +155,12 @@ export async function dispatchReviewedSaleMultipart(orgId:string,commandId:strin
  if(parts.length!==stored.length||parts.some((part,i)=>sha(JSON.stringify(part))!==stored[i].payload_hash||sha(stored[i].payload_json)!==stored[i].payload_hash))throw new ApiError(409,'Reviewed part manifest changed');
  let final='sending';
  for(const [index,part] of parts.entries()){
-  const attempt=randomUUID(),config=options.config||readSocialConfig('whatsapp'),abort=new AbortController();let busy=false,effect=false,providerRejected=false;
+  const attempt=randomUUID(),abort=new AbortController();let config:SocialChannelConfig,busy=false,effect=false,providerRejected=false;
   await transaction(orgId,async c=>{const current=(await partRows(c,orgId,commandId))[index];if(current.status!=='queued')throw new ApiError(409,'Reviewed part was already attempted');const lease=new Date(Date.now()+90_000).toISOString().replace(/(\.\d{3})Z$/,(_,f)=>f+'000Z');await c.query("UPDATE crm_reviewed_sale_parts SET status='preparing',attempt_id=$4,lease_expires_at=$5,updated_at=$6 WHERE org_id=$1 AND outbound_command_id=$2 AND part_index=$3",[orgId,commandId,index,attempt,lease,now()]);await c.query('UPDATE social_outbound_commands SET lease_expires_at=$3 WHERE org_id=$1 AND id=$2',[orgId,commandId,lease]);});
-  const assertCurrent=async()=>{const current=options.config||readSocialConfig('whatsapp');configMatches(current,claim);await proof(orgId,commandId,transport);await options.guard(database,claim,current,claim.control_epoch);if(abort.signal.aborted)throw new ApiError(409,'Reviewed send interrupted');};
+  const assertCurrent=async()=>{const current=options.readConfig?await options.readConfig():options.config||await resolveSocialConfig(orgId,'whatsapp',claim.account_id);configMatches(current,claim);await proof(orgId,commandId,transport);await options.guard(database,claim,current,claim.control_epoch);if(abort.signal.aborted)throw new ApiError(409,'Reviewed send interrupted');return current;};
   const timer=setTimeout(()=>abort.abort(),70_000),monitor=setInterval(async()=>{if(busy)return;busy=true;try{await assertCurrent();}catch{abort.abort();}finally{busy=false;}},1000);
   try{
-   await assertCurrent();let body:Row={type:'text',text:{preview_url:false,body:part.kind==='text'?part.text:''}};
+   config=await assertCurrent();let body:Row={type:'text',text:{preview_url:false,body:part.kind==='text'?part.text:''}};
    if(part.kind==='private-file'){
     const bytes=await fetchReviewedPrivateBytes(source,index,part,transport,abort.signal);await assertCurrent();
     const form=new FormData();form.append('messaging_product','whatsapp');form.append('type',part.mime);form.append('file',new Blob([bytes],{type:part.mime}),part.name);
@@ -174,7 +175,7 @@ export async function dispatchReviewedSaleMultipart(orgId:string,commandId:strin
      await c.query("INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata) VALUES($1,$2,$3,'whatsapp',$4,$5,$6,$7)",[attempt,orgId,claim.message_id,config.accountId,formats[part.mime].type,data.id,JSON.stringify({name:part.name,mime:part.mime,size:part.size,sha256:part.sha256,deliveryStatus:'preparing',sourceOwnerOnly:!!part.ownerOnly,reviewedSale:{outboundCommandId:commandId,partIndex:index}})]);
     });
     // Preserve the exact reviewed source copy before sending its provider media ID. A CDN may later expire or transcode it.
-    await archiveSocialAttachmentBytes(orgId,attempt,{bytes,type:part.mime,ownerOnly:!!part.ownerOnly},{allowOwnerOnly:!!part.ownerOnly,guard:assertCurrent});
+    await archiveSocialAttachmentBytes(orgId,attempt,{bytes,type:part.mime,ownerOnly:!!part.ownerOnly},{allowOwnerOnly:!!part.ownerOnly,guard:async()=>{await assertCurrent();}});
     const type=formats[part.mime].type;body={type,[type]:{id:data.id,...type==='document'?{filename:part.name}:{}}};effect=false;
    }
    await assertCurrent();await transaction(orgId,async c=>{await options.guard(c,claim,config,claim.control_epoch);await c.query("UPDATE crm_reviewed_sale_parts SET status='sending',updated_at=$4 WHERE org_id=$1 AND outbound_command_id=$2 AND part_index=$3 AND attempt_id=$5 AND status='preparing'",[orgId,commandId,index,now(),attempt]);});

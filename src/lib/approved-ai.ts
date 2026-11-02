@@ -5,13 +5,15 @@ import {bridgePayloadHash} from './bridge-protocol';
 import {approvedAiConfig,verifyApprovedAiSource} from './approved-ai-proof';
 import {enqueueSocialReply,dispatchSocialReply} from './social-channels';
 import {bridgeConfig} from './chat-bridge';
+import {assertBridgeAiPolicy,parseAiPolicyProof,type AiPolicyProof} from './ai-policy-bridge';
 
-export type ApprovedAiEnvelope={version:1;kind:'approved-ai-text';commandId:string;conversationId:string;expectedVersion:number;actorId:string;provider:'whatsapp';accountId:string;remoteId:string;text:string;source:{system:'rrs-sale-office';workspace:'live'|'domestic';outboxId:string;jobId:string;jobVersion:number;resultId:string;resultHash:string;resultPayload:string;sourceHash:string;sourceRevision:number;approvalId:string;approvedBy:string;approvedAt:string}};
+export type ApprovedAiEnvelope={version:1;kind:'approved-ai-text';commandId:string;conversationId:string;expectedVersion:number;actorId:string;provider:'whatsapp';accountId:string;remoteId:string;text:string;source:{system:'rrs-sale-office';workspace:'live'|'domestic';outboxId:string;jobId:string;jobVersion:number;resultId:string;resultHash:string;resultPayload:string;sourceHash:string;sourceRevision:number;approvalId:string;approvedBy:string;approvedAt:string;aiPolicy?:AiPolicyProof}};
 function object(v:unknown):Row{if(!v||typeof v!=='object'||Array.isArray(v))throw new ApiError(400,'Invalid approved AI command');return v as Row;}
 function bounded(v:unknown,max:number){if(typeof v!=='string'||!v||v.length>max)throw new ApiError(400,'Invalid approved AI text field');return v;}
 export async function parseApprovedAiEnvelope(raw:unknown):Promise<ApprovedAiEnvelope>{
   const p=object(raw);fields(p,['version','kind','commandId','conversationId','expectedVersion','actorId','provider','accountId','remoteId','text','source']);
-  const s=object(p.source);fields(s,['system','workspace','outboxId','jobId','jobVersion','resultId','resultHash','resultPayload','sourceHash','sourceRevision','approvalId','approvedBy','approvedAt']);
+  const s=object(p.source);fields(s,['system','workspace','outboxId','jobId','jobVersion','resultId','resultHash','resultPayload','sourceHash','sourceRevision','approvalId','approvedBy','approvedAt','aiPolicy']);
+  if(s.aiPolicy!==undefined)parseAiPolicyProof(s.aiPolicy);
   if(p.version!==1||p.kind!=='approved-ai-text'||p.provider!=='whatsapp'||s.system!=='rrs-sale-office'||!['live','domestic'].includes(s.workspace))throw new ApiError(400,'Unsupported approved AI command');
   for(const v of [p.commandId,p.conversationId,p.actorId,s.outboxId,s.jobId,s.resultId,s.approvalId])uuid(v);
   for(const v of [p.expectedVersion,s.jobVersion])if(!Number.isSafeInteger(v)||v<1)throw new ApiError(400,'Invalid approval version');
@@ -50,6 +52,7 @@ export async function acceptApprovedAi(raw:unknown,options:{fetch?:typeof fetch;
     const identity=(await c.query("SELECT * FROM social_identities WHERE org_id=$1 AND conversation_id=$2 AND provider='whatsapp'",[config.orgId,payload.conversationId])).rows[0];
     if(!conversation||!identity)throw new ApiError(404,'Approved AI conversation not found');
     if(conversation.version!==payload.expectedVersion||conversation.status!=='human_active'||conversation.assignee_id!==staff.id||identity.account_id!==payload.accountId||identity.remote_id!==payload.remoteId||identity.opt_out||identity.lead_id!==conversation.lead_id)throw new ApiError(409,'Approved AI recipient, assignment or generation changed');
+    await assertBridgeAiPolicy(config.orgId,payload.conversationId,payload.expectedVersion,payload.source.aiPolicy,c);
     const lead=(await c.query('SELECT contact_consent_at,contact_consent_version FROM leads WHERE org_id=$1 AND id=$2',[config.orgId,identity.lead_id])).rows[0];
     if(!lead?.contact_consent_at||!lead.contact_consent_version)throw new ApiError(409,'Recorded CRM consent required');
     const messageId=randomUUID(),time=new Date().toISOString().replace(/(\.\d{3})Z$/,(_,f)=>f+'000Z');
@@ -65,3 +68,4 @@ export async function acceptApprovedAi(raw:unknown,options:{fetch?:typeof fetch;
   if(options.dispatch!==false)await dispatchSocialReply(config.orgId,outbound,{fetch:options.fetch}).catch(()=>{/* Durable queued intent remains visible; recovery revalidates the source. */});
   return approvedAiStatus(payload.commandId);
 }
+

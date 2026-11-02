@@ -3,6 +3,7 @@ import {database,transaction,type Executor,type Row} from './db';
 import {ApiError,type Staff,uuid} from './auth';
 import {archiveSocialAttachment} from './social-media';
 import {readSocialConfig,type SocialChannelConfig} from './social-channels';
+import {resolveSocialConfig} from './social-account-runtime';
 
 const active=['queued','working','retry','blocked'];
 const limitAttempts=8,leaseMs=90_000;
@@ -22,7 +23,7 @@ async function publish(c:Executor,orgId:string,id:string,state:string,error:stri
 type Options={fetch?:typeof fetch;now?:()=>number;readConfig?:()=>SocialChannelConfig};
 /** Bounded GET-only archival. Claimed jobs survive restarts and never send messages. */
 export async function runMediaArchiveJobs(orgId:string,limit=4,options:Options={}){
-  uuid(orgId);const clock=options.now||Date.now,config=options.readConfig||(()=>readSocialConfig('whatsapp'));
+  uuid(orgId);const clock=options.now||Date.now,config=async(accountId:string,c:Executor=database)=>options.readConfig?options.readConfig():resolveSocialConfig(orgId,'whatsapp',accountId,{connection:c});
   if(process.env.SOCIAL_MEDIA_ARCHIVE_ENABLED!=='true')return {results:[] as {attachmentId:string;status:string}[],disabled:true};
   const size=Math.min(4,Math.max(1,Math.floor(Number.isFinite(limit)?limit:4))),now=clock();
   const candidates=(await database.query("SELECT attachment_id FROM social_media_archive_jobs WHERE org_id=$1 AND status IN ('queued','working','retry','blocked') AND next_attempt_at<=$2 AND lease_until<=$2 ORDER BY next_attempt_at,created_at,attachment_id LIMIT $3",[orgId,now,size])).rows;
@@ -32,8 +33,8 @@ export async function runMediaArchiveJobs(orgId:string,limit=4,options:Options={
     const claim=await transaction(orgId,async c=>{
       const job=(await c.query('SELECT * FROM social_media_archive_jobs WHERE org_id=$1 AND attachment_id=$2',[orgId,id])).rows[0];
       if(!job||!active.includes(job.status)||job.lease_until>clock()||job.next_attempt_at>clock())return null;
-      const row=await attachment(c,orgId,id),cfg=config();
-      const stop=!native(row)?'cancelled':!current(cfg,orgId,job.account_id)||row.account_id!==job.account_id?'blocked':Number(job.attempts)>=limitAttempts?'failed':null;
+      const row=await attachment(c,orgId,id);let cfg:SocialChannelConfig|undefined;try{cfg=await config(job.account_id,c);}catch{/* An unavailable account leaves archival blocked, without choosing another credential. */}
+      const stop=!native(row)?'cancelled':!cfg||!current(cfg,orgId,job.account_id)||row.account_id!==job.account_id?'blocked':Number(job.attempts)>=limitAttempts?'failed':null;
       if(stop){const error=stop==='cancelled'?'attachment_removed_or_not_native':stop==='blocked'?'ownership_or_account_unavailable':'attempt_limit';const next=stop==='blocked'?clock()+60_000:0;await c.query('UPDATE social_media_archive_jobs SET status=$3,error_code=$4,next_attempt_at=$5,lease_until=0,lease_token=\'\',updated_at=$6 WHERE org_id=$1 AND attachment_id=$2',[orgId,id,stop,error,next,new Date(clock()).toISOString()]);await publish(c,orgId,id,stop,error,next);return {stop};}
       const attempts=Number(job.attempts)+1;
       await c.query("UPDATE social_media_archive_jobs SET status='working',attempts=$3,lease_until=$4,lease_token=$5,error_code='',updated_at=$6 WHERE org_id=$1 AND attachment_id=$2",[orgId,id,attempts,clock()+leaseMs,token,new Date(clock()).toISOString()]);
@@ -43,7 +44,7 @@ export async function runMediaArchiveJobs(orgId:string,limit=4,options:Options={
     const guard=async()=>{
       const job=(await database.query('SELECT * FROM social_media_archive_jobs WHERE org_id=$1 AND attachment_id=$2',[orgId,id])).rows[0],row=await attachment(database,orgId,id);
       if(!native(row))throw new ApiError(404,'Attachment unavailable');
-      if(!job||job.lease_token!==token||job.status!=='working'||job.lease_until<=clock()||!current(config(),orgId,claim.accountId!)||row.account_id!==claim.accountId)throw new ApiError(409,'Archival ownership changed');
+      if(!job||job.lease_token!==token||job.status!=='working'||job.lease_until<=clock()||!current(await config(claim.accountId!),orgId,claim.accountId!)||row.account_id!==claim.accountId)throw new ApiError(409,'Archival ownership changed');
     };
     let status='archived',error='',next=0;
     try{await guard();await archiveSocialAttachment(orgId,id,options.fetch||fetch,false,guard);}
@@ -71,7 +72,7 @@ export async function retryMediaArchive(staff:Staff,id:string){
   await transaction(staff.orgId,async c=>{
     const job=(await c.query('SELECT * FROM social_media_archive_jobs WHERE org_id=$1 AND attachment_id=$2',[staff.orgId,id])).rows[0];
     if(!job||!native(await attachment(c,staff.orgId,id)))throw new ApiError(404,'Native attachment unavailable');
-    if(!current(readSocialConfig('whatsapp'),staff.orgId,job.account_id))throw new ApiError(409,'Archival ownership unavailable');
+    if(!current(await resolveSocialConfig(staff.orgId,'whatsapp',job.account_id,{connection:c}),staff.orgId,job.account_id))throw new ApiError(409,'Archival ownership unavailable');
     if(!['failed','retry','blocked'].includes(job.status))throw new ApiError(409,'Archive job is not retryable');
     await c.query("UPDATE social_media_archive_jobs SET status='queued',attempts=0,next_attempt_at=0,lease_until=0,lease_token='',error_code='',updated_at=$3 WHERE org_id=$1 AND attachment_id=$2",[staff.orgId,id,new Date().toISOString()]);await publish(c,staff.orgId,id,'queued','',0);
   },staff);return {ok:true};

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { signBridgeRequest } from './bridge-protocol';
+import { signBridgeRequest,bridgeKeyConfig } from './bridge-protocol';
+import {saleFlowIngressStatement} from './flows';
 import type { D1Binding, D1Statement, Row } from './db';
 
 /**
@@ -17,7 +18,7 @@ export function saleContextConfig(env: Env) {
   if (typeof secret !== 'string' || secret.length < 32 || typeof orgId !== 'string' || !ID.test(orgId) || typeof origin !== 'string') return null;
   let url: URL; try { url = new URL(origin); } catch { return null; }
   if (url.protocol !== 'https:' || url.origin !== origin) return null;
-  return { secret, orgId, origin };
+  return { secret, orgId, origin,...bridgeKeyConfig(env) };
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 function canonical(value: unknown): string {
@@ -44,7 +45,7 @@ async function cursor(db: D1Binding, orgId: string) {
   return (await all(db.prepare('SELECT * FROM crm_sale_context_cursor WHERE org_id=?').bind(orgId)))[0] as Row;
 }
 /** Commit projection, receipts and cursor in one guarded batch. Replays are no-ops. */
-export async function applySaleEvents(db: D1Binding, orgId: string, input: unknown[]) {
+export async function applySaleEvents(db: D1Binding, orgId: string, input: unknown[], env:Env=process.env) {
   if (input.length > 100) throw new SaleContextError('SALE_BATCH_TOO_LARGE');
   const events = input.map(value => validateSaleEvent(value, orgId));
   for (let i = 1; i < events.length; i++) if (events[i].sequence !== events[i - 1].sequence + 1) throw new SaleContextError('SALE_EVENT_GAP');
@@ -61,6 +62,7 @@ export async function applySaleEvents(db: D1Binding, orgId: string, input: unkno
   const guard = 'EXISTS(SELECT 1 FROM crm_sale_context_cursor WHERE org_id=? AND token=? AND last_sequence=?)';
   const batch = [db.prepare("UPDATE crm_sale_context_cursor SET last_sequence=?,token=?,last_error='',last_success_at=?,updated_at=? WHERE org_id=? AND last_sequence=?").bind(next, token, at, at, orgId, last)];
   for (const event of pending) {
+    if(env.FLOWS_ENABLED==='true')batch.push(saleFlowIngressStatement(db,{orgId,eventId:event.event_id,leadId:event.payload.leadId,occurredAt:event.occurred_at},{sql:guard,bindings:[orgId,token,next]}));
     batch.push(db.prepare(`INSERT INTO crm_sale_context_events(org_id,event_id,sequence,payload_hash,received_at) SELECT ?,?,?,?,? WHERE ${guard}`).bind(orgId, event.event_id, event.sequence, event.payload_hash, at, orgId, token, next));
     // Newer Sale revision wins; an older or replayed version never overwrites it.
     batch.push(db.prepare(`INSERT INTO crm_sale_context(org_id,deal_id,lead_id,workspace,aggregate_version,sale_sequence,payload,updated_at) SELECT ?,?,?,?,?,?,?,? WHERE ${guard} ON CONFLICT(org_id,deal_id) DO UPDATE SET lead_id=excluded.lead_id,workspace=excluded.workspace,aggregate_version=excluded.aggregate_version,sale_sequence=excluded.sale_sequence,payload=excluded.payload,updated_at=excluded.updated_at WHERE excluded.aggregate_version>crm_sale_context.aggregate_version OR (excluded.aggregate_version=crm_sale_context.aggregate_version AND excluded.sale_sequence>crm_sale_context.sale_sequence)`).bind(orgId, event.aggregate_id, event.payload.leadId, event.payload.workspace, event.aggregate_version, event.sequence, JSON.stringify(event.payload), event.occurred_at, orgId, token, next));
@@ -85,7 +87,7 @@ export async function pullSaleContext(db: D1Binding, env: Env, fetcher: typeof f
       if (!response.ok) { await response.body?.cancel(); throw new SaleContextError('SALE_PULL_HTTP_' + response.status); }
       const body = await boundedJson(response);
       if (!object(body) || body.version !== 1 || body.orgId !== config.orgId || body.after !== after || !Array.isArray(body.events) || !Number.isSafeInteger(body.headSequence) || typeof body.hasMore !== 'boolean') throw new SaleContextError('SALE_RESPONSE_INVALID');
-      state = await applySaleEvents(db, config.orgId, body.events); applied += body.events.length;
+      state = await applySaleEvents(db, config.orgId, body.events,env); applied += body.events.length;
       if (Number(state.last_sequence) > Number(state.acknowledged_sequence)) {
         const ackUrl = config.origin + '/api/rrs/crm/outbox/ack', ackBody = JSON.stringify({ consumerId: CONSUMER, sequence: Number(state.last_sequence) });
         const ack = await fetcher(ackUrl, { method: 'POST', headers: await signBridgeRequest(ackUrl, { ...config, method: 'POST', body: ackBody }), body: ackBody, redirect: 'manual', signal: AbortSignal.timeout(8000) });

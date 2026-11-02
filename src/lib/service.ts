@@ -6,6 +6,8 @@ import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerN
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
 import { messageOrder } from './message-order';
 import type { WebFlowInboundSignal } from './flows';
+import { routeWaitingConversation, validateRequiredFields } from './operators';
+import { aiRuntimeContext } from './ai-lifecycle';
 
 const settingsDefaults = {botName:'RRS ผู้ช่วย AI',personality:'สุภาพ กระชับ ถามครั้งละหนึ่งเรื่อง',businessHours:'ทีมงานจะยืนยันเวลาติดต่อกลับ',handoffRule:'ราคา สต็อก ส่วนลด และนัดหมายให้ทีมงานยืนยัน',aiEnabled:true};
 const rows = (items: Row[]) => items.map(camel);
@@ -53,7 +55,7 @@ export async function conversationDetail(orgId:string,id:string,internal=false,a
   const lead=await scopedLead(database,orgId,conversation.lead_id);
   // Staff only: Sale-owned deal context. Visitor responses never include it.
   let saleContext=null;if(internal){const binding=await getDatabase();await refreshSaleContextIfStale(binding,process.env).catch(()=>undefined);saleContext=await saleContextForLead(binding,orgId,lead.id).catch(()=>null);}
-  const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
+  const messages=await database.query(`SELECT m.*,COALESCE(p.provider,(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=m.org_id AND et.conversation_id=m.conversation_id)) AS provider,COALESCE(p.delivery_status,(SELECT status FROM external_send_commands WHERE org_id=m.org_id AND message_id=m.id)) AS delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
   return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
@@ -61,7 +63,7 @@ export async function visitorDetail(visitor: Visitor) {
   const detail=await conversationDetail(visitor.orgId,visitor.conversationId);
   const lead=detail.lead;
   // CRM notes, tags, staff summary and pipeline state are never part of a visitor response.
-  const publicLead={id:lead.id,name:lead.name,phone:lead.phone,email:lead.email,market:lead.market,facts:lead.facts,createdAt:lead.createdAt,updatedAt:lead.updatedAt};
+  const publicLead={id:lead.id,name:lead.name,phone:lead.phone,email:lead.email,market:lead.market,facts:lead.facts,consentRecorded:!!lead.contactConsentAt,createdAt:lead.createdAt,updatedAt:lead.updatedAt};
   const conversation=detail.conversation;
   const publicConversation={id:conversation.id,leadId:conversation.leadId,status:conversation.status,version:conversation.version,createdAt:conversation.createdAt,updatedAt:conversation.updatedAt};
   const settings=await orgSettings(visitor.orgId);
@@ -75,6 +77,7 @@ export async function handoff(visitor:Visitor) {
     await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,visitor.conversationId]);
     await audit(connection,visitor.orgId,'visitor','conversation.handoff',visitor.conversationId);
   });
+  await routeWaitingConversation(visitor.orgId,visitor.conversationId);
 }
 
 export async function saveContact(visitor:Visitor,body:Record<string,unknown>) {
@@ -136,13 +139,17 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
       await connection.query("UPDATE leads SET assignee_id=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,conversation.lead_id,staff.id]);
     } else if(action==='release'||action==='resolve') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id&&staff.role!=='Admin')throw new ApiError(403,'เฉพาะผู้รับผิดชอบหรือผู้ดูแลระบบที่เปลี่ยนสถานะได้');
+      if(action==='resolve')await validateRequiredFields(connection,staff.orgId,id);
       await connection.query("UPDATE conversations SET status=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,action==='release'?'bot_active':'resolved']);
     } else if(action==='reply'||action==='note') {
       const text=str(body.text,action==='note'?'บันทึก':'ข้อความ',6000,true);
       if(action==='reply'&&(conversation.status!=='human_active'||conversation.assignee_id!==staff.id))throw new ApiError(409,'กรุณารับช่วงบทสนทนาก่อนตอบลูกค้า');
       const messageId=randomUUID();
-      await connection.query('INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,$4,$5)',[messageId,staff.orgId,id,action==='reply'?'agent':'note',text]);
-      if(action==='reply')outboundCommand=(await enqueueSocialReply(connection,staff.orgId,id,messageId,text)).commandId;
+      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,author_member_id,author_type) VALUES($1,$2,$3,$4,$5,$6,'human')",[messageId,staff.orgId,id,action==='reply'?'agent':'note',text,staff.id]);
+      if(action==='reply'){
+        const email=await (await import('./external-mail')).enqueueEmailReply(connection,staff,id,messageId,text);
+        outboundCommand=email?'email:'+email:(await enqueueSocialReply(connection,staff.orgId,id,messageId,text)).commandId;
+      }
       await connection.query(`UPDATE conversations SET updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')${action==='reply'?",first_agent_at=COALESCE(first_agent_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))":''} WHERE org_id=$1 AND id=$2`,[staff.orgId,id]);
     } else if(action==='summarize') {
       const lead=await scopedLead(connection,staff.orgId,conversation.lead_id);
@@ -152,7 +159,7 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
     if(bridgeCommand)await connection.query('INSERT INTO crm_bridge_commands(org_id,command_id,payload_hash,actor_id,conversation_id,result_json) VALUES($1,$2,$3,$4,$5,$6)',[staff.orgId,bridgeCommand.id,bridgeCommand.hash,staff.id,id,JSON.stringify({ok:true,action})]);
     return outboundCommand;
   }, staff);
-  if(queuedCommand)await dispatchSocialReply(staff.orgId,queuedCommand).catch(()=>{console.error('[rrs] social_dispatch_deferred');});
+  if(queuedCommand)await (queuedCommand.startsWith('email:')?(await import('./external-mail')).dispatchEmail(staff.orgId,queuedCommand.slice(6)):dispatchSocialReply(staff.orgId,queuedCommand)).catch(()=>{console.error('[rrs] dispatch_deferred');});
   return conversationDetail(staff.orgId,id,true,staff.role==='Admin');
 }
 
@@ -298,7 +305,15 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     const c=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);
     let inbound:WebFlowInboundSignal|undefined;
     const lead=await scopedLead(connection,visitor.orgId,c.lead_id);const settings=await orgSettings(visitor.orgId,connection);
+    if(!lead.contact_consent_at&&(await connection.query("SELECT 1 FROM visitors WHERE org_id=$1 AND conversation_id=$2 AND context='widget' LIMIT 1",[visitor.orgId,c.id])).rows.length){
+      const config=await (await import('./helpdesk')).widgetForOrg(visitor.orgId,connection);
+      if(config.prechatRequired)throw new ApiError(422,'กรุณาฝากข้อมูลติดต่อและยินยอมก่อนเริ่มแชต');
+    }
     const existing=(await connection.query("SELECT * FROM messages WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND role='user'",[visitor.orgId,c.id,clientId])).rows[0];
+    if(existing&&process.env.FLOWS_ENABLED==='true'){
+      const receipt=(await connection.query("SELECT signal FROM flow_ingress WHERE org_id=$1 AND event_id=$2 AND status!='processed'",[visitor.orgId,'web:'+existing.id])).rows[0];
+      if(receipt)inbound=JSON.parse(String(receipt.signal)) as WebFlowInboundSignal;
+    }
     if(existing&&existing.content!==text)throw new ApiError(409,'รหัสข้อความนี้ใช้กับข้อความอื่นแล้ว');
     const recent=c.generation_started_at&&new Date(c.generation_started_at).getTime()>Date.now()-120000;
     if(c.generating_client_id&&recent) {
@@ -323,6 +338,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       // Only newly committed input triggers flows. A client retry must not cancel
       // a wait started by this same message or execute another greeting/task.
       inbound={orgId:visitor.orgId,provider:'web',accountId:'',eventId:'web:'+messageId,kind:'message',conversationId:c.id,leadId:lead.id,messageId,text,fresh:seq===1,optOut:false};
+      if(process.env.FLOWS_ENABLED==='true')await (await import('./flows')).enqueueFlowIngress(connection,inbound);
       const facts=extractFacts(text,lead.facts||{});
       // Contact fields are saved only through the explicit consent endpoint; fact extraction is requirement memory.
       for(const key of Object.keys(facts))if(/phone|email|name|โทร|อีเมล|ชื่อ/i.test(key))delete facts[key];
@@ -337,6 +353,13 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       c.status='waiting_human';c.version=Number(c.version)+1;
     }
     if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
+    const lifecycle=process.env.AI_LIFECYCLE_ENABLED==='true'?await aiRuntimeContext(visitor.orgId,'web',text,connection):null;
+    if(lifecycle?.handoff){
+      await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+      await audit(connection,visitor.orgId,'system','ai.lifecycle.handoff',c.id,{reason:lifecycle.reason});
+      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
+    }
+    if(lifecycle)settings.personality=lifecycle.personality;
     const cap=Math.max(1,Math.min(10000,Number.parseInt(process.env.AI_DAILY_CALL_LIMIT||'500',10)||500));
     const day=new Date(Date.now()+7*3600000).toISOString().slice(0,10);
     const usage=(await connection.query('SELECT calls FROM ai_daily_usage WHERE org_id=$1 AND day=$2',[visitor.orgId,day])).rows[0];
@@ -351,7 +374,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     await connection.query("UPDATE messages SET status='generating',generation_version=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3",[visitor.orgId,c.id,clientId,version]);
     const history=await connection.query(`SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY ${messageOrder('',true)} LIMIT 30`,[visitor.orgId,c.id]);
     const knowledge=await connection.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND (expires_at IS NULL OR expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))",[visitor.orgId]);
-    const selected=selectKnowledge(text,rows(knowledge.rows) as BotInput['knowledge']);
+    const selected=selectKnowledge(text,lifecycle?.sources??rows(knowledge.rows) as BotInput['knowledge']);
     const messages=history.rows.reverse().map(row=>({role:row.role,content:row.content}));
     if(!existing)messages.push({role:'user',content:text});
     return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:messages.slice(-30),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content})),inbound};
@@ -361,12 +384,18 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
 export async function messageStream(visitor:Visitor,body:Record<string,unknown>,signal:AbortSignal):Promise<Response> {
   const prepared=await prepareMessage(visitor,body);const encoder=new TextEncoder();
   if(prepared.inbound&&process.env.FLOWS_ENABLED==='true') {
-    // Match social ingestion's post-commit hook. Flow sending remains subject to
-    // the existing non-social-channel guard; this hook never sends to providers.
-    // This best-effort trigger has no durable inbound receipt yet. Once started,
-    // executions/waits are durable, but a failed hook needs operator investigation.
-    try {await (await import('./flows')).onInboundSignal(prepared.inbound);}
-    catch {console.error('[rrs] web_flow_inbound_failed');}
+    // The ingress receipt was committed with the message. Cron resumes it if
+    // this immediate drain fails or the browser disconnects after commit.
+    let pending=true;
+    try {await (await import('./flows')).drainFlowIngress(visitor.orgId,{},prepared.inbound.eventId);pending=(await database.query("SELECT status FROM flow_ingress WHERE org_id=$1 AND event_id=$2",[visitor.orgId,prepared.inbound.eventId])).rows[0]?.status!=='processed';}
+    catch {console.error('[rrs] web_flow_inbound_deferred');}
+    if(pending&&!prepared.skip){
+      prepared.skip=true;
+      await transaction(prepared.orgId,async c=>{
+        await c.query("UPDATE messages SET status='interrupted' WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$4 AND status='generating'",[prepared.orgId,prepared.conversationId,prepared.clientId,prepared.version]);
+        await c.query('UPDATE conversations SET generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2 AND version=$3 AND generating_client_id=$4',[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId]);
+      });
+    }
     if(!prepared.skip) {
       // A flow can hand off/close/assign before generation. Do not invoke the AI
       // provider using a generation lease that the flow has already invalidated.
@@ -377,6 +406,7 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
       }
     }
   }
+  await routeWaitingConversation(visitor.orgId,visitor.conversationId);
   const stream=new ReadableStream({async start(controller) {
     let text='';let closed=false;let first=true;let usage:{inputTokens:number;outputTokens:number;estimatedCostUsd:number|null}|undefined;
     const abort=new AbortController();signal.addEventListener('abort',()=>abort.abort(),{once:true});

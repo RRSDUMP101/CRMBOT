@@ -2,11 +2,12 @@
 import assert from 'node:assert/strict';
 import {createHmac,randomUUID} from 'node:crypto';
 import {before,after,test} from 'node:test';
-import {database,closeDatabase} from '../src/lib/db';
+import {database,closeDatabase,getDatabase} from '../src/lib/db';
 import {hashToken,type Staff} from '../src/lib/auth';
 import {dispatchSocialReply,ingestSocialWebhook,socialConfigFingerprint,type SocialChannelConfig} from '../src/lib/social-channels';
-import {addBroadcastSuppression,controlBroadcast,createBroadcast,getBroadcast,importBroadcastCsv,launchBroadcast,listBroadcasts,normalizeRemote,parseCsv,previewBroadcast,runBroadcastBatch,testSendBroadcast,updateBroadcast,type BroadcastOptions} from '../src/lib/broadcast';
+import {addBroadcastSuppression,controlBroadcast,createBroadcast,getBroadcast,importBroadcastCsv,launchBroadcast,listBroadcasts,normalizeRemote,parseCsv,previewBroadcast,runBroadcasts,runBroadcastBatch,testSendBroadcast,updateBroadcast,type BroadcastOptions} from '../src/lib/broadcast';
 import {GET,POST} from '../src/app/api/admin/broadcasts/[[...path]]/route';
+import {personalizeBroadcast,validateBroadcastVariables} from '../src/lib/broadcast-render';
 
 const origin='https://crm.example.invalid',TEST_WA='66810000000',TEST_LINE='U'+'b'.repeat(32),LINE_BOT='U'+'a'.repeat(32);
 const saved={...process.env},originalFetch=globalThis.fetch;
@@ -69,6 +70,54 @@ async function waWorld(f:Fixture){
   await addBroadcastSuppression(f.admin,{provider:'whatsapp',remoteId:'+66 81-111-0004',reason:'Synthetic do-not-contact request',confirm:true});
 }
 const count=async(sql:string,params:unknown[])=>Number((await database.query(sql,params)).rows[0].n);
+test('recipient variables are allowlisted, plain text and expanded exactly once',()=>{
+  assert.equal(personalizeBroadcast('Hi {{name}} / {{first_name}} / {{market}} / {{stage}}',{name:'Ann {{stage}}',market:'export',stage:'New'}),'Hi Ann {{stage}} / Ann / export / New');
+  assert.equal(personalizeBroadcast('{{name}}',{name:'Ann\nLee'}),'Ann Lee');
+  for(const text of ['{{email}}','{{constructor}}','{{name.toString()}}','{{name','{{1}}'])assert.throws(()=>validateBroadcastVariables(text));
+  assert.throws(()=>personalizeBroadcast('Hi {{first_name}}',{name:'  '}),/personalization_missing/);
+});
+test('personalized approval hashes catch same-count profile changes and pin recipient text after launch',async()=>{
+  const f=await fixture(),p=provider();await waWorld(f);process.env.BROADCAST_ENABLED='true';await enable(f.wa,'live');
+  const a=await identity(f.wa,A),t=await identity(f.wa,TEST_WA);
+  await database.query("UPDATE leads SET name=CASE id WHEN $2 THEN 'Alice One' ELSE 'Tester Two' END WHERE org_id=$1 AND id IN ($2,$3)",[f.org,a.lead_id,t.lead_id]);
+  const {campaign}=await createBroadcast(f.admin,{name:'Personalized fixture',provider:'whatsapp',messageText:'Hello {{first_name}} — {{market}}'},opts(f,p));
+  await tested(f,campaign.id,p);
+  const preview=await previewBroadcast(f.admin,campaign.id,opts(f,p));assert.equal(preview.eligible,2);assert.ok(preview.samples.some(row=>row.message==='Hello Alice — export'));
+  const approval={confirm:true,expectedVersion:preview.version,expectedRecipients:preview.eligible,expectedAudienceHash:preview.audienceHash};
+  await assert.rejects(()=>launchBroadcast(f.admin,campaign.id,{...approval,expectedAudienceHash:undefined},opts(f,p)),/ตัวอย่าง/);
+  await database.query("UPDATE leads SET name='Alicia New' WHERE org_id=$1 AND id=$2",[f.org,a.lead_id]);
+  await assert.rejects(()=>launchBroadcast(f.admin,campaign.id,approval,opts(f,p)),/ตัวอย่าง/);
+  const current=await previewBroadcast(f.admin,campaign.id,opts(f,p));assert.notEqual(current.audienceHash,preview.audienceHash);
+  await launchBroadcast(f.admin,campaign.id,{...approval,expectedAudienceHash:current.audienceHash},opts(f,p));
+  await database.query("UPDATE leads SET name='Changed After Approval' WHERE org_id=$1 AND id=$2",[f.org,a.lead_id]);
+  await assert.rejects(()=>database.query("UPDATE broadcast_recipients SET rendered_body='tampered' WHERE org_id=$1 AND campaign_id=$2",[f.org,campaign.id]),/immutable/);
+  await runBroadcastBatch(f.admin,campaign.id,{limit:10},opts(f,p));
+  assert.equal(p.sent.filter(row=>row.to===A).length,1);assert.equal(p.sent.find(row=>row.to===A)?.body.text.body,'Hello Alicia — export');
+  assert.equal((await getBroadcast(f.admin,campaign.id,opts(f,p))).campaign.status,'completed');
+});
+test('missing personalization is excluded and approved template parameters use each recipient snapshot',async()=>{
+  const f=await fixture(),p=provider();await waWorld(f);process.env.BROADCAST_ENABLED='true';await enable(f.wa,'live');
+  const a=await identity(f.wa,A),t=await identity(f.wa,TEST_WA),e=await identity(f.wa,E);
+  await database.query("UPDATE leads SET name=CASE id WHEN $2 THEN 'Alice Person' WHEN $3 THEN 'Tester Person' ELSE '' END WHERE org_id=$1 AND id IN ($2,$3,$4)",[f.org,a.lead_id,t.lead_id,e.lead_id]);
+  const {campaign}=await createBroadcast(f.admin,{name:'Template variables',provider:'whatsapp',messageKind:'template',template:{name:'promo_fixture',language:'th',params:['{{first_name}}','{{market}}']}},opts(f,p));
+  await tested(f,campaign.id,p);
+  const preview=await previewBroadcast(f.admin,campaign.id,opts(f,p));assert.equal(preview.eligible,2);assert.equal(preview.excluded.personalization_missing,1);
+  await launchBroadcast(f.admin,campaign.id,{confirm:true,expectedVersion:preview.version,expectedRecipients:preview.eligible,expectedAudienceHash:preview.audienceHash},opts(f,p));
+  await runBroadcastBatch(f.admin,campaign.id,{limit:10},opts(f,p));
+  assert.deepEqual(p.sent.find(row=>row.to===A)?.body.template.components[0].parameters,[{type:'text',text:'Alice'},{type:'text',text:'export'}]);
+  assert.equal(p.sent.some(row=>row.to===E),false);
+});
+test('automatic runner stays default-off, respects schedule, rechecks consent and does not rerun completed recipients',async()=>{
+ const f=await fixture(),p=provider();await waWorld(f);process.env.BROADCAST_ENABLED='true';await enable(f.wa,'live');
+ const {id}=await launched(f,p);const db=await getDatabase();
+ assert.equal((await runBroadcasts(db,{...process.env,BROADCAST_RUNNER_ENABLED:'false'},{...opts(f,p),orgId:f.org})).status,'disabled');
+ const now=p.sent.length;await database.query("UPDATE broadcast_campaigns SET status='scheduled',scheduled_at=$3 WHERE org_id=$1 AND id=$2",[f.org,id,new Date(Date.now()+3600_000).toISOString()]);
+ assert.equal((await runBroadcasts(db,{...process.env,BROADCAST_RUNNER_ENABLED:'true'},{...opts(f,p),orgId:f.org})).campaigns,0);
+ const a=await identity(f.wa,A);await database.query('UPDATE leads SET contact_consent_at=NULL WHERE org_id=$1 AND id=$2',[f.org,a.lead_id]);
+ await database.query("UPDATE broadcast_campaigns SET scheduled_at='2000-01-01T00:00:00Z' WHERE org_id=$1 AND id=$2",[f.org,id]);
+ const ran=await runBroadcasts(db,{...process.env,BROADCAST_RUNNER_ENABLED:'true'},{...opts(f,p),orgId:f.org});assert.equal(ran.campaigns,1);assert.equal(p.sent.length,now+1);assert.equal(p.sent.at(-1)?.to,TEST_WA);
+ await runBroadcasts(db,{...process.env,BROADCAST_RUNNER_ENABLED:'true'},{...opts(f,p),orgId:f.org});assert.equal(p.sent.length,now+1);
+});
 async function tested(f:Fixture,id:string,p:{transport:typeof fetch}){const result=await testSendBroadcast(f.admin,id,{requestId:randomUUID()},opts(f,p));assert.equal(result.passed,true,JSON.stringify(result));return result;}
 async function launched(f:Fixture,p:{transport:typeof fetch},input:Record<string,unknown>={name:'Synthetic campaign',provider:'whatsapp',messageText:'Synthetic offer for consented customers'}){
   const created=await createBroadcast(f.admin,input,opts(f,p)),id=created.campaign.id;

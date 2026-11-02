@@ -7,6 +7,8 @@ import {acceptApprovedAi,approvedAiStatus,type ApprovedAiEnvelope} from '../src/
 import {bridgePayloadHash,verifyBridgeRequest} from '../src/lib/bridge-protocol';
 import {dispatchSocialReply,socialConfigFingerprint,type SocialChannelConfig} from '../src/lib/social-channels';
 import {readBridgeEvents} from '../src/lib/chat-bridge';
+import {saveSource,reviewSource,saveAiProfile,evaluateAi,activateAi} from '../src/lib/ai-lifecycle';
+import {resolveBridgeAiPolicy,assertBridgeAiPolicy} from '../src/lib/ai-policy-bridge';
 
 const secret='synthetic-approved-AI-bridge-key-at-least-32-characters';
 before(()=>{Object.assign(process.env,{DEMO_MODE:'true',RRS_WORKERS:'false',AI_PROVIDER:'disabled',D1_LOCAL_DIR:'.data/approved-ai-'+randomUUID(),CRM_BRIDGE_ENABLED:'true',CRM_APPROVED_AI_ENABLED:'true',CRM_BRIDGE_SECRET:secret,CRM_APPROVED_AI_SOURCE_ORIGIN:'https://sale.example.invalid'});});
@@ -85,4 +87,22 @@ test('unknown provider result never resends even when the signed handoff is retr
 test('source kill switch or approval revocation during a slow send aborts and quarantines outcome',async()=>{
  const f=await fixture(),accepted=await acceptApprovedAi(f.payload,{fetch:f.transport,dispatch:false});f.provider('revoke-during-send');
  assert.equal((await dispatchSocialReply(f.org,accepted.outboundCommandId,{config:f.config,fetch:f.transport})).status,'unknown');assert.equal(f.counts().sends,1);assert.ok(f.counts().proofCalls>=4);
+});
+test('social policy binds exact approved account sources and fences changed, expired or paused policy at dispatch',async()=>{
+ const f=await fixture(),staff={id:f.actor,orgId:f.org,name:'Admin',email:f.actor+'@example.invalid',role:'Admin' as const},scope='whatsapp:1234567890';
+ await database.query("INSERT INTO social_accounts(id,org_id,provider,account_id,created_at,updated_at) VALUES($1,$2,'whatsapp','1234567890',$3,$3)",[randomUUID(),f.org,new Date().toISOString()]);
+ await database.query("UPDATE messages SET content='Orange details' WHERE org_id=$1 AND role='user'",[f.org]);
+ Object.assign(process.env,{AI_PROVIDER:'demo',AI_LIFECYCLE_ENABLED:'true',CRM_AI_POLICY_BRIDGE_ENABLED:'true'});
+ try{
+  const privateSource=await saveSource(staff,{title:'Orange private website',content:'Orange web-only facts',scopes:['web']});await reviewSource(staff,{id:privateSource.id,expectedVersion:1,action:'approve',confirm:true});
+  const source=await saveSource(staff,{title:'Orange',content:'Orange products are available in boxes.',scopes:[scope]});await reviewSource(staff,{id:source.id,expectedVersion:1,action:'approve',confirm:true});
+  await saveAiProfile(staff,{scope,personality:'Helpful',scenarios:[{name:'Payment',keywords:['payment'],handoff:true}]});const evaluation=await evaluateAi(staff,{scope,prompt:'Orange',expectedHandoff:false});await activateAi(staff,{scope,expectedRevision:1,evaluationId:evaluation.id,action:'activate',confirm:true});
+  const policy=await resolveBridgeAiPolicy(f.org,{conversationId:f.conversation,expectedVersion:1});assert.ok(policy.enabled&&policy.active&&policy.proof);assert.deepEqual(policy.sources.map(s=>s.id),[source.id]);assert.doesNotMatch(JSON.stringify(policy),/web-only/);
+  await assert.rejects(acceptApprovedAi(f.payload,{fetch:f.transport,dispatch:false}),/proof/);f.payload.source.aiPolicy=policy.proof!;
+  const accepted=await acceptApprovedAi(f.payload,{fetch:f.transport,dispatch:false});await assertBridgeAiPolicy(f.org,f.conversation,1,policy.proof);
+  await database.query("UPDATE messages SET content='payment Orange' WHERE org_id=$1 AND role='user'",[f.org]);assert.equal((await resolveBridgeAiPolicy(f.org,{conversationId:f.conversation,expectedVersion:1}) as any).reason,'scenario_handoff');await assert.rejects(dispatchSocialReply(f.org,accepted.outboundCommandId,{config:f.config,fetch:f.transport}));assert.equal(f.counts().sends,0);
+  await database.query("UPDATE messages SET content='Orange details' WHERE org_id=$1 AND role='user'",[f.org]);await database.query("UPDATE knowledge SET expires_at='2000-01-01T00:00:00Z' WHERE id=$1",[source.id]);await assert.rejects(assertBridgeAiPolicy(f.org,f.conversation,1,policy.proof),/handoff/);
+  await database.query('UPDATE knowledge SET expires_at=NULL WHERE id=$1',[source.id]);await activateAi(staff,{scope,expectedRevision:1,action:'pause',confirm:true});await assert.rejects(dispatchSocialReply(f.org,accepted.outboundCommandId,{config:f.config,fetch:f.transport}));assert.equal(f.counts().sends,0);
+  process.env.CRM_AI_POLICY_BRIDGE_ENABLED='false';assert.deepEqual(await resolveBridgeAiPolicy(f.org,{conversationId:f.conversation,expectedVersion:1}),{version:1,enabled:false,owner:'sale'});await assert.rejects(assertBridgeAiPolicy(f.org,f.conversation,1,policy.proof),/handoff/);
+ }finally{process.env.AI_PROVIDER='disabled';process.env.AI_LIFECYCLE_ENABLED='false';process.env.CRM_AI_POLICY_BRIDGE_ENABLED='false';}
 });
