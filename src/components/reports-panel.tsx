@@ -1,4 +1,5 @@
 "use client";
+import {DataView} from './data-view';
 import { FeatureHeading } from "./specialist-workspace";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { CircleHelp, Clock, Download, Inbox, MessageSquare, RefreshCw, TriangleAlert, Users, Workflow, Timer, CheckCheck, MessagesSquare } from "lucide-react";
@@ -96,20 +97,20 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
 
         <div className="reports-grid">
           <Card><div className="card-heading"><div><h2 id={ids.times}>เวลาตอบกลับและปิดงาน</h2><p>จากบทสนทนาที่เริ่มในช่วงวันที่เลือก</p></div><Clock size={19} aria-hidden="true" /></div>
-            <div className="table-wrap"><table aria-labelledby={ids.times}><thead><tr><th scope="col">ตัวชี้วัด</th><th scope="col">ตัวอย่าง</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">เฉลี่ย</th></tr></thead><tbody>
+            <div className="table-wrap"><DataView><table aria-labelledby={ids.times}><thead><tr><th scope="col">ตัวชี้วัด</th><th scope="col">ตัวอย่าง</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">เฉลี่ย</th></tr></thead><tbody>
               <StatRow label="ตอบครั้งแรก (AI หรือเจ้าหน้าที่)" stat={t.firstResponse} />
               <StatRow label="เจ้าหน้าที่ตอบครั้งแรก" stat={t.humanFirstResponse} />
               <StatRow label="เวลาจบการสนทนา" stat={t.resolution} />
-            </tbody></table></div>
+            </tbody></table></DataView></div>
             <p className="reports-note">ยังไม่มีคำตอบแรก {count(t.awaitingFirstReply)} บทสนทนา · จบแล้ว {count(t.resolved)} บทสนทนา (คำนวณเวลาไม่ได้ {count(t.resolvedWithoutTiming)})</p>
           </Card>
           <Card><div className="card-heading"><div><h2 id={ids.outcome}>AI และเจ้าหน้าที่</h2><p>ใครเป็นผู้ดูแลบทสนทนาใหม่</p></div><Users size={19} aria-hidden="true" /></div>
-            <div className="table-wrap"><table aria-labelledby={ids.outcome}><thead><tr><th scope="col">ผลลัพธ์</th><th scope="col">บทสนทนา</th><th scope="col">สัดส่วน</th></tr></thead><tbody>
+            <div className="table-wrap"><DataView><table aria-labelledby={ids.outcome}><thead><tr><th scope="col">ผลลัพธ์</th><th scope="col">บทสนทนา</th><th scope="col">สัดส่วน</th></tr></thead><tbody>
               <tr><th scope="row">AI ดูแลเอง</th><td>{count(t.aiHandled)}</td><td>{share(t.aiHandled, t.newConversations)}</td></tr>
               <tr><th scope="row">เจ้าหน้าที่เข้าร่วม</th><td>{count(t.humanInvolved)}</td><td>{share(t.humanInvolved, t.newConversations)}</td></tr>
               <tr><th scope="row">อื่น ๆ (ยังไม่มีผู้ตอบ / รอเจ้าหน้าที่)</th><td>{count(t.otherOutcome)}</td><td>{share(t.otherOutcome, t.newConversations)}</td></tr>
               <tr><th scope="row">ส่งต่อเจ้าหน้าที่</th><td>{count(t.handedOff)}</td><td>{rate(t.handoffRate)}</td></tr>
-            </tbody></table></div>
+            </tbody></table></DataView></div>
           </Card>
         </div>
 
@@ -120,7 +121,7 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
           {report.byAgent.length ? <GroupTable labelledBy={ids.agents} firstColumn="ผู้รับผิดชอบ" rows={report.byAgent.map(row => ({ key: row.agentId ?? "unassigned", label: row.name + (row.active ? "" : " (ปิดใช้งาน)"), metrics: row }))} /> : <Empty title={NO_DATA} detail="ยังไม่มีบทสนทนาที่มอบหมายตามตัวกรองนี้" />}
         </Card>
 
-        <Card><h2>ผลงานตามผู้เขียนจริง</h2><p>นับผู้ส่งข้อความที่ระบบบันทึกไว้ แม้เปลี่ยนผู้รับผิดชอบภายหลัง · ไม่นำประวัติที่ไม่ทราบผู้เขียนหรือข้อความอัตโนมัติมาให้เครดิตพนักงาน</p><div className="table-wrap"><table><thead><tr><th>ผู้เขียน</th><th>คำตอบสาธารณะ</th><th>บันทึกภายใน</th><th>บทสนทนา</th></tr></thead><tbody>{report.byAuthor.map(row=><tr key={row.memberId}><th>{row.name}</th><td>{row.replies}</td><td>{row.notes}</td><td>{row.conversations}</td></tr>)}</tbody></table></div></Card>
+        <Card><h2>ผลงานตามผู้เขียนจริง</h2><p>นับผู้ส่งข้อความที่ระบบบันทึกไว้ แม้เปลี่ยนผู้รับผิดชอบภายหลัง · ไม่นำประวัติที่ไม่ทราบผู้เขียนหรือข้อความอัตโนมัติมาให้เครดิตพนักงาน</p><div className="table-wrap"><DataView><table><thead><tr><th>ผู้เขียน</th><th>คำตอบสาธารณะ</th><th>บันทึกภายใน</th><th>บทสนทนา</th></tr></thead><tbody>{report.byAuthor.map(row=><tr key={row.memberId}><th>{row.name}</th><td>{row.replies}</td><td>{row.notes}</td><td>{row.conversations}</td></tr>)}</tbody></table></DataView></div></Card>
         <details className="definitions"><summary><CircleHelp size={16} aria-hidden="true" />นิยามตัวชี้วัด</summary><dl className="reports-definitions">{Object.entries(definitionLabels).map(([key, label]) => report.definitions[key] ? <div key={key}><dt>{label}</dt><dd>{report.definitions[key]}</dd></div> : null)}</dl></details>
       </>}
     </section>
@@ -136,7 +137,7 @@ function StatRow({ label, stat }: { label: string; stat: Stat }) {
   return <tr><th scope="row">{label}</th><td>{count(stat.samples)}</td><td>{formatDuration(stat.p50Ms)}</td><td>{formatDuration(stat.p90Ms)}</td><td>{formatDuration(stat.avgMs)}</td></tr>;
 }
 function GroupTable({ labelledBy, firstColumn, rows }: { labelledBy: string; firstColumn: string; rows: { key: string; label: string; metrics: GroupMetrics }[] }) {
-  return <div className="table-wrap"><table aria-labelledby={labelledBy}><thead><tr>
+  return <div className="table-wrap"><DataView><table aria-labelledby={labelledBy}><thead><tr>
     <th scope="col">{firstColumn}</th><th scope="col">บทสนทนาใหม่</th><th scope="col">ข้อความลูกค้า</th><th scope="col">ตอบครั้งแรก p50</th><th scope="col">เจ้าหน้าที่ตอบ p50</th><th scope="col">เวลาจบ p50</th><th scope="col">อัตราส่งต่อ</th><th scope="col">รอเจ้าหน้าที่</th><th scope="col">กำลังดูแล</th><th scope="col">รอเกินกำหนด</th>
   </tr></thead><tbody>{rows.map(({ key, label, metrics: m }) => <tr key={key}>
     <th scope="row">{label}</th><td>{count(m.newConversations)}</td><td>{count(m.inboundMessages)}</td>
@@ -144,5 +145,5 @@ function GroupTable({ labelledBy, firstColumn, rows }: { labelledBy: string; fir
     <td>{formatDuration(m.humanFirstResponse.p50Ms)}<small>{count(m.humanFirstResponse.samples)} ตัวอย่าง</small></td>
     <td>{formatDuration(m.resolution.p50Ms)}<small>{count(m.resolution.samples)} ตัวอย่าง</small></td>
     <td>{rate(m.handoffRate)}</td><td>{count(m.backlog.waitingHuman)}</td><td>{count(m.backlog.humanActive)}</td><td>{count(m.backlog.overdue)}</td>
-  </tr>)}</tbody></table></div>;
+  </tr>)}</tbody></table></DataView></div>;
 }

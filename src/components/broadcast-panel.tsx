@@ -1,4 +1,5 @@
 "use client";
+import {DataView} from './data-view';
 import { FeatureHeading, FeatureSteps } from "./specialist-workspace";
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {AlertTriangle,Megaphone,Plus,RefreshCw} from 'lucide-react';
@@ -50,11 +51,11 @@ export function BroadcastPanel({isAdmin}:{isAdmin:boolean}){
     {!isAdmin&&<p className="helper-text">ผู้ดูแลระบบเป็นผู้สร้างและอนุมัติการส่งบรอดแคสต์ คุณดูรายการและสถานะได้อย่างเดียว</p>}
     <Card><div className="card-heading"><div><h2>แคมเปญ</h2><p>ล่าสุด 100 รายการ</p></div><Button variant="ghost" size="sm" onClick={()=>void load()}><RefreshCw size={14}/>รีเฟรช</Button></div>
       {!list?<p className="helper-text" style={{padding:'0 24px'}}>กำลังโหลด…</p>:!list.campaigns.length?<Empty title="ยังไม่มีแคมเปญ"/>:
-      <div className="table-wrap"><table><thead><tr><th>แคมเปญ</th><th>ช่องทาง</th><th>สถานะ</th><th>ผู้รับ</th><th>อัปเดต</th><th/></tr></thead><tbody>{list.campaigns.map(c=><tr key={c.id}>
+      <div className="table-wrap"><DataView><table><thead><tr><th>แคมเปญ</th><th>ช่องทาง</th><th>สถานะ</th><th>ผู้รับ</th><th>อัปเดต</th><th/></tr></thead><tbody>{list.campaigns.map(c=><tr key={c.id}>
         <td><strong>{c.name}</strong><small>{c.messageKind==='template'?'เทมเพลต':'ข้อความ'}{c.scheduledAt?' · ตั้งเวลา '+date(c.scheduledAt):''}</small></td><td>{providerNames[c.provider]}</td>
         <td><Badge tone={statusTone[c.status]}>{label(statusNames,c.status)}</Badge></td>
         <td>{c.launchedCount??'—'}{c.recipients.submitted?` · ส่งแล้ว ${c.recipients.submitted}`:''}</td><td>{date(c.updatedAt)}</td>
-        <td><Button variant="ghost" size="sm" onClick={()=>setSelected(selected===c.id?null:c.id)}>{selected===c.id?'ปิด':'เปิด'}</Button></td></tr>)}</tbody></table></div>}
+        <td><Button variant="ghost" size="sm" onClick={()=>setSelected(selected===c.id?null:c.id)}>{selected===c.id?'ปิด':'เปิด'}</Button></td></tr>)}</tbody></table></DataView></div>}
     </Card>
     {selected&&<CampaignDetail key={selected} id={selected} isAdmin={isAdmin} onChanged={load}/>}
   </div>;
