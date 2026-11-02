@@ -170,7 +170,8 @@ describe("RRS real API acceptance (synthetic Demo data)", { concurrency: false }
     assert.ok(publicHistory.messages.every((message: Json) => message.role !== "note"));
     assert.equal(Object.hasOwn(publicHistory.settings, "personality"), false, "public chat must not expose private bot configuration");
     assert.equal(Object.hasOwn(publicHistory.settings, "handoffRule"), false, "public chat must not expose private handoff rules");
-    assert.deepEqual(Object.keys(publicHistory.settings).sort(), ["aiEnabled", "botName", "businessHours"]);
+    assert.deepEqual(Object.keys(publicHistory.settings).sort(), ["aiEnabled", "attachmentsEnabled", "botName", "businessHours"]);
+    assert.equal(typeof publicHistory.settings.attachmentsEnabled, 'boolean', 'only the public file capability is exposed');
     assert.doesNotMatch(JSON.stringify(publicHistory), /"(?:orgId|tokenHash|generatingClientId)"\s*:/);
     assert.deepEqual(Object.keys(publicHistory.conversation).sort(), ["createdAt", "id", "leadId", "status", "updatedAt", "version"]);
     for (const key of ["summary", "tags", "stage", "assigneeId"]) {

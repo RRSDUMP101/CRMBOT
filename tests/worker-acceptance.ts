@@ -7,7 +7,7 @@ const origin='http://127.0.0.1:8787';
 const mf=new Miniflare(convertV4MiniflareOptions({
   host:'127.0.0.1',port:8787,modules:true,scriptPath:'.wrangler/bundle/worker.js',
   compatibilityDate:'2026-10-28',compatibilityFlags:['nodejs_compat','global_fetch_strictly_public'],
-  bindings:{APP_ORIGIN:origin,RRS_WORKERS:'true',DEMO_MODE:'false',PUBLIC_ORG_SLUG:'rrs',AI_PROVIDER:'demo',AI_DAILY_CALL_LIMIT:'1000',SESSION_SECRET:'synthetic-local-worker-secret-never-use-in-production',TRUSTED_IP_HEADER:'cf-connecting-ip'},
+  bindings:{APP_ORIGIN:origin,RRS_WORKERS:'true',DEMO_MODE:'false',PUBLIC_ORG_SLUG:'rrs',AI_PROVIDER:'demo',AI_DAILY_CALL_LIMIT:'1000',SESSION_SECRET:'synthetic-local-worker-secret-never-use-in-production',TRUSTED_IP_HEADER:'cf-connecting-ip',WEB_CHAT_ATTACHMENTS_ENABLED:'true'},
   d1Databases:['DB'],r2Buckets:['BUCKET'],
 }));
 async function run(file:string){await new Promise<void>((resolve,reject)=>{

@@ -593,7 +593,17 @@ async function runtimeEvidence(row:Row,env:Env,secret:string){
   const fingerprint=socialConfigFingerprint(config),since=Date.parse(row.connected_at||'');
   const inbound=envMatches&&(!runtime||config.inboundEnabled)&&!!control?.webhook_verified_at&&control.webhook_fingerprint===fingerprint&&Date.parse(control.webhook_verified_at)>=since;
   const credentialMatches=envMatches&&!!config.accessToken&&socialTokenFingerprint(config.accessToken)===row.token_fingerprint;
-  const test=inbound&&credentialMatches&&!!control?.test_passed_at&&control.test_fingerprint===fingerprint&&Date.parse(control.test_passed_at)>=since;
+  let test=inbound&&credentialMatches&&!!control?.test_passed_at&&control.test_fingerprint===fingerprint&&Date.parse(control.test_passed_at)>=since;
+  if(test&&row.provider==='instagram'){
+    // IG publishes seen/read evidence. A legacy delivered flag, an echo or a
+    // successful Send API response is not a controlled-test read receipt.
+    test=(await database.query(`SELECT 1 FROM social_outbound_commands o
+      JOIN social_message_provenance p ON p.org_id=o.org_id AND p.message_id=o.message_id
+      JOIN social_delivery_receipts r ON r.org_id=p.org_id AND r.provider=p.provider AND r.account_id=p.account_id AND r.provider_message_id=p.provider_message_id AND r.remote_id=p.remote_id
+      WHERE o.org_id=$1 AND o.provider='instagram' AND o.account_id=$2 AND o.remote_id=$3 AND o.attempt_id IS NOT NULL
+      AND o.status='read' AND p.direction='out' AND p.delivery_status='read' AND p.provider='instagram' AND p.account_id=o.account_id AND p.remote_id=o.remote_id AND p.removed_at IS NULL
+      AND r.status='read' AND julianday(r.provider_timestamp)>=julianday($4) LIMIT 1`,[row.org_id,row.account_id,config.testRecipient||'',row.connected_at])).rows.length>0;
+  }
   const liveReady=!runtime||config.liveEnabled&&!!control?.send_enabled&&!control.emergency_stop&&control.send_mode==='live';
   return {supported:true,envMatches,inbound,credentialMatches,test,liveReady};
 }
@@ -749,7 +759,7 @@ async function verifyInstagram(row:Row,token:string,env:Env,transport:typeof fet
   if(String(account.id)!==row.account_id)throw fail('provider_account_mismatch');
   const page=await providerCall(graphUrl(app.version,row.parent_ref,{fields:'id,instagram_business_account'}),{bearer:token},transport);
   if(String(page.id)!==row.parent_ref||String(page.instagram_business_account?.id)!==row.account_id)throw fail('provider_account_mismatch');
-  return {expires:Date.now()+86_400_000,detail:{accountMatched:true,linkedPageMatched:true,inbound:env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true'?'signed_webhook_required':'unsupported'}};
+  return {expires:Date.now()+86_400_000,detail:{accountMatched:true,linkedPageMatched:true,inbound:env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true'?'signed_webhook_required':'unsupported',outbound:'signed_seen_receipt_required'}};
 }
 
 /**

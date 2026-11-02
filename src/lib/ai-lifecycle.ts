@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ApiError, fields, requireAdmin, str, uuid, type Staff } from './auth';
 import { database, transaction, type Executor, type Row } from './db';
 import { selectKnowledge, generateReply, providerName, type KnowledgeLite } from './bot';
+import { fetchPublicKnowledge, knowledgeFetchOptions, knowledgeUrl } from './knowledge-crawl';
 
 const MAX_TEXT = 100_000, MAX_FILE = 5 * 1024 * 1024;
 const at = () => new Date().toISOString();
@@ -11,12 +12,12 @@ export async function boundedBytes(body:ReadableStream<Uint8Array>|null,max=MAX_
   try{while(true){const next=await reader.read();if(next.done)break;size+=next.value.byteLength;if(size>max)throw new ApiError(413,'ไฟล์ใหญ่เกินขีดจำกัด');parts.push(next.value);}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
   const bytes=new Uint8Array(size);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}return bytes;
 }
-export async function crawlSource(staff:Staff,input:Record<string,unknown>,fetcher:typeof fetch=fetch){
-  requireAdmin(staff);fields(input,['url','title','scopes','expiresAt']);let url:URL;
-  try{url=new URL(str(input.url,'URL',2000,true));}catch{throw new ApiError(400,'URLไม่ถูกต้อง');}
-  const hosts=String(process.env.AI_KNOWLEDGE_ALLOWED_HOSTS||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
-  if(url.protocol!=='https:'||url.username||url.password||url.port||!hosts.includes(url.hostname.toLowerCase())||!/[a-z]/i.test(url.hostname)||url.hostname.endsWith('.localhost')||url.hostname==='localhost'||url.hostname.endsWith('.local'))throw new ApiError(403,'เว็บไซต์นี้ไม่ได้อยู่ในรายการที่ผู้ดูแลอนุญาต');
-  const response=await fetcher(url,{redirect:'manual',signal:AbortSignal.timeout(10000),headers:{Accept:'text/html,text/plain'}});
+export async function crawlSource(staff:Staff,input:Record<string,unknown>,fetcher:(url:URL,init:RequestInit)=>Promise<Response>=fetchPublicKnowledge){
+  requireAdmin(staff);fields(input,['url','title','scopes','expiresAt']);
+  const url=knowledgeUrl(str(input.url,'URL',2000,true));
+  // The optional transport is a trusted test seam, never request input. Routes
+  // always use the public-network Worker transport, including in local Node.
+  const response=await fetcher(url,knowledgeFetchOptions());
   if(!response.ok||response.status>=300){await response.body?.cancel();throw new ApiError(422,'อ่านหน้าเว็บไม่ได้ ไม่ติดตามลิงก์เปลี่ยนเส้นทาง');}
   const type=response.headers.get('content-type')||'';if(!/^(text\/html|text\/plain)/i.test(type)){await response.body?.cancel();throw new ApiError(415,'รองรับหน้าHTMLหรือข้อความเท่านั้น');}
   const bytes=await boundedBytes(response.body,1_000_000);let content=new TextDecoder('utf-8',{fatal:true}).decode(bytes);

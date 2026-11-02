@@ -153,12 +153,33 @@ export async function mergeContacts(staff: Staff, body: Record<string, unknown>)
     if (a.market !== b.market) throw new ApiError(409, 'ห้ามรวมลูกค้าข้ามตลาด กรุณาตรวจสอบข้อมูลต้นทาง');
     const old = (await c.query('SELECT * FROM operator_contact_links WHERE org_id=$1 AND (source_lead_id=$2 OR source_lead_id=$3 OR canonical_lead_id=$2)', [staff.orgId, source, target])).rows;
     if (old.length) {
-      if (old.length === 1 && old[0].source_lead_id === source && old[0].canonical_lead_id === target) return { canonicalId: target, sourceId: source, alreadyLinked: true };
+      if (old.length === 1 && old[0].source_lead_id === source && old[0].canonical_lead_id === target) return { canonicalId: target, sourceId: source, revision: old[0].revision, alreadyLinked: true };
       throw new ApiError(409, 'รายการนี้อยู่ในกลุ่มลูกค้าแล้ว กรุณาเลือกข้อมูลหลักโดยตรง');
     }
-    await c.query('INSERT INTO operator_contact_links(org_id,source_lead_id,canonical_lead_id,actor_id,reason,created_at) VALUES($1,$2,$3,$4,$5,$6)', [staff.orgId, source, target, staff.id, reason, now()]);
-    await audit(c, staff, 'contact.merge', target, { sourceId: source, targetId: target, reason, market: a.market, consentPolicy: 'preserve_each_source' });
-    return { canonicalId: target, sourceId: source };
+    const revision = randomUUID().replaceAll('-', '');
+    await c.query('INSERT INTO operator_contact_links(org_id,source_lead_id,canonical_lead_id,actor_id,reason,created_at,revision) VALUES($1,$2,$3,$4,$5,$6,$7)', [staff.orgId, source, target, staff.id, reason, now(), revision]);
+    await audit(c, staff, 'contact.merge', target, { sourceId: source, targetId: target, revision, reason, market: a.market, consentPolicy: 'preserve_each_source' });
+    return { canonicalId: target, sourceId: source, revision };
+  }, staff);
+}
+/** Undo one reviewed link, retaining every original contact, identity, consent and Sale mapping. */
+export async function unmergeContacts(staff: Staff, body: Record<string, unknown>) {
+  requireAdmin(staff); fields(body, ['sourceId', 'targetId', 'revision', 'reason']);
+  const source = uuid(body.sourceId), target = uuid(body.targetId), reason = str(body.reason, 'เหตุผล', 1000, true);
+  if (typeof body.revision !== 'string' || !/^[a-f0-9]{32}$/.test(body.revision)) throw new ApiError(400, 'กรุณาโหลดข้อมูลกลุ่มล่าสุด');
+  const revision = body.revision;
+  return transaction(staff.orgId, async c => {
+    await lead(c, staff.orgId, source); await lead(c, staff.orgId, target);
+    const old = (await c.query('SELECT * FROM operator_contact_links WHERE org_id=$1 AND source_lead_id=$2', [staff.orgId, source])).rows[0];
+    if (!old) {
+      const receipt = (await c.query("SELECT id FROM audit_events WHERE org_id=$1 AND action='operator.contact.unmerge' AND entity_id=$2 AND json_extract(metadata,'$.sourceId')=$3 AND json_extract(metadata,'$.revision')=$4 LIMIT 1", [staff.orgId, target, source, revision])).rows[0];
+      if (receipt) return { sourceId: source, canonicalId: target, alreadyUnlinked: true };
+      throw new ApiError(404, 'ไม่พบการรวมกลุ่มนี้');
+    }
+    if (old.canonical_lead_id !== target || old.revision !== revision) throw new ApiError(409, 'กลุ่มลูกค้าเปลี่ยนแล้ว กรุณาโหลดใหม่ก่อนแยกกลุ่ม');
+    await c.query('DELETE FROM operator_contact_links WHERE org_id=$1 AND source_lead_id=$2 AND canonical_lead_id=$3 AND revision=$4', [staff.orgId, source, target, revision]);
+    await audit(c, staff, 'contact.unmerge', target, { sourceId: source, targetId: target, revision, reason, originalActorId: old.actor_id, originalReason: old.reason, originalCreatedAt: old.created_at, consentPolicy: 'preserve_each_source' });
+    return { sourceId: source, canonicalId: target, alreadyUnlinked: false };
   }, staff);
 }
 export async function linkContactIdentity(staff: Staff, body: Record<string, unknown>) {
@@ -382,14 +403,15 @@ export async function operatorConversation(staff: Staff, id: string) {
   const chat = await conversation(database, staff.orgId, id);
   const linked = (await database.query('SELECT canonical_lead_id FROM operator_contact_links WHERE org_id=$1 AND source_lead_id=$2', [staff.orgId, chat.lead_id])).rows[0];
   const canonicalId = linked?.canonical_lead_id || chat.lead_id;
-  const [drafts, presence, definitions, contacts] = await Promise.all([
+  const [drafts, presence, definitions, contacts, links] = await Promise.all([
     database.query('SELECT kind,content AS text,version,updated_at FROM operator_drafts WHERE org_id=$1 AND conversation_id=$2 AND member_id=$3', [staff.orgId, id, staff.id]),
     database.query('SELECT p.member_id,m.name,p.typing,p.expires_at FROM operator_presence p JOIN members m ON m.org_id=p.org_id AND m.id=p.member_id WHERE p.org_id=$1 AND p.conversation_id=$2 AND p.expires_at>$3 AND m.active=1', [staff.orgId, id, now()]),
     database.query("SELECT d.*,v.value_json,v.version AS value_version FROM operator_field_definitions d LEFT JOIN operator_field_values v ON v.org_id=d.org_id AND v.field_id=d.id AND v.entity_id=CASE WHEN d.target='contact' THEN $2 ELSE $3 END WHERE d.org_id=$1 AND d.active=1 AND (d.market='all' OR d.market=$4) ORDER BY d.name,d.id", [staff.orgId, chat.lead_id, id, chat.market]),
     database.query('SELECT l.id,l.name,l.phone,l.email,l.market,l.contact_consent_at FROM leads l WHERE l.org_id=$1 AND (l.id=$2 OR l.id IN (SELECT source_lead_id FROM operator_contact_links WHERE org_id=$1 AND canonical_lead_id=$2))', [staff.orgId, canonicalId]),
+    database.query('SELECT source_lead_id,canonical_lead_id,revision,created_at FROM operator_contact_links WHERE org_id=$1 AND canonical_lead_id=$2', [staff.orgId, canonicalId]),
   ]);
   const identities = (await database.query('SELECT lead_id,provider,account_id,remote_id FROM operator_contact_identities WHERE org_id=$1 AND (lead_id=$2 OR lead_id IN (SELECT source_lead_id FROM operator_contact_links WHERE org_id=$1 AND canonical_lead_id=$2)) UNION SELECT lead_id,provider,account_id,remote_id FROM social_identities WHERE org_id=$1 AND (lead_id=$2 OR lead_id IN (SELECT source_lead_id FROM operator_contact_links WHERE org_id=$1 AND canonical_lead_id=$2))', [staff.orgId, canonicalId])).rows;
-  return { conversation: camel(chat), drafts: drafts.rows.map(camel), presence: presence.rows.map(camel), fields: definitions.rows.map(d => ({ ...camel(d), options: parse(d.options_json), value: d.value_json == null ? null : parse(d.value_json), valueVersion: d.value_version || 0 })), contactGroup: { canonicalId, contacts: contacts.rows.map(camel), identities: identities.map(camel) } };
+  return { conversation: camel(chat), drafts: drafts.rows.map(camel), presence: presence.rows.map(camel), fields: definitions.rows.map(d => ({ ...camel(d), options: parse(d.options_json), value: d.value_json == null ? null : parse(d.value_json), valueVersion: d.value_version || 0 })), contactGroup: { canonicalId, contacts: contacts.rows.map(camel), identities: identities.map(camel), links: staff.role === 'Admin' ? links.rows.map(camel) : [] } };
 }
 
 export { canRead as canReadOperatorItem, scope as validateOperatorScope };

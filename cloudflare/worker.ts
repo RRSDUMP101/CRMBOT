@@ -6,7 +6,8 @@ import {mediaArchiveRunnerRequest} from '../src/lib/media-archive-auth';
 import {notifySale} from './sale-sync';
 import {pullSaleContext} from '../src/lib/sale-context';
 import {handleSaleContextSync,SALE_CONTEXT_SYNC_PATH} from './sale-context-sync';
-import type {D1Binding} from '../src/lib/db';
+import {withDatabase,type D1Binding} from '../src/lib/db';
+import type {PrivateBucket} from '../src/lib/files';
 import {observeAutomation} from '../src/lib/automation-health';
 type Context={waitUntil(task:Promise<unknown>):void};
 type ServiceBinding={fetch(request:Request):Promise<Response>};
@@ -28,6 +29,7 @@ export default {
     if(env.BROADCAST_ENABLED==='true'&&env.BROADCAST_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'broadcast',()=>import('../src/lib/broadcast').then(broadcast=>broadcast.runBroadcasts(env.DB as D1Binding,env as Record<string,string|undefined>))).then(()=>undefined,()=>console.warn('Broadcast runner failed')));
     if(env.CRM_PUBLIC_WEBHOOKS_ENABLED==='true'&&env.CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'webhooks',()=>import('../src/lib/public-integrations').then(integrations=>integrations.runPublicWebhooks(env.DB as D1Binding,env))).then(()=>undefined,()=>console.warn('Public webhook runner failed')));
     if(env.EXTERNAL_CONNECTORS_ENABLED==='true'&&env.EXTERNAL_CONNECTOR_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'connectors',()=>import('../src/lib/external-sync').then(connectors=>connectors.runExternalConnectors(env.DB as D1Binding,env as Record<string,string|undefined>))).then(()=>undefined,()=>console.warn('External connector runner failed')));
+    if(env.WEB_CHAT_ATTACHMENTS_ENABLED==='true'&&env.DB&&env.BUCKET&&typeof env.CRM_BRIDGE_ORG_ID==='string')ctx.waitUntil(observeAutomation(env,'web-files',()=>withDatabase(env.DB as D1Binding,()=>import('../src/lib/web-chat-attachments').then(files=>files.maintainWebAttachments(env.CRM_BRIDGE_ORG_ID as string,env.BUCKET as PrivateBucket)))).catch(()=>console.warn('Web attachment cleanup deferred')));
     if(env.SOCIAL_MEDIA_ARCHIVE_ENABLED!=='true'||env.SOCIAL_CHANNELS_OWNER!=='crm'||env.SOCIAL_INBOUND_ENABLED!=='true')return;
     if(typeof env.APP_ORIGIN!=='string'||typeof env.SESSION_SECRET!=='string')throw new Error('Archive runner configuration unavailable');
     const response=await application.fetch(applicationRequest(mediaArchiveRunnerRequest(env.APP_ORIGIN,env.SESSION_SECRET)),{...env,ASSETS:env.ASSETS||bundledAssets},ctx);
