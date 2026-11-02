@@ -18,6 +18,7 @@
     "PUBLIC_ORG_SLUG":"rrs",
     "AI_PROVIDER":"disabled",
     "SOCIAL_MEDIA_ARCHIVE_ENABLED":"false",
+    "WEB_CHAT_ATTACHMENTS_ENABLED":"false",
     "AI_DAILY_CALL_LIMIT":"100",
     "FILE_STORAGE_LIMIT_BYTES":"1073741824",
     "TRUSTED_IP_HEADER":"cf-connecting-ip"

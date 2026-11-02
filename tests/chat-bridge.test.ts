@@ -8,6 +8,7 @@ import { before, after, test } from 'node:test';
 import { database, transaction, closeDatabase } from '../src/lib/db';
 import { acknowledgeBridge, bootstrapBridge, readBridgeEvents } from '../src/lib/chat-bridge';
 import { signBridgeRequest } from '../src/lib/bridge-protocol';
+import { bridgeRecordHash } from '../src/lib/bridge-envelope';
 import { GET, POST } from '../src/app/api/bridge/[...path]/route';
 import { conversationDetail, snapshot } from '../src/lib/service';
 
@@ -164,4 +165,41 @@ test('dashboard previews and Agent audit do not reveal owner evidence',async()=>
   assert.equal(ordinary.audit.some(row=>/^whatsapp_consent\.|^social_channel\./.test(row.action)),false);
   assert.equal(owner.conversations.find(c=>c.id===ids.conversation)?.lastMessage,'Synthetic owner-only preview');
   assert.equal(owner.audit.filter(row=>/^whatsapp_consent\.|^social_channel\./.test(row.action)).length,2);
+});
+
+test('negotiated envelope v2 preserves legacy events and adds stable canonical integrity metadata',async()=>{
+  const legacy=await readBridgeEvents(ids.org),page=await readBridgeEvents(ids.org,0,100,2);
+  assert.equal(page.envelopeVersion,2);assert.equal(legacy.envelopeVersion,undefined);
+  for(let i=0;i<page.events.length;i++){
+    const {envelopeVersion,sourceSystem,aggregateType,aggregateId,aggregateVersion,correlationId,causationId,payloadHash,...base}=page.events[i];
+    assert.deepEqual(base,legacy.events[i]);assert.equal(envelopeVersion,2);assert.equal(sourceSystem,'crm');
+    assert.equal(aggregateType,base.entity);assert.equal(aggregateId,base.record.id);assert.equal(correlationId,base.eventId);assert.equal(causationId,null);
+    assert.equal(aggregateVersion,page.events.slice(0,i+1).filter(e=>e.entity===base.entity&&e.record.id===base.record.id).length);
+    assert.equal(payloadHash,await bridgeRecordHash(base.record));
+  }
+  assert.deepEqual(await readBridgeEvents(ids.org,0,100,2),page);
+  const response=await GET(await request('events?after=0&limit=2&envelope=2'));assert.equal(response.status,200);assert.deepEqual((await response.json()).events,page.events.slice(0,2));
+  for(const query of ['envelope=1','envelope=3','envelope=2&envelope=2','envelope=02'])assert.equal((await GET(await request('events?'+query))).status,400);
+  const empty=await readBridgeEvents(ids.org,page.headSequence,100,2);assert.equal(empty.envelopeVersion,2);assert.deepEqual(empty.events,[]);
+});
+
+test('concurrent mutations have per-aggregate ordinals and rollback cannot consume an ordinal',async()=>{
+  const lead=randomUUID(),second=randomUUID(),head=(await readBridgeEvents(ids.org)).headSequence;
+  await database.query('INSERT INTO leads(id,org_id,name) VALUES($1,$2,$3)',[lead,ids.org,'Envelope fixture']);
+  await Promise.all(Array.from({length:8},(_,i)=>transaction(ids.org,async connection=>{
+    await connection.query('UPDATE leads SET name=$3 WHERE org_id=$1 AND id=$2',[ids.org,lead,'Concurrent '+i]);
+  })));
+  await database.query('INSERT INTO leads(id,org_id,name) VALUES($1,$2,$3)',[second,ids.org,'Independent aggregate']);
+  const before=await readBridgeEvents(ids.org,head,100,2);
+  assert.deepEqual(before.events.filter(e=>e.record.id===lead).map(e=>e.aggregateVersion),[1,2,3,4,5,6,7,8,9]);
+  assert.equal(before.events.find(e=>e.record.id===second)!.aggregateVersion,1);
+  await assert.rejects(transaction(ids.org,async connection=>{
+    await connection.query('UPDATE leads SET name=$3 WHERE org_id=$1 AND id=$2',[ids.org,lead,'Must roll back']);
+    await connection.query('INSERT INTO conversations(id,org_id,lead_id) VALUES($1,$2,$3)',[randomUUID(),ids.org,randomUUID()]);
+  }));
+  assert.deepEqual(await readBridgeEvents(ids.org,head,100,2),before);
+  await database.query('UPDATE leads SET name=$3 WHERE org_id=$1 AND id=$2',[ids.org,lead,'Committed after retry']);
+  assert.equal((await readBridgeEvents(ids.org,before.headSequence,100,2)).events[0].aggregateVersion,10);
+  await assert.rejects(database.query('UPDATE crm_bridge_event_envelopes SET aggregate_version=999 WHERE org_id=$1',[ids.org]),/immutable/);
+  await assert.rejects(database.query('DELETE FROM crm_bridge_event_envelopes WHERE org_id=$1',[ids.org]),/retained/);
 });

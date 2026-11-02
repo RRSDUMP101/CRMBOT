@@ -12,3 +12,6 @@ export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElemen
 export function Badge({ children, tone = "neutral" }: { children: React.ReactNode; tone?: string }) { return <span className={`badge badge-${tone}`}>{children}</span>; }
 export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) { return <label className="field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>; }
 export function Empty({ title, detail }: { title: string; detail?: string }) { return <div className="empty"><span className="empty-symbol">↗</span><strong>{title}</strong>{detail && <p>{detail}</p>}</div>; }
+
+/** Accessible wordmark; the metallic finish is confined to the brand, never body copy. */
+export function RrsBrand() { return <span className="rrs-brand" aria-label="RRS CRM"><span className="rrs-brand-accent" aria-hidden="true" /><span className="rrs-brand-type" aria-hidden="true"><b>RRS</b><small>CRM · RUNGRUENG GROUP</small></span></span>; }

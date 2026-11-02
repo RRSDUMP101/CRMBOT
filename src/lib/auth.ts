@@ -74,12 +74,12 @@ export async function rateLimit(key: string, maximum: number, seconds: number) {
   if(Number(result.rows[0].hits)>maximum) throw new ApiError(429,'ส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่');
 }
 
-export async function readJson(request: Request): Promise<Record<string,unknown>> {
+export async function readJson(request: Request, maximum=64_000): Promise<Record<string,unknown>> {
   if(!request.headers.get('content-type')?.includes('application/json')) throw new ApiError(415,'ต้องส่งข้อมูลแบบ JSON');
   const reader=request.body?.getReader();
   if(!reader) return {};
   const parts: Uint8Array[]=[]; let length=0;
-  while(true){const part=await reader.read(); if(part.done)break; length+=part.value.length; if(length>64_000){await reader.cancel();throw new ApiError(413,'ข้อมูลมีขนาดใหญ่เกินไป');}parts.push(part.value);}
+  while(true){const part=await reader.read(); if(part.done)break; length+=part.value.length; if(length>maximum){await reader.cancel();throw new ApiError(413,'ข้อมูลมีขนาดใหญ่เกินไป');}parts.push(part.value);}
   try { const value=JSON.parse(Buffer.concat(parts).toString('utf8')||'{}'); if(!value||typeof value!=='object'||Array.isArray(value)) throw new Error(); return value; }
   catch { throw new ApiError(400,'ข้อมูล JSON ไม่ถูกต้อง'); }
 }

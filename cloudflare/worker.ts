@@ -3,21 +3,51 @@ import application from '../.open-next/worker.js';
 import {applicationRequest,canonicalRedirect,protectResponse} from './edge-policy';
 import {bundledAssets} from './static-assets';
 import {mediaArchiveRunnerRequest} from '../src/lib/media-archive-auth';
+import {notifySale} from './sale-sync';
+import {pullSaleContext} from '../src/lib/sale-context';
+import {handleSaleContextSync,SALE_CONTEXT_SYNC_PATH} from './sale-context-sync';
+import {withDatabase,type D1Binding} from '../src/lib/db';
+import type {PrivateBucket} from '../src/lib/files';
+import {observeAutomation} from '../src/lib/automation-health';
+type Context={waitUntil(task:Promise<unknown>):void};
+type ServiceBinding={fetch(request:Request):Promise<Response>};
+/** Same-account Workers cannot fetch each other on one zone; SALE_SERVICE is the binding for that case. */
+function saleFetcher(env:Record<string,unknown>):typeof fetch{
+  const binding=env.SALE_SERVICE as ServiceBinding|undefined;
+  return (binding&&typeof binding.fetch==='function'?((input:RequestInfo|URL,init?:RequestInit)=>binding.fetch(new Request(input,init))):fetch) as typeof fetch;
+}
 export default {
-  async scheduled(_event:unknown,env:Record<string,unknown>,ctx:{waitUntil(task:Promise<unknown>):void}) {
+  async scheduled(_event:unknown,env:Record<string,unknown>,ctx:Context) {
+    // Sale reconciliation is independent of the archive runner and never blocks it.
+    const sale:{status:string;httpStatus?:number}=await observeAutomation(env,'sale-push',()=>notifySale(env,'reconcile',saleFetcher(env))).catch((error:unknown)=>({status:'error:'+(error instanceof Error?error.name:'unknown')}));
+    // Status codes only; never request bodies, URLs with secrets or credentials.
+    if(sale.status!=='disabled'&&sale.status!=='sent')console.warn('Sale reconcile '+sale.status+(sale.httpStatus?' '+sale.httpStatus:''));
+    // Sale-owned deal context for agents; independent of the archive runner below.
+    if(env.DB){const context=await observeAutomation(env,'sale-context',()=>pullSaleContext(env.DB as D1Binding,env,saleFetcher(env))).catch(()=>({status:'error'}));if(context.status==='error')console.warn('Sale context pull failed');}
+    // Flow Builder runner (default off). Runs alongside, never blocks or fails, the archive runner below.
+    if(env.FLOWS_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'flows',()=>import('../src/lib/flows').then(flows=>flows.runFlows(env.DB as D1Binding,env))).then(result=>{if(result.status==='error')console.warn('Flow runner partially failed');},()=>console.warn('Flow runner failed')));
+    if(env.BROADCAST_ENABLED==='true'&&env.BROADCAST_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'broadcast',()=>import('../src/lib/broadcast').then(broadcast=>broadcast.runBroadcasts(env.DB as D1Binding,env as Record<string,string|undefined>))).then(()=>undefined,()=>console.warn('Broadcast runner failed')));
+    if(env.CRM_PUBLIC_WEBHOOKS_ENABLED==='true'&&env.CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'webhooks',()=>import('../src/lib/public-integrations').then(integrations=>integrations.runPublicWebhooks(env.DB as D1Binding,env))).then(()=>undefined,()=>console.warn('Public webhook runner failed')));
+    if(env.EXTERNAL_CONNECTORS_ENABLED==='true'&&env.EXTERNAL_CONNECTOR_RUNNER_ENABLED==='true'&&env.DB)ctx.waitUntil(observeAutomation(env,'connectors',()=>import('../src/lib/external-sync').then(connectors=>connectors.runExternalConnectors(env.DB as D1Binding,env as Record<string,string|undefined>))).then(()=>undefined,()=>console.warn('External connector runner failed')));
+    if(env.WEB_CHAT_ATTACHMENTS_ENABLED==='true'&&env.DB&&env.BUCKET&&typeof env.CRM_BRIDGE_ORG_ID==='string')ctx.waitUntil(observeAutomation(env,'web-files',()=>withDatabase(env.DB as D1Binding,()=>import('../src/lib/web-chat-attachments').then(files=>files.maintainWebAttachments(env.CRM_BRIDGE_ORG_ID as string,env.BUCKET as PrivateBucket)))).catch(()=>console.warn('Web attachment cleanup deferred')));
     if(env.SOCIAL_MEDIA_ARCHIVE_ENABLED!=='true'||env.SOCIAL_CHANNELS_OWNER!=='crm'||env.SOCIAL_INBOUND_ENABLED!=='true')return;
     if(typeof env.APP_ORIGIN!=='string'||typeof env.SESSION_SECRET!=='string')throw new Error('Archive runner configuration unavailable');
     const response=await application.fetch(applicationRequest(mediaArchiveRunnerRequest(env.APP_ORIGIN,env.SESSION_SECRET)),{...env,ASSETS:env.ASSETS||bundledAssets},ctx);
     await response.body?.cancel();if(!response.ok)throw new Error('Archive runner failed');
   },
-  async fetch(request:Request,env:Record<string,unknown>,ctx:unknown):Promise<Response> {
+  async fetch(request:Request,env:Record<string,unknown>,ctx:Context):Promise<Response> {
     const redirect=canonicalRedirect(request);if(redirect)return redirect;
     if(!env.DB||!env.BUCKET||env.DEMO_MODE!=='false'||env.RRS_WORKERS!=='true'||typeof env.SESSION_SECRET!=='string'||env.SESSION_SECRET.length<32) {
       return protectResponse(request,new Response('Service configuration is incomplete',{status:503}));
     }
     const trustedRequest=applicationRequest(request);
+    // This signed read-side wake must bypass the application mutation notifier.
+    if(new URL(request.url).pathname===SALE_CONTEXT_SYNC_PATH)return protectResponse(request,await handleSaleContextSync(trustedRequest,env,saleFetcher(env)));
     const staticResponse=await bundledAssets.fetch(trustedRequest);
     if(staticResponse.status===200)return protectResponse(request,staticResponse);
-    return protectResponse(request,await application.fetch(trustedRequest,{...env,ASSETS:env.ASSETS||bundledAssets},ctx));
+    const response=await application.fetch(trustedRequest,{...env,ASSETS:env.ASSETS||bundledAssets},ctx);
+    // Any committed mutation may have appended bridge events; wake Sale after the response.
+    if(!['GET','HEAD','OPTIONS'].includes(request.method)&&response.status<500)ctx.waitUntil(notifySale(env,'wake',saleFetcher(env)).catch(()=>undefined));
+    return protectResponse(request,response);
   },
 };

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
 import {test} from 'node:test';
 const base=process.env.BASE_URL||'http://localhost:3000';
 const request=(path:string,init:RequestInit={})=>fetch(base+path,init);
@@ -18,4 +19,32 @@ test('private file upload and download work through authenticated HTTP on D1/R2'
   assert.equal((await request(`/api/admin/files/${id}`)).status,401);
   assert.equal((await request(`/api/admin/files/${id}`,{headers:{Cookie:outsider}})).status,404);
   const download=await request(`/api/admin/files/${id}`,{headers:{Cookie:admin}});assert.equal(download.status,200);assert.equal(download.headers.get('cache-control'),'private, no-store');assert.match(download.headers.get('content-disposition')!,/^attachment;/);assert.equal(await download.text(),bytes);
+});
+
+test('web chat files round-trip through compiled private routes with session isolation and replay protection',async()=>{
+  assert.ok(['localhost','127.0.0.1'].includes(new URL(base).hostname),'Synthetic fixture tests only');
+  const bootstrap=await (await request('/api/bootstrap')).json();assert.equal(bootstrap.provider,'demo');
+  const headers={'Origin':base,'Content-Type':'application/json'};
+  const createVisitor=async()=>{const r=await request('/api/chat/session',{method:'POST',headers,body:'{}'});assert.equal(r.status,201);return {cookie:r.headers.get('set-cookie')!.split(';')[0],data:await r.json()};};
+  const visitor=await createVisitor(),other=await createVisitor(),id=visitor.data.conversation.id;
+  const login=await request('/api/auth/login',{method:'POST',headers,body:JSON.stringify({email:'admin@rrs.demo',password:'Demo-only-2026!'})});assert.equal(login.status,200);
+  const admin=login.headers.get('set-cookie')!.split(';')[0];
+  const capabilities=await request('/api/chat/attachments',{headers:{Cookie:visitor.cookie}});assert.equal(capabilities.status,200);assert.equal((await capabilities.json()).enabled,true);
+  const bytes='%PDF-1.7\nSynthetic private chat file\n%%EOF',clientId=randomUUID();
+  const upload={method:'POST',headers:{Origin:base,Cookie:visitor.cookie,'Content-Type':'application/pdf','X-File-Name':encodeURIComponent('แชททดสอบ.pdf'),'X-Client-Id':clientId},body:bytes};
+  assert.equal((await request('/api/chat/attachments',{...upload,headers:{...upload.headers,Cookie:''}})).status,401);
+  assert.equal((await request('/api/chat/attachments',{...upload,headers:{...upload.headers,Origin:'https://other.invalid'}})).status,403);
+  const saved=await request('/api/chat/attachments',upload);assert.equal(saved.status,201,await saved.clone().text());const first=await saved.json();
+  const retry=await request('/api/chat/attachments',upload);assert.equal(retry.status,201);const duplicate=await retry.json();assert.equal(duplicate.file.id,first.file.id);assert.equal(duplicate.duplicate,true);
+  assert.equal((await request('/api/chat/attachments',{...upload,body:bytes+'changed'})).status,409);
+  const filePath='/api/chat/attachments/'+first.file.id;
+  assert.equal((await request(filePath,{headers:{Cookie:other.cookie}})).status,404);
+  const download=await request(filePath,{headers:{Cookie:visitor.cookie}});assert.equal(download.status,200);assert.equal(download.headers.get('cache-control'),'private, no-store');assert.match(download.headers.get('content-disposition')!,/^attachment;/);assert.equal(await download.text(),bytes);
+  const claimed=await request(`/api/admin/conversations/${id}/claim`,{method:'POST',headers:{...headers,Cookie:admin},body:'{}'});assert.equal(claimed.status,200,await claimed.clone().text());const claim=await claimed.json();
+  const staffPath=`/api/admin/conversations/${id}/web-attachments`,staffBytes=bytes+'\nStaff reply';
+  const staffSaved=await request(staffPath,{method:'POST',headers:{...upload.headers,Cookie:admin,'X-Client-Id':randomUUID(),'X-Conversation-Version':String(claim.conversation.version)},body:staffBytes});assert.equal(staffSaved.status,201,await staffSaved.clone().text());const reply=await staffSaved.json();
+  const staffDownload=await request('/api/chat/attachments/'+reply.file.id,{headers:{Cookie:visitor.cookie}});assert.equal(staffDownload.status,200);assert.equal(await staffDownload.text(),staffBytes);
+  const history=await (await request('/api/chat',{headers:{Cookie:visitor.cookie}})).json();assert.equal(history.messages.filter((m:any)=>m.id===first.file.messageId).length,1);assert.equal(history.messages.filter((m:any)=>m.id===reply.file.messageId).length,1);
+  await request('/api/auth/logout',{method:'POST',headers:{...headers,Cookie:admin},body:'{}'});
+  assert.equal((await request(staffPath+'/'+first.file.id,{headers:{Cookie:admin}})).status,401);
 });

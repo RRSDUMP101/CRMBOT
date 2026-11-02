@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
+import { database, transaction, camel, demoMode, getDatabase, type Executor, type Row } from './db';
+import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
 import { messageOrder } from './message-order';
+import type { WebFlowInboundSignal } from './flows';
+import { routeWaitingConversation, validateRequiredFields } from './operators';
+import { aiRuntimeContext } from './ai-lifecycle';
 
 const settingsDefaults = {botName:'RRS ผู้ช่วย AI',personality:'สุภาพ กระชับ ถามครั้งละหนึ่งเรื่อง',businessHours:'ทีมงานจะยืนยันเวลาติดต่อกลับ',handoffRule:'ราคา สต็อก ส่วนลด และนัดหมายให้ทีมงานยืนยัน',aiEnabled:true};
 const rows = (items: Row[]) => items.map(camel);
@@ -49,19 +53,22 @@ export async function createVisitor(context:'web'|'widget'='web'): Promise<{toke
 export async function conversationDetail(orgId:string,id:string,internal=false,admin=false) {
   const conversation=await scopedConversation(database,orgId,id);
   const lead=await scopedLead(database,orgId,conversation.lead_id);
-  const messages=await database.query(`SELECT m.*,p.provider,p.delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
+  // Staff only: Sale-owned deal context. Visitor responses never include it.
+  let saleContext=null;if(internal){const binding=await getDatabase();await refreshSaleContextIfStale(binding,process.env).catch(()=>undefined);saleContext=await saleContextForLead(binding,orgId,lead.id).catch(()=>null);}
+  const messages=await database.query(`SELECT m.*,COALESCE(p.provider,(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=m.org_id AND et.conversation_id=m.conversation_id)) AS provider,COALESCE(p.delivery_status,(SELECT status FROM external_send_commands WHERE org_id=m.org_id AND message_id=m.id)) AS delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
-  return {conversation:conversationView(conversation),lead:leadView(lead),messages:messages.rows.map(m=>({...messageView(m),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
+  const webFiles=await (await import('./web-chat-attachments')).webAttachmentMetadata(orgId,id);
+  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),webAttachments:webFiles.filter(f=>f.messageId===m.id).map(({messageId,...f})=>({...f,...(internal?{downloadUrl:'/api/admin/conversations/'+id+'/web-attachments/'+f.id}:{})})),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
 export async function visitorDetail(visitor: Visitor) {
   const detail=await conversationDetail(visitor.orgId,visitor.conversationId);
   const lead=detail.lead;
   // CRM notes, tags, staff summary and pipeline state are never part of a visitor response.
-  const publicLead={id:lead.id,name:lead.name,phone:lead.phone,email:lead.email,market:lead.market,facts:lead.facts,createdAt:lead.createdAt,updatedAt:lead.updatedAt};
+  const publicLead={id:lead.id,name:lead.name,phone:lead.phone,email:lead.email,market:lead.market,facts:lead.facts,consentRecorded:!!lead.contactConsentAt,createdAt:lead.createdAt,updatedAt:lead.updatedAt};
   const conversation=detail.conversation;
   const publicConversation={id:conversation.id,leadId:conversation.leadId,status:conversation.status,version:conversation.version,createdAt:conversation.createdAt,updatedAt:conversation.updatedAt};
   const settings=await orgSettings(visitor.orgId);
-  return {...detail,conversation:publicConversation,lead:publicLead,demo:demoMode(),provider:providerName(),settings:{botName:settings.botName,businessHours:settings.businessHours,aiEnabled:settings.aiEnabled}};
+  return {...detail,conversation:publicConversation,lead:publicLead,demo:demoMode(),provider:providerName(),settings:{botName:settings.botName,businessHours:settings.businessHours,aiEnabled:settings.aiEnabled,attachmentsEnabled:process.env.WEB_CHAT_ATTACHMENTS_ENABLED==='true'}};
 }
 
 export async function handoff(visitor:Visitor) {
@@ -71,6 +78,7 @@ export async function handoff(visitor:Visitor) {
     await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,visitor.conversationId]);
     await audit(connection,visitor.orgId,'visitor','conversation.handoff',visitor.conversationId);
   });
+  await routeWaitingConversation(visitor.orgId,visitor.conversationId);
 }
 
 export async function saveContact(visitor:Visitor,body:Record<string,unknown>) {
@@ -132,13 +140,17 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
       await connection.query("UPDATE leads SET assignee_id=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,conversation.lead_id,staff.id]);
     } else if(action==='release'||action==='resolve') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id&&staff.role!=='Admin')throw new ApiError(403,'เฉพาะผู้รับผิดชอบหรือผู้ดูแลระบบที่เปลี่ยนสถานะได้');
+      if(action==='resolve')await validateRequiredFields(connection,staff.orgId,id);
       await connection.query("UPDATE conversations SET status=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,action==='release'?'bot_active':'resolved']);
     } else if(action==='reply'||action==='note') {
       const text=str(body.text,action==='note'?'บันทึก':'ข้อความ',6000,true);
       if(action==='reply'&&(conversation.status!=='human_active'||conversation.assignee_id!==staff.id))throw new ApiError(409,'กรุณารับช่วงบทสนทนาก่อนตอบลูกค้า');
       const messageId=randomUUID();
-      await connection.query('INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,$4,$5)',[messageId,staff.orgId,id,action==='reply'?'agent':'note',text]);
-      if(action==='reply')outboundCommand=(await enqueueSocialReply(connection,staff.orgId,id,messageId,text)).commandId;
+      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,author_member_id,author_type) VALUES($1,$2,$3,$4,$5,$6,'human')",[messageId,staff.orgId,id,action==='reply'?'agent':'note',text,staff.id]);
+      if(action==='reply'){
+        const email=await (await import('./external-mail')).enqueueEmailReply(connection,staff,id,messageId,text);
+        outboundCommand=email?'email:'+email:(await enqueueSocialReply(connection,staff.orgId,id,messageId,text)).commandId;
+      }
       await connection.query(`UPDATE conversations SET updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')${action==='reply'?",first_agent_at=COALESCE(first_agent_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))":''} WHERE org_id=$1 AND id=$2`,[staff.orgId,id]);
     } else if(action==='summarize') {
       const lead=await scopedLead(connection,staff.orgId,conversation.lead_id);
@@ -148,7 +160,7 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
     if(bridgeCommand)await connection.query('INSERT INTO crm_bridge_commands(org_id,command_id,payload_hash,actor_id,conversation_id,result_json) VALUES($1,$2,$3,$4,$5,$6)',[staff.orgId,bridgeCommand.id,bridgeCommand.hash,staff.id,id,JSON.stringify({ok:true,action})]);
     return outboundCommand;
   }, staff);
-  if(queuedCommand)await dispatchSocialReply(staff.orgId,queuedCommand).catch(()=>{console.error('[rrs] social_dispatch_deferred');});
+  if(queuedCommand)await (queuedCommand.startsWith('email:')?(await import('./external-mail')).dispatchEmail(staff.orgId,queuedCommand.slice(6)):dispatchSocialReply(staff.orgId,queuedCommand)).catch(()=>{console.error('[rrs] dispatch_deferred');});
   return conversationDetail(staff.orgId,id,true,staff.role==='Admin');
 }
 
@@ -173,6 +185,7 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       if(next.phone&&!/^\+?[0-9 ()-]{7,32}$/.test(next.phone))throw new ApiError(400,'เบอร์โทรไม่ถูกต้อง');
       if(next.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
       await connection.query("UPDATE leads SET name=$3,phone=$4,email=$5,tags=$6,interests=$7,market=$8,stage=$9,assignee_id=$10,source=$11,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,old.id,next.name,next.phone,next.email,JSON.stringify(next.tags),next.interests,next.market,next.stage,next.assignee_id,next.source]);
+      if(process.env.FLOWS_ENABLED==='true')await (await import('./flows')).recordLeadChange(connection,staff.orgId,old.id,{tags:old.tags,stage:old.stage},{tags:next.tags,stage:next.stage});
     } else if(action==='createTask') {
       fields(values,['leadId','title','dueAt','kind','assigneeId','notes']);
       const lead=await scopedLead(connection,staff.orgId,uuid(values.leadId));
@@ -277,13 +290,13 @@ export async function snapshot(staff:Staff,url:URL) {
   const count=results[6].rows[0];const usage=results[9].rows[0];const stages:Record<string,number>={New:0,Qualified:0,'Follow-up':0,Won:0,Lost:0};
   for(const row of results[7].rows)stages[row.stage]=row.total;
   const nullable=(value:unknown)=>value===null||value===undefined?null:Number(value);
-  const visibleAudit=results[5].rows.filter(row=>staff.role==='Admin'||!/^whatsapp_consent\.|^social_channel\./.test(String(row.action)));
+  const visibleAudit=results[5].rows.filter(row=>staff.role==='Admin'||!/^whatsapp_consent\.|^social_channel\.|^social_account\.|^broadcast\./.test(String(row.action)));
   return {user:publicMember(staff),conversations:results[0].rows.map(conversationView),leads:results[1].rows.map(leadView),tasks:rows(results[2].rows),knowledge:rows(results[3].rows),members:rows(results[4].rows),settings:await orgSettings(staff.orgId),audit:rows(visibleAudit),integrations:{sheets:'not_connected',drive:'not_connected',channels:'see_channel_settings'},
     metrics:{conversations:count.total,newLeads:Object.values(stages).reduce((a,b)=>a+b,0),stages,dueTasks:results[8].rows[0].total,handoffRate:count.total?count.handed_off/count.total:0,aiFirstResponseMs:nullable(count.ai_ms),humanFirstResponseMs:nullable(count.human_ms),inputTokens:nullable(usage.input_tokens),outputTokens:nullable(usage.output_tokens),estimatedCostUsd:nullable(usage.cost),timezone:'Asia/Bangkok'},range:{from:range.from,to:range.to},
     metricDefinitions:{cohort:'บทสนทนาและลีดที่สร้างในช่วงวันที่กรุงเทพฯ; Pipeline แสดงสถานะปัจจุบันของกลุ่มนี้',handoff:'บทสนทนาในช่วงวันที่ที่เคยส่งต่ออย่างน้อยหนึ่งครั้ง / บทสนทนาทั้งหมดในช่วงวันที่',aiFirstResponse:'เวลาจากข้อความลูกค้าแรกถึงส่วนข้อความ AI แรกที่ส่งได้',humanFirstResponse:'เวลาจากส่งต่อครั้งแรกถึงคำตอบสาธารณะแรกของพนักงาน; ไม่รวมบันทึกภายใน',dueTasks:'งานที่ยังเปิด รอยืนยัน หรือยืนยันแล้ว และถึงกำหนด ณ เวลาปัจจุบัน ทุกช่วงวันที่',usage:'ผลรวม usage ที่ผู้ให้บริการรายงานสำหรับข้อความในช่วงวันที่; null หมายถึงไม่มีข้อมูล'}};
 }
 
-type Prepared = {conversationId:string;orgId:string;clientId:string;version:number;input:BotInput;sources:Row[];skip?:boolean};
+type Prepared = {conversationId:string;orgId:string;clientId:string;version:number;input:BotInput;sources:Row[];skip?:boolean;inbound?:WebFlowInboundSignal};
 async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promise<Prepared> {
   fields(body,['text','clientId','retry']);const text=str(body.text,'ข้อความ',4000,true);const clientId=str(body.clientId,'รหัสข้อความ',100,true);
   if(!/^[a-zA-Z0-9_-]{8,100}$/.test(clientId))throw new ApiError(400,'รหัสข้อความไม่ถูกต้อง');
@@ -291,8 +304,17 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
   await rateLimit(`chat:${visitor.orgId}:${visitor.conversationId}`,30,60);
   return transaction(visitor.orgId, async connection=>{
     const c=await scopedConversation(connection,visitor.orgId,visitor.conversationId,true);
+    let inbound:WebFlowInboundSignal|undefined;
     const lead=await scopedLead(connection,visitor.orgId,c.lead_id);const settings=await orgSettings(visitor.orgId,connection);
+    if(!lead.contact_consent_at&&(await connection.query("SELECT 1 FROM visitors WHERE org_id=$1 AND conversation_id=$2 AND context='widget' LIMIT 1",[visitor.orgId,c.id])).rows.length){
+      const config=await (await import('./helpdesk')).widgetForOrg(visitor.orgId,connection);
+      if(config.prechatRequired)throw new ApiError(422,'กรุณาฝากข้อมูลติดต่อและยินยอมก่อนเริ่มแชต');
+    }
     const existing=(await connection.query("SELECT * FROM messages WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND role='user'",[visitor.orgId,c.id,clientId])).rows[0];
+    if(existing&&process.env.FLOWS_ENABLED==='true'){
+      const receipt=(await connection.query("SELECT signal FROM flow_ingress WHERE org_id=$1 AND event_id=$2 AND status!='processed'",[visitor.orgId,'web:'+existing.id])).rows[0];
+      if(receipt)inbound=JSON.parse(String(receipt.signal)) as WebFlowInboundSignal;
+    }
     if(existing&&existing.content!==text)throw new ApiError(409,'รหัสข้อความนี้ใช้กับข้อความอื่นแล้ว');
     const recent=c.generation_started_at&&new Date(c.generation_started_at).getTime()>Date.now()-120000;
     if(c.generating_client_id&&recent) {
@@ -312,7 +334,12 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       }
       const seq=Number(c.customer_message_seq)+1;
       await connection.query('UPDATE conversations SET customer_message_seq=$3 WHERE org_id=$1 AND id=$2',[visitor.orgId,c.id,seq]);
-      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,client_id,status,customer_seq) VALUES($1,$2,$3,'user',$4,$5,'complete',$6)",[randomUUID(),visitor.orgId,c.id,text,clientId,seq]);
+      const messageId=randomUUID();
+      await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,client_id,status,customer_seq) VALUES($1,$2,$3,'user',$4,$5,'complete',$6)",[messageId,visitor.orgId,c.id,text,clientId,seq]);
+      // Only newly committed input triggers flows. A client retry must not cancel
+      // a wait started by this same message or execute another greeting/task.
+      inbound={orgId:visitor.orgId,provider:'web',accountId:'',eventId:'web:'+messageId,kind:'message',conversationId:c.id,leadId:lead.id,messageId,text,fresh:seq===1,optOut:false};
+      if(process.env.FLOWS_ENABLED==='true')await (await import('./flows')).enqueueFlowIngress(connection,inbound);
       const facts=extractFacts(text,lead.facts||{});
       // Contact fields are saved only through the explicit consent endpoint; fact extraction is requirement memory.
       for(const key of Object.keys(facts))if(/phone|email|name|โทร|อีเมล|ชื่อ/i.test(key))delete facts[key];
@@ -326,14 +353,21 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
       await audit(connection,visitor.orgId,'system','ai.disabled.handoff',c.id);
       c.status='waiting_human';c.version=Number(c.version)+1;
     }
-    if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
+    if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
+    const lifecycle=process.env.AI_LIFECYCLE_ENABLED==='true'?await aiRuntimeContext(visitor.orgId,'web',text,connection):null;
+    if(lifecycle?.handoff){
+      await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
+      await audit(connection,visitor.orgId,'system','ai.lifecycle.handoff',c.id,{reason:lifecycle.reason});
+      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
+    }
+    if(lifecycle)settings.personality=lifecycle.personality;
     const cap=Math.max(1,Math.min(10000,Number.parseInt(process.env.AI_DAILY_CALL_LIMIT||'500',10)||500));
     const day=new Date(Date.now()+7*3600000).toISOString().slice(0,10);
     const usage=(await connection.query('SELECT calls FROM ai_daily_usage WHERE org_id=$1 AND day=$2',[visitor.orgId,day])).rows[0];
     if(Number(usage?.calls||0)>=cap) {
       await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
       await audit(connection,visitor.orgId,'system','ai.daily_cap.handoff',c.id);
-      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true};
+      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
     }
     await connection.query('INSERT INTO ai_daily_usage(org_id,day,calls) VALUES($1,$2,1) ON CONFLICT(org_id,day) DO UPDATE SET calls=ai_daily_usage.calls+1',[visitor.orgId,day]);
     const version=c.version+1;
@@ -341,15 +375,39 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     await connection.query("UPDATE messages SET status='generating',generation_version=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3",[visitor.orgId,c.id,clientId,version]);
     const history=await connection.query(`SELECT role,content FROM messages WHERE org_id=$1 AND conversation_id=$2 AND role IN ('user','assistant','agent') AND (role='user' OR status='complete') ORDER BY ${messageOrder('',true)} LIMIT 30`,[visitor.orgId,c.id]);
     const knowledge=await connection.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND (expires_at IS NULL OR expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z'))",[visitor.orgId]);
-    const selected=selectKnowledge(text,rows(knowledge.rows) as BotInput['knowledge']);
+    const selected=selectKnowledge(text,lifecycle?.sources??rows(knowledge.rows) as BotInput['knowledge']);
     const messages=history.rows.reverse().map(row=>({role:row.role,content:row.content}));
     if(!existing)messages.push({role:'user',content:text});
-    return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:messages.slice(-30),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content}))};
+    return {conversationId:c.id,orgId:visitor.orgId,clientId,version,input:{history:messages.slice(-30),facts:lead.facts,knowledge:selected,settings},sources:selected.map(source=>({id:source.id,title:source.title,version:source.version,content:source.content})),inbound};
   });
 }
 
 export async function messageStream(visitor:Visitor,body:Record<string,unknown>,signal:AbortSignal):Promise<Response> {
   const prepared=await prepareMessage(visitor,body);const encoder=new TextEncoder();
+  if(prepared.inbound&&process.env.FLOWS_ENABLED==='true') {
+    // The ingress receipt was committed with the message. Cron resumes it if
+    // this immediate drain fails or the browser disconnects after commit.
+    let pending=true;
+    try {await (await import('./flows')).drainFlowIngress(visitor.orgId,{},prepared.inbound.eventId);pending=(await database.query("SELECT status FROM flow_ingress WHERE org_id=$1 AND event_id=$2",[visitor.orgId,prepared.inbound.eventId])).rows[0]?.status!=='processed';}
+    catch {console.error('[rrs] web_flow_inbound_deferred');}
+    if(pending&&!prepared.skip){
+      prepared.skip=true;
+      await transaction(prepared.orgId,async c=>{
+        await c.query("UPDATE messages SET status='interrupted' WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$4 AND status='generating'",[prepared.orgId,prepared.conversationId,prepared.clientId,prepared.version]);
+        await c.query('UPDATE conversations SET generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2 AND version=$3 AND generating_client_id=$4',[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId]);
+      });
+    }
+    if(!prepared.skip) {
+      // A flow can hand off/close/assign before generation. Do not invoke the AI
+      // provider using a generation lease that the flow has already invalidated.
+      const active=(await database.query("SELECT id FROM conversations WHERE org_id=$1 AND id=$2 AND status='bot_active' AND version=$3 AND generating_client_id=$4",[prepared.orgId,prepared.conversationId,prepared.version,prepared.clientId])).rows.length>0;
+      if(!active) {
+        prepared.skip=true;
+        await transaction(prepared.orgId,c=>c.query("UPDATE messages SET status='interrupted' WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$4 AND status='generating'",[prepared.orgId,prepared.conversationId,prepared.clientId,prepared.version]));
+      }
+    }
+  }
+  await routeWaitingConversation(visitor.orgId,visitor.conversationId);
   const stream=new ReadableStream({async start(controller) {
     let text='';let closed=false;let first=true;let usage:{inputTokens:number;outputTokens:number;estimatedCostUsd:number|null}|undefined;
     const abort=new AbortController();signal.addEventListener('abort',()=>abort.abort(),{once:true});

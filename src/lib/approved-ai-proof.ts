@@ -1,14 +1,14 @@
 import {randomUUID} from 'node:crypto';
 import {ApiError} from './auth';
 import {database,type Row} from './db';
-import {signBridgeRequest} from './bridge-protocol';
+import {signBridgeRequest,bridgeKeyConfig} from './bridge-protocol';
 
 export function approvedAiConfig(){
   if(process.env.CRM_APPROVED_AI_ENABLED!=='true'||process.env.CRM_BRIDGE_ENABLED!=='true')throw new ApiError(503,'Approved AI forwarding is disabled');
   const orgId=process.env.CRM_BRIDGE_ORG_ID||'',secret=process.env.CRM_BRIDGE_SECRET||'',origin=process.env.CRM_APPROVED_AI_SOURCE_ORIGIN||'';
   let url:URL;try{url=new URL(origin);}catch{throw new ApiError(503,'Approved AI source is not configured');}
   if(url.protocol!=='https:'||url.origin!==origin||url.username||url.password||!orgId||secret.length<32)throw new ApiError(503,'Approved AI source is not configured');
-  return {orgId,secret,origin};
+  return {orgId,secret,origin,...bridgeKeyConfig(process.env)};
 }
 export async function verifyApprovedAiSource(row:Row,transport:typeof fetch=fetch){
   const config=approvedAiConfig();if(config.orgId!==row.org_id)throw new ApiError(403,'Approved AI organization mismatch');
@@ -25,5 +25,6 @@ export async function verifyApprovedAiSource(row:Row,transport:typeof fetch=fetc
 /** Called outside the mutation planner on every attempt, including the generic recovery runner. */
 export async function validateApprovedAiDispatch(orgId:string,outboundCommandId:string,transport:typeof fetch=fetch){
   const row=(await database.query('SELECT * FROM crm_approved_ai_commands WHERE org_id=$1 AND outbound_command_id=$2',[orgId,outboundCommandId])).rows[0];
-  if(row)await verifyApprovedAiSource(row,transport);
+  if(row){await (await import('./ai-policy-bridge')).validateBridgeAiPolicyDispatch(row);await verifyApprovedAiSource(row,transport);}
 }
+

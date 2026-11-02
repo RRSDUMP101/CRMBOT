@@ -2,12 +2,14 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { database, transaction, type Executor, type Row } from './db';
 import { ApiError } from './errors';
 
-export type SocialProvider = 'whatsapp' | 'line' | 'facebook';
+export type SocialProvider = 'whatsapp' | 'line' | 'facebook' | 'instagram';
 export type SocialChannelConfig = {
   provider: SocialProvider; orgId: string; accountId: string; wabaId?: string;
   secret: string; verifyToken?: string; accessToken?: string; apiVersion?: string;
   appId?: string; webhookUrl?: string; testRecipient?: string;
   whatsappAccountMode?: string; expectedDisplayPhone?: string;
+  registryAccountId?: string;
+  linkedPageId?: string;
   owner: string; inboundEnabled: boolean; liveEnabled: boolean;
 };
 type Attachment = { type: string; ref: string; metadata: Record<string, unknown> };
@@ -22,7 +24,7 @@ const digest = (value: string|Uint8Array) => createHash('sha256').update(value).
 const utc = (milliseconds:number) => new Date(milliseconds).toISOString().replace(/(\.\d{3})Z$/, (_,fraction)=>fraction+'000Z');
 const now = () => utc(Date.now());
 const deliveryRank: Record<string, number> = {queued:0,sending:0,unknown:0,submitted:1,sent:2,failed:2,delivered:3,read:4};
-const providers = new Set(['whatsapp','line','facebook']);
+const providers = new Set(['whatsapp','line','facebook','instagram']);
 export function socialProvider(value: string): SocialProvider {
   if (!providers.has(value)) throw new ApiError(404, 'Unknown channel');
   return value as SocialProvider;
@@ -36,18 +38,26 @@ export function readSocialConfig(provider: SocialProvider, env: Record<string,st
     liveEnabled:env.SOCIAL_LIVE_ENABLED === 'true' && env[provider === 'whatsapp' ? 'WHATSAPP_LIVE_ENABLED' : provider === 'line' ? 'LINE_LIVE_ENABLED' : 'DOMESTIC_LIVE_ENABLED'] === 'true' && (provider !== 'line' || env.DOMESTIC_LIVE_ENABLED === 'true')};
   if (provider === 'whatsapp') return {...common,accountId:env.WHATSAPP_PHONE_NUMBER_ID || '',wabaId:env.WHATSAPP_WABA_ID || '',appId:env.WHATSAPP_APP_ID||'',secret:env.WHATSAPP_APP_SECRET || '',verifyToken:env.WHATSAPP_VERIFY_TOKEN,accessToken:env.WHATSAPP_ACCESS_TOKEN,apiVersion:env.WHATSAPP_API_VERSION,whatsappAccountMode:env.WHATSAPP_ACCOUNT_MODE||'business',expectedDisplayPhone:env.WHATSAPP_EXPECTED_DISPLAY_PHONE};
   if (provider === 'line') return {...common,accountId:env.LINE_BOT_USER_ID || '',secret:env.LINE_CHANNEL_SECRET || '',accessToken:env.LINE_CHANNEL_ACCESS_TOKEN};
+  if (provider === 'instagram') return {...common,accountId:env.INSTAGRAM_ACCOUNT_ID||'',linkedPageId:env.INSTAGRAM_PAGE_ID||'',secret:env.META_APP_SECRET||'',verifyToken:env.INSTAGRAM_VERIFY_TOKEN||env.META_VERIFY_TOKEN,accessToken:env.INSTAGRAM_PAGE_ACCESS_TOKEN,apiVersion:env.META_GRAPH_VERSION,appId:env.META_APP_ID,inboundEnabled:common.inboundEnabled&&env.INSTAGRAM_INBOUND_ENABLED==='true',liveEnabled:env.SOCIAL_LIVE_ENABLED==='true'&&env.INSTAGRAM_LIVE_ENABLED==='true',testRecipient:env.INSTAGRAM_TEST_RECIPIENT||''};
   return {...common,accountId:env.META_PAGE_ID || '',secret:env.META_APP_SECRET || '',verifyToken:env.META_VERIFY_TOKEN,accessToken:env.META_PAGE_ACCESS_TOKEN,apiVersion:env.META_API_VERSION};
 }
 /** A one-way server-only fingerprint binds evidence to the exact current account and credentials. */
 export function socialConfigFingerprint(config:SocialChannelConfig){
-  return digest(JSON.stringify([config.provider,config.orgId,config.accountId,config.wabaId||'',config.appId||'',config.secret,config.accessToken||'',config.verifyToken||'',config.apiVersion||'',config.webhookUrl||'',config.testRecipient||'',config.whatsappAccountMode||'business',config.expectedDisplayPhone||'']));
+  const values=[config.provider,config.orgId,config.accountId,config.wabaId||'',config.appId||'',config.secret,config.accessToken||'',config.verifyToken||'',config.apiVersion||'',config.webhookUrl||'',config.testRecipient||'',config.whatsappAccountMode||'business',config.expectedDisplayPhone||''];
+  if(config.provider==='instagram')values.push(config.linkedPageId||'');
+  return digest(JSON.stringify(values));
 }
 export function socialVerificationReady(control:Row|undefined,config:SocialChannelConfig){
   const fp=socialConfigFingerprint(config);
   return !!control?.verified_at&&control.verification_fingerprint===fp&&Date.parse(control.verification_expires_at)>Date.now();
 }
+/** The Instagram adapter accepts exact messaging_seen/read.mid evidence;
+ * Messenger delivery/watermark shapes and submission/echo never prove seen. */
+export function controlledTestStatusPassed(provider:SocialProvider,status:string){
+  return (provider==='line'?['submitted','sent','delivered','read']:provider==='instagram'?['read']:['delivered','read']).includes(status);
+}
 async function markTestPassed(c:Executor,config:SocialChannelConfig,messageId:string,status:string){
-  if(!(config.provider==='line'?['submitted','sent','delivered','read']:['delivered','read']).includes(status))return;
+  if(!controlledTestStatusPassed(config.provider,status))return;
   const control=(await c.query('SELECT * FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3',[config.orgId,config.provider,config.accountId])).rows[0];
   const command=(await c.query('SELECT remote_id,control_epoch,attempt_id FROM social_outbound_commands WHERE org_id=$1 AND message_id=$2',[config.orgId,messageId])).rows[0];
   if(control?.send_mode!=='test'||control.emergency_stop||!control.send_enabled||!command?.attempt_id||command.control_epoch!==control.epoch||command.remote_id!==control.test_recipient||!socialVerificationReady(control,config))return;
@@ -158,15 +168,22 @@ function normalize(payload: Record<string,any>, config: SocialChannelConfig): Ev
       } else result.push({id,kind:'ignored',remote,at});
     }
   } else {
-    if(payload.object !== 'page') throw new ApiError(400,'Expected Page webhook');
+    if(payload.object !== (config.provider==='instagram'?'instagram':'page')) throw new ApiError(400,'Expected channel webhook');
     for(const entry of array(payload.entry)) {
-      if(String(entry?.id) !== config.accountId) throw new ApiError(403,'Facebook page mismatch');
+      if(String(entry?.id) !== config.accountId) throw new ApiError(403,'Channel account mismatch');
       for(const input of array(entry.messaging || [])) {
         const e=object(input),echo=e.message?.is_echo === true,remote=identifier(echo?e.recipient?.id:e.sender?.id,200),at=timestamp(e.timestamp);
-        if((echo ? e.sender?.id : e.recipient?.id) !== config.accountId) throw new ApiError(403,'Facebook recipient mismatch');
+        if((echo ? e.sender?.id : e.recipient?.id) !== config.accountId) throw new ApiError(403,'Channel recipient mismatch');
         if(e.message) {
           const m=object(e.message),mid=identifier(m.mid);
-          result.push({id:'message:'+mid,kind:'message',remote,mid,at,echo,text:String(m.text || '[ไฟล์แนบ Facebook]').slice(0,15000),messageType:typeof m.text === 'string' ? 'text' : String(m.attachments?.[0]?.type || 'attachment').slice(0,80),metadata:messageMetadata(m),attachments:attachmentsFor('facebook',m,mid)});
+          if(config.provider==='instagram'&&m.is_deleted===true){result.push({id:'unsend:'+mid+':'+remote,kind:'unsend',remote,mid,at});continue;}
+          result.push({id:'message:'+mid,kind:'message',remote,mid,at,echo,text:String(m.text || (config.provider==='instagram'?'[ไฟล์แนบ Instagram]':'[ไฟล์แนบ Facebook]')).slice(0,15000),messageType:typeof m.text === 'string' ? 'text' : String(m.attachments?.[0]?.type || 'attachment').slice(0,80),metadata:messageMetadata(m),attachments:attachmentsFor(config.provider,m,mid)});
+        } else if(config.provider==='instagram') {
+          // Meta's Instagram webhook example maps messaging_seen to read.mid.
+          // Match only that exact message; never expand a Messenger watermark
+          // or synthesize delivery from an echo/HTTP response. See docs/instagram-receipts.md.
+          if(e.read?.mid!==undefined){const mid=identifier(e.read.mid);result.push({id:'seen:'+digest(JSON.stringify([remote,mid])),kind:'receipt',remote,mid,at,status:'read'});}
+          else result.push({id:digest(JSON.stringify(e)),kind:'ignored',remote,at,metadata:{receiptUnsupported:!!(e.read||e.delivery)}});
         } else if(e.delivery?.mids) {
           for(const value of array(e.delivery.mids)) {const mid=identifier(value);result.push({id:`receipt:${mid}:delivered:${e.delivery.watermark || e.timestamp}`,kind:'receipt',remote,mid,at,status:'delivered'});}
         } else if(e.read?.watermark) {
@@ -192,17 +209,27 @@ async function createIdentity(c: Executor, config: SocialChannelConfig, event: E
 }
 async function updateReceipt(c: Executor, config: SocialChannelConfig, event: Event) {
   const args=[config.orgId,config.provider,config.accountId,event.mid!,event.remote,event.status!,deliveryRank[event.status!],event.at,now()];
+  const matched=(await c.query('SELECT * FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[...args.slice(0,4)])).rows[0];
+  if(config.provider==='instagram'&&matched){
+    // A read of inbound content or a different peer is not proof for this reply.
+    if(matched.direction!=='out'||matched.remote_id!==event.remote)return;
+    // An unmatched early receipt may have arrived for another peer. Once the
+    // canonical outbound MID is known, only its exact peer can repair that row.
+    await c.query('DELETE FROM social_delivery_receipts WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4 AND remote_id<>$5',args.slice(0,5));
+  }
   await c.query(`INSERT INTO social_delivery_receipts(org_id,provider,account_id,provider_message_id,remote_id,status,rank,provider_timestamp,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
     ON CONFLICT(org_id,provider,account_id,provider_message_id) DO UPDATE SET status=excluded.status,rank=excluded.rank,updated_at=excluded.updated_at WHERE excluded.rank>=social_delivery_receipts.rank`,args);
   if(await (await import('./reviewed-sale-media')).applyReviewedSaleReceipt(c,config,event))return;
-  const matched=(await c.query('SELECT * FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[...args.slice(0,4)])).rows[0];
   if(matched && matched.direction === 'out' && (!event.remote || event.remote === matched.remote_id) && deliveryRank[matched.delivery_status] <= deliveryRank[event.status!]) {
     await c.query('UPDATE social_message_provenance SET delivery_status=$3 WHERE org_id=$1 AND message_id=$2',[config.orgId,matched.message_id,event.status!]);
     await c.query('UPDATE social_outbound_commands SET status=$3,updated_at=$4 WHERE org_id=$1 AND message_id=$2',[config.orgId,matched.message_id,event.status!,now()]);
     await markTestPassed(c,config,matched.message_id,event.status!);
   }
 }
-async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Event, payloadHash: string): Promise<boolean> {
+/** Committed customer activity handed to the Flow engine after the inbound transaction. */
+export type FlowInboundSignal = {orgId:string;provider:SocialProvider;accountId:string;eventId:string;kind:'message'|'follow'|'unfollow';conversationId:string;leadId:string;messageId?:string;text?:string;fresh:boolean;optOut:boolean};
+async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Event, payloadHash: string, sink?: {value?: FlowInboundSignal}): Promise<boolean> {
+  if(sink) sink.value=undefined;
   const keys=[config.orgId,config.provider,config.accountId,event.id];
   if((await c.query('SELECT 1 FROM social_events WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND event_id=$4',keys)).rows.length) return false;
   const time=now();
@@ -237,6 +264,7 @@ async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Even
   if(event.kind === 'follow' || event.kind === 'unfollow') {
     await c.query('UPDATE social_identities SET opt_out=$3,updated_at=$4 WHERE org_id=$1 AND id=$2',[config.orgId,identity.id,event.kind === 'unfollow' ? 1 : 0,time]);
     await cancelGeneration(c,config.orgId,identity.conversation_id,event.kind === 'unfollow' ? 'Customer opted out' : 'Customer followed; human review required',true);
+    if(sink) sink.value={orgId:config.orgId,provider:config.provider,accountId:config.accountId,eventId:event.id,kind:event.kind,conversationId:identity.conversation_id,leadId:identity.lead_id,fresh:!!identity.fresh,optOut:event.kind === 'unfollow'};
     return true;
   }
   if(event.kind === 'read') {
@@ -255,9 +283,14 @@ async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Even
     if(archive)await (await import('./media-archive-queue')).enqueueInboundMediaArchive(c,config,attachmentId);
   }
   const optOut=/^(stop|unsubscribe|หยุดติดต่อ|หยุด|ยกเลิกการติดต่อ)(?:$|\s|[.!])/i.test(event.text!.trim());
-  if(optOut) await c.query('UPDATE social_identities SET opt_out=1,updated_at=$3 WHERE org_id=$1 AND id=$2',[config.orgId,identity.id,time]);
+  if(optOut) {
+    await c.query('UPDATE social_identities SET opt_out=1,updated_at=$3 WHERE org_id=$1 AND id=$2',[config.orgId,identity.id,time]);
+    // A keyword opt-out durably suppresses broadcasts even if a later follow clears opt_out.
+    await c.query("INSERT OR IGNORE INTO broadcast_suppressions(org_id,provider,remote_id,reason,created_at) VALUES($1,$2,$3,'opt_out_keyword',$4)",[config.orgId,config.provider,event.remote,time]);
+  }
   await c.query(`UPDATE conversations SET customer_message_seq=customer_message_seq+$3,first_customer_at=CASE WHEN $3=1 THEN COALESCE(first_customer_at,$4) ELSE first_customer_at END,updated_at=$5 WHERE org_id=$1 AND id=$2`,[config.orgId,identity.conversation_id,event.echo ? 0 : 1,event.at,time]);
   await cancelGeneration(c,config.orgId,identity.conversation_id,event.echo ? 'External employee reply' : 'New customer message',false);
+  if(sink && !event.echo) sink.value={orgId:config.orgId,provider:config.provider,accountId:config.accountId,eventId:event.id,kind:'message',conversationId:identity.conversation_id,leadId:identity.lead_id,messageId,text:event.text!,fresh:!!identity.fresh,optOut};
   return true;
 }
 async function cancelGeneration(c: Executor,orgId: string,conversationId: string,reason: string,forceWaiting: boolean) {
@@ -268,52 +301,82 @@ async function cancelGeneration(c: Executor,orgId: string,conversationId: string
   if(forceWaiting) await c.query("UPDATE messages SET status='interrupted' WHERE org_id=$1 AND conversation_id=$2 AND status='generating'",[orgId,conversationId]);
 }
 
-export async function ingestSocialWebhook(provider: SocialProvider,raw: Uint8Array,headers: Headers,config: SocialChannelConfig): Promise<{accepted:number;duplicates:number}> {
+export function prepareSocialWebhook(provider: SocialProvider,raw: Uint8Array,headers: Headers,config: SocialChannelConfig,verifiedEnvelope?:Record<string,any>) {
   if(provider !== config.provider) throw new ApiError(403,'Provider mismatch');
   assertConfig(config);
   if(raw.byteLength > maxPayload) throw new ApiError(413,'Payload too large');
   if(!verifySocialSignature(raw,headers,config)) throw new ApiError(403,'Invalid webhook signature');
   let payload: Record<string,any>;
   try {payload=object(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)));} catch {throw new ApiError(400,'Invalid webhook JSON');}
-  const events=normalize(payload,config), hash=digest(raw); let accepted=0,duplicates=0;
+  const events=normalize(verifiedEnvelope||payload,config),hash=digest(raw);
+  return {config,events,hash};
+}
+export async function ingestSocialWebhook(provider: SocialProvider,raw: Uint8Array,headers: Headers,config: SocialChannelConfig,options: {defer?: (task: Promise<unknown>) => void} = {}): Promise<{accepted:number;duplicates:number}> {
+  return commitSocialWebhook(prepareSocialWebhook(provider,raw,headers,config),options);
+}
+export async function commitSocialWebhook(prepared:ReturnType<typeof prepareSocialWebhook>,options:{defer?:(task:Promise<unknown>)=>void;resolveCurrent?:(c:Executor)=>Promise<SocialChannelConfig>}={}) {
+  const {config,events,hash}=prepared;let accepted=0,duplicates=0;
+  const checkCurrent=async(c:Executor)=>{if(options.resolveCurrent){const current=await options.resolveCurrent(c);assertConfig(current);if(socialConfigFingerprint(current)!==socialConfigFingerprint(config))throw new ApiError(409,'Webhook account changed');}};
+  const signals: FlowInboundSignal[]=[];
   for(const event of events) {
-    const written=await transaction(config.orgId,c=>ingestEvent(c,config,event,hash));
+    const sink: {value?: FlowInboundSignal}={};
+    const written=await transaction(config.orgId,async c=>{
+      await checkCurrent(c);
+      const accepted=await ingestEvent(c,config,event,hash,sink);
+      if(accepted&&sink.value&&process.env.FLOWS_ENABLED==='true')await (await import('./flows')).enqueueFlowIngress(c,sink.value);
+      return accepted;
+    });
     if(written) accepted++;else duplicates++;
+    if(written && sink.value) signals.push(sink.value);
   }
   // Includes LINE's signed events:[] callback probe. Invalid signatures/accounts
   // never reach this evidence write; credential rotation invalidates old proof.
   await transaction(config.orgId,async c=>{
+    await checkCurrent(c);
     await c.query('INSERT INTO social_channel_controls(org_id,provider,account_id,updated_at,webhook_fingerprint,webhook_verified_at) VALUES($1,$2,$3,$4,$5,$4) ON CONFLICT(org_id,provider,account_id) DO UPDATE SET webhook_fingerprint=excluded.webhook_fingerprint,webhook_verified_at=excluded.webhook_verified_at',[config.orgId,config.provider,config.accountId,now(),socialConfigFingerprint(config)]);
   });
+  // Flow Builder hook (default off). Runs only after the inbound commit and never fails the webhook.
+  if(signals.length && process.env.FLOWS_ENABLED === 'true') {
+    const task=(async()=>{const flows=await import('./flows');for(const signal of signals) await flows.drainFlowIngress(config.orgId,{},signal.eventId).catch(()=>{console.error('[rrs] flow_inbound_deferred');});})();
+    if(options.defer) options.defer(task);else await task;
+  }
   return {accepted,duplicates};
 }
 
-/** Called inside the human reply transaction, immediately after staging the native message INSERT. */
-export async function enqueueSocialReply(c: Executor,orgId: string,conversationId: string,messageId: string,text: string): Promise<{commandId:string|null;status:string}> {
+/**
+ * Called inside the human reply transaction, immediately after staging the native message INSERT.
+ * `automation` is only for a published Flow version: its Admin publisher approved the exact text, and a human takeover blocks it.
+ */
+export async function enqueueSocialReply(c: Executor,orgId: string,conversationId: string,messageId: string,text: string,automation?: {approvedBy:string;metadata:Record<string,unknown>}): Promise<{commandId:string|null;status:string}> {
   const identity=(await c.query('SELECT * FROM social_identities WHERE org_id=$1 AND conversation_id=$2',[orgId,conversationId])).rows[0];
   if(!identity) return {commandId:null,status:'non_social'};
   const existing=(await c.query('SELECT id,status,body FROM social_outbound_commands WHERE org_id=$1 AND message_id=$2',[orgId,messageId])).rows[0];
   if(existing) {if(existing.body !== text) throw new ApiError(409,'Message idempotency conflict');return {commandId:existing.id,status:existing.status};}
   const conversation=(await c.query('SELECT status,version,assignee_id FROM conversations WHERE org_id=$1 AND id=$2',[orgId,conversationId])).rows[0];
-  if(!conversation || conversation.status !== 'human_active' || !conversation.assignee_id) throw new ApiError(409,'Claim this conversation before sending');
+  if(automation) {if(!conversation || !['bot_active','waiting_human'].includes(conversation.status) || !automation.approvedBy) throw new ApiError(409,'Automation cannot send after human takeover or closure');}
+  else if(!conversation || conversation.status !== 'human_active' || !conversation.assignee_id) throw new ApiError(409,'Claim this conversation before sending');
   if(identity.opt_out) throw new ApiError(409,'Customer has opted out');
   const maximum=identity.provider === 'whatsapp' ? 4096 : 2000;
   if(!text.trim() || text.length > maximum) throw new ApiError(400,`Channel replies require 1–${maximum} characters`);
-  const id=randomUUID(),time=now();
-  await c.query('INSERT INTO social_outbound_commands(id,org_id,identity_id,conversation_id,message_id,provider,account_id,remote_id,body,conversation_version,approved_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)',[id,orgId,identity.id,conversationId,messageId,identity.provider,identity.account_id,identity.remote_id,text,conversation.version,conversation.assignee_id,time]);
-  await c.query("INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_type,direction,delivery_status,provider_timestamp,metadata) VALUES($1,$2,$3,$4,$5,'text','out','queued',$6,$7)",[orgId,messageId,identity.provider,identity.account_id,identity.remote_id,time,JSON.stringify({approval:'human_reply',approvedBy:conversation.assignee_id,commandId:id})]);
+  if(identity.provider==='instagram'&&Buffer.byteLength(text,'utf8')>1000)throw new ApiError(400,'Instagram replies are limited to 1000 UTF-8 bytes');
+  const id=randomUUID(),time=now(),approvedBy=automation ? automation.approvedBy : conversation.assignee_id;
+  await c.query('INSERT INTO social_outbound_commands(id,org_id,identity_id,conversation_id,message_id,provider,account_id,remote_id,body,conversation_version,approved_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)',[id,orgId,identity.id,conversationId,messageId,identity.provider,identity.account_id,identity.remote_id,text,conversation.version,approvedBy,time]);
+  await c.query("INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_type,direction,delivery_status,provider_timestamp,metadata) VALUES($1,$2,$3,$4,$5,'text','out','queued',$6,$7)",[orgId,messageId,identity.provider,identity.account_id,identity.remote_id,time,JSON.stringify(automation ? {...automation.metadata,approval:'flow',approvedBy,commandId:id} : {approval:'human_reply',approvedBy,commandId:id})]);
   return {commandId:id,status:'queued'};
 }
 
-type DispatchOptions = {config?: SocialChannelConfig;fetch?: typeof fetch};
+export type DispatchOptions = {config?: SocialChannelConfig;fetch?: typeof fetch;readConfig?:(connection?:Executor)=>Promise<SocialChannelConfig>};
 function checkOutboundConfig(config: SocialChannelConfig,command: Row) {
   if(config.owner !== 'crm' || !config.inboundEnabled || !config.liveEnabled) throw new ApiError(503,'Live social sending is disabled');
   if(config.orgId !== command.org_id || config.provider !== command.provider || config.accountId !== command.account_id) throw new ApiError(409,'Channel account changed');
   if(!config.accessToken || !config.secret || config.provider === 'whatsapp' && !config.wabaId) throw new ApiError(503,'Channel credentials are not configured');
   if(config.provider !== 'line' && !/^v\d+\.\d+$/.test(config.apiVersion || '')) throw new ApiError(503,'Graph API version is not configured');
   if(config.provider !== 'line' && !/^\d{5,40}$/.test(config.accountId)) throw new ApiError(503,'Invalid channel account');
+  if(config.provider==='instagram'&&!/^\d{5,40}$/.test(config.linkedPageId||''))throw new ApiError(503,'Instagram linked Page is not configured');
 }
-async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig,epoch?: number): Promise<Row> {
+export async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig,epoch?: number,options:{mediaFetch?:boolean}={}): Promise<Row> {
+  await (await import('./human-attachments')).guardHumanAttachment(c,command);
+  await (await import('./broadcast-media')).guardBroadcastAsset(c,command);
   const controls=(await c.query('SELECT * FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3',[command.org_id,command.provider,command.account_id])).rows[0];
   if(!controls || !controls.send_enabled || controls.emergency_stop || !socialVerificationReady(controls,config)||controls.webhook_fingerprint!==socialConfigFingerprint(config)) throw new ApiError(503,'Channel send control is disabled or unverified');
   if(controls.send_mode==='test'&&(!controls.test_recipient||controls.test_recipient!==command.remote_id))throw new ApiError(409,'Test mode allows only the configured test recipient');
@@ -326,10 +389,12 @@ async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig
   const elapsed=Date.now()-Date.parse(inbound || '');
   const reviewed=await (await import('./reviewed-sale-messages')).reviewedSalePayload(c,command.org_id,command.id);
   const domestic=await (await import('./reviewed-domestic-messages')).domesticPayload(c,command.org_id,command.id);
+  // Broadcast intents carry their own Admin approval instead of a human conversation claim.
+  const broadcast=await (await import('./broadcast')).broadcastCommandGuard(c,command,config,options);
   if(domestic&&(domestic.actorId!==command.approved_by||domestic.provider!==command.provider||domestic.accountId!==command.account_id||domestic.remoteId!==command.remote_id||domestic.text!==command.body))throw new ApiError(409,'Domestic reviewed command linkage changed');
   if(reviewed&&(reviewed.actorId!==command.approved_by||reviewed.accountId!==command.account_id||reviewed.remoteId!==command.remote_id||reviewed.text!==command.body))throw new ApiError(409,'Reviewed Sale command linkage changed');
-  if(command.provider === 'whatsapp' || command.provider === 'facebook') {
-    if(!(command.provider==='whatsapp'&&reviewed?.template)&&(!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 86_400_000)) throw new ApiError(409,'Verified inbound message required within the 24 hour reply window or an exact reviewed template');
+  if(command.provider === 'whatsapp' || command.provider === 'facebook' || command.provider === 'instagram') {
+    if(!(command.provider==='whatsapp'&&(reviewed?.template||broadcast?.template))&&(!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 86_400_000)) throw new ApiError(409,'Verified inbound message required within the 24 hour reply window or an exact reviewed template');
   } else {
     const friendship=(await c.query("SELECT event_kind FROM social_events WHERE org_id=$1 AND provider='line' AND account_id=$2 AND remote_id=$3 AND event_kind IN ('follow','unfollow') ORDER BY received_at DESC,event_id DESC LIMIT 1",[command.org_id,command.account_id,command.remote_id])).rows[0];
     if(friendship?.event_kind !== 'follow' && (!Number.isFinite(elapsed) || elapsed < -300_000 || elapsed >= 7*86_400_000)) throw new ApiError(409,'Verified LINE follow or inbound within seven days required');
@@ -339,7 +404,10 @@ async function outboundGuard(c: Executor,command: Row,config:SocialChannelConfig
     if(!lead?.contact_consent_at || !lead.contact_consent_version) throw new ApiError(409,'Recorded WhatsApp contact consent evidence required');
   }
   const conversation=(await c.query('SELECT * FROM conversations WHERE org_id=$1 AND id=$2',[command.org_id,command.conversation_id])).rows[0];
-  if(!conversation || conversation.version !== command.conversation_version || conversation.status !== 'human_active' || conversation.assignee_id !== command.approved_by) throw new ApiError(409,'Human approval is stale after takeover or new input');
+  // Broadcast intents carry their own Admin approval. A Flow intent is never sendable once a human has taken over, the conversation closed, or new input arrived.
+  if(!broadcast && await (await import('./flows')).flowOutboundGuard(c,command)) {
+    if(!conversation || conversation.version !== command.conversation_version || !['bot_active','waiting_human'].includes(conversation.status)) throw new ApiError(409,'Automation stopped after human takeover, closure or new input');
+  } else if(!conversation || conversation.version !== command.conversation_version || !broadcast && (conversation.status !== 'human_active' || conversation.assignee_id !== command.approved_by)) throw new ApiError(409,'Human approval is stale after takeover or new input');
   if(reviewed&&conversation.customer_message_seq!==reviewed.expectedCustomerSeq)throw new ApiError(409,'Reviewed Sale customer generation changed');
   if(domestic&&conversation.customer_message_seq!==domestic.expectedCustomerSeq)throw new ApiError(409,'Domestic customer generation changed');
   const member=(await c.query('SELECT active,role FROM members WHERE org_id=$1 AND id=$2',[command.org_id,command.approved_by])).rows[0];
@@ -361,8 +429,10 @@ function providerRequest(config: SocialChannelConfig,command: Row,signal: AbortS
     body={to:command.remote_id,messages:[{type:'text',text:command.body}]};
   } else {
     // Fixed provider host; untrusted message media URLs are never fetched by this module.
-    url=`https://graph.facebook.com/${config.apiVersion}/${encodeURIComponent(config.accountId)}/messages`;
-    body=config.provider === 'whatsapp' ? {messaging_product:'whatsapp',recipient_type:'individual',to:command.remote_id,...(command.reviewed_template?{type:'template',template:{name:command.reviewed_template.name,language:{code:command.reviewed_template.language}}}:{type:'text',text:{preview_url:false,body:command.body}}),biz_opaque_callback_data:command.attempt_id} : {recipient:{id:command.remote_id},messaging_type:'RESPONSE',message:{text:command.body}};
+    // Meta's Facebook Login IG sample uses /me/messages with the linked Page
+    // token. Account verification binds that Page to this exact IG identity.
+    url=`https://graph.facebook.com/${config.apiVersion}/${config.provider==='instagram'?'me':encodeURIComponent(config.accountId)}/messages`;
+    body=config.provider === 'whatsapp' ? {messaging_product:'whatsapp',recipient_type:'individual',to:command.remote_id,...(command.reviewed_template?{type:'template',template:{name:command.reviewed_template.name,language:{code:command.reviewed_template.language},...(command.reviewed_template.components?{components:command.reviewed_template.components}:{})}}:{type:'text',text:{preview_url:false,body:command.body}}),biz_opaque_callback_data:command.attempt_id} : config.provider==='instagram'?{recipient:{id:command.remote_id},message:{text:command.body}}:{recipient:{id:command.remote_id},messaging_type:'RESPONSE',message:{text:command.body}};
   }
   return {url,init:{method:'POST',headers,body:JSON.stringify(body),redirect:'manual',signal}};
 }
@@ -384,18 +454,20 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
       await setCommandStatus(c,command,'unknown','dispatch_lease_expired');return {...command,status:'unknown',claimed:false};
     }
     if(command.status !== 'queued') return {...command,claimed:false};
-    const config=options.config || readSocialConfig(command.provider);
+    const config=options.readConfig?await options.readConfig(c):options.config || await (await import('./social-account-runtime')).resolveSocialConfig(orgId,command.provider,command.account_id,{connection:c});
     checkOutboundConfig(config,command);
     const control=await outboundGuard(c,command,config),attempt=randomUUID(),expires=utc(Date.now()+60_000);
     await c.query("UPDATE social_outbound_commands SET status='sending',attempt_id=$3,control_epoch=$4,lease_expires_at=$5,updated_at=$6 WHERE org_id=$1 AND id=$2",[orgId,commandId,attempt,control.epoch,expires,now()]);
     // Messenger read watermarks compare against the send attempt, never an earlier queued draft time.
     await c.query("UPDATE social_message_provenance SET delivery_status='sending',provider_timestamp=$3 WHERE org_id=$1 AND message_id=$2",[orgId,command.message_id,now()]);
     const reviewed=await (await import('./reviewed-sale-messages')).reviewedSalePayload(c,orgId,commandId);
-    return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,reviewed_template:reviewed?.template,claimed:true};
+    const template=reviewed?.template||await (await import('./broadcast')).broadcastTemplate(c,orgId,commandId)||undefined;
+    return {...command,status:'sending',attempt_id:attempt,control_epoch:control.epoch,reviewed_template:template,claimed:true};
   });
   if(!claimed.claimed) return {commandId,status:claimed.status};
-  const config=options.config || readSocialConfig(claimed.provider);
+  let config:SocialChannelConfig;
   try {
+    config=options.readConfig?await options.readConfig():options.config || await (await import('./social-account-runtime')).resolveSocialConfig(orgId,claimed.provider,claimed.account_id);
     checkOutboundConfig(config,claimed);
     await (await import('./approved-ai-proof')).validateApprovedAiDispatch(orgId,commandId,options.fetch);
     await (await import('./reviewed-sale-messages')).validateReviewedSaleDispatch(orgId,commandId,options.fetch);
@@ -411,12 +483,13 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
   const deadline=setTimeout(()=>abort.abort(),20_000);
   const monitor=setInterval(async()=>{
     if(polling)return;polling=true;
-    try {const current=options.config || readSocialConfig(claimed.provider);checkOutboundConfig(current,claimed);await outboundGuard(database,claimed,current,claimed.control_epoch);await (await import('./approved-ai-proof')).validateApprovedAiDispatch(orgId,commandId,options.fetch);await (await import('./reviewed-sale-messages')).validateReviewedSaleDispatch(orgId,commandId,options.fetch);await (await import('./reviewed-domestic-messages')).validateDomesticDispatch(orgId,commandId,options.fetch);}
+    try {const current=options.readConfig?await options.readConfig():options.config || await (await import('./social-account-runtime')).resolveSocialConfig(orgId,claimed.provider,claimed.account_id);checkOutboundConfig(current,claimed);await outboundGuard(database,claimed,current,claimed.control_epoch);await (await import('./approved-ai-proof')).validateApprovedAiDispatch(orgId,commandId,options.fetch);await (await import('./reviewed-sale-messages')).validateReviewedSaleDispatch(orgId,commandId,options.fetch);await (await import('./reviewed-domestic-messages')).validateDomesticDispatch(orgId,commandId,options.fetch);}
     catch {abort.abort();}
     finally {polling=false;}
   },500);
   try {
-    const request=providerRequest(config,claimed,abort.signal),response=await (options.fetch || fetch)(request.url,request.init);
+    const assertCurrent=async()=>{const current=options.readConfig?await options.readConfig():options.config||await(await import('./social-account-runtime')).resolveSocialConfig(orgId,claimed.provider,claimed.account_id);checkOutboundConfig(current,claimed);await outboundGuard(database,claimed,current,claimed.control_epoch);if(socialConfigFingerprint(current)!==socialConfigFingerprint(config)||abort.signal.aborted)throw new ApiError(409,'Attachment sending interrupted');};
+    const request=await(await import('./human-attachments')).prepareHumanAttachmentRequest(config,claimed,{fetch:options.fetch||fetch,signal:abort.signal,assertCurrent})||await(await import('./broadcast-media')).prepareBroadcastMediaRequest(config,claimed,{fetch:options.fetch||fetch,signal:abort.signal,assertCurrent})||providerRequest(config,claimed,abort.signal),response=await (options.fetch || fetch)(request.url,request.init);
     if(response.status >= 300 && response.status < 400) {await response.body?.cancel();errorCode='provider_redirect_rejected';}
     else {
       // A bounded body prevents a faulty upstream response from consuming unbounded memory.
@@ -441,11 +514,11 @@ export async function dispatchSocialReply(orgId: string,commandId: string,option
       const receipt=(await c.query('SELECT * FROM social_delivery_receipts WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[orgId,command.provider,command.account_id,providerMessageId])).rows[0];
       if(receipt && (!receipt.remote_id || receipt.remote_id === command.remote_id) && receipt.rank >= deliveryRank[finalStatus]) finalStatus=receipt.status;
       const identity=(await c.query('SELECT read_watermark_ms FROM social_identities WHERE org_id=$1 AND id=$2',[orgId,command.identity_id])).rows[0];
-      if(command.provider === 'facebook' && Number(identity?.read_watermark_ms) >= Date.parse(command.updated_at) && ['submitted','sent','delivered'].includes(finalStatus)) finalStatus='read';
+      if(command.provider==='facebook' && Number(identity?.read_watermark_ms) >= Date.parse(command.updated_at) && ['submitted','sent','delivered'].includes(finalStatus)) finalStatus='read';
       // A verified Facebook echo may arrive before the HTTP response. Never match content or names.
       const echo=(await c.query('SELECT p.*,m.conversation_id,m.role,m.content,m.created_at FROM social_message_provenance p JOIN messages m ON m.org_id=p.org_id AND m.id=p.message_id WHERE p.org_id=$1 AND p.provider=$2 AND p.account_id=$3 AND p.provider_message_id=$4',[orgId,command.provider,command.account_id,providerMessageId])).rows[0];
       if(echo && echo.message_id !== command.message_id) {
-        if(command.provider!=='facebook'||echo.remote_id!==command.remote_id||echo.conversation_id!==command.conversation_id||echo.direction!=='out'||echo.role!=='agent'||echo.metadata?.is_echo!==true||echo.removed_at){
+        if(!['facebook','instagram'].includes(command.provider)||echo.remote_id!==command.remote_id||echo.conversation_id!==command.conversation_id||echo.direction!=='out'||echo.role!=='agent'||echo.metadata?.is_echo!==true||echo.removed_at){
           await c.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),orgId,command.approved_by,'social.provider_identity_conflict',command.message_id,JSON.stringify({provider:command.provider,accountId:command.account_id,remoteId:command.remote_id,providerMessageId,existingMessageId:echo.message_id,attemptId:command.attempt_id})]);
           await setCommandStatus(c,command,'unknown','provider_message_id_conflict');return 'unknown';
         }

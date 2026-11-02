@@ -2,6 +2,30 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { applicationRequest, canonicalRedirect, protectResponse } from '../cloudflare/edge-policy';
 import { providerName, generateReply } from '../src/lib/bot';
+import {configureMediaArchiveSchedule,checkMediaArchiveSchedule} from '../scripts/media-archive-deployment.mjs';
+
+test('minute cron serves each independent automation gate while archive remains disabled',()=>{
+  const base={vars:{SOCIAL_MEDIA_ARCHIVE_ENABLED:'false'},triggers:{crons:['15 3 * * *']},d1_databases:[{binding:'DB',database_id:'fixture'}],r2_buckets:[{binding:'BUCKET',bucket_name:'fixture'}],services:[{binding:'SALE_SERVICE',service:'sale-fixture'}]};
+  const gates=[{WEB_CHAT_ATTACHMENTS_ENABLED:'true'},{CRM_BRIDGE_ENABLED:'true',CRM_SALE_SYNC_ENABLED:'true'},{CRM_BRIDGE_ENABLED:'true',CRM_SALE_CONTEXT_ENABLED:'true'},{FLOWS_ENABLED:'true'},{BROADCAST_ENABLED:'true',BROADCAST_RUNNER_ENABLED:'true'},{CRM_PUBLIC_WEBHOOKS_ENABLED:'true',CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED:'true'},{EXTERNAL_CONNECTORS_ENABLED:'true',EXTERNAL_CONNECTOR_RUNNER_ENABLED:'true'}];
+  for(const gate of gates){
+    const input={...base,vars:{...base.vars,...gate}},configured=configureMediaArchiveSchedule(input);
+    assert.deepEqual(configured.triggers.crons,['15 3 * * *','* * * * *']);
+    assert.deepEqual(checkMediaArchiveSchedule(configured),{enabled:false,cronConfigured:true});
+    assert.deepEqual(configureMediaArchiveSchedule(configured),configured);
+    assert.deepEqual(configured.d1_databases,base.d1_databases);assert.deepEqual(configured.r2_buckets,base.r2_buckets);assert.deepEqual(configured.services,base.services);
+    assert.deepEqual(input.triggers.crons,['15 3 * * *'],'does not mutate input');
+    for(const key of Object.keys(gate))assert.deepEqual(configureMediaArchiveSchedule({...configured,vars:{...configured.vars,[key]:'false'}}).triggers.crons,['15 3 * * *']);
+  }
+});
+
+test('archive ownership validation stays strict and stopping one runner preserves the others',()=>{
+  const base={vars:{SOCIAL_MEDIA_ARCHIVE_ENABLED:'false',FLOWS_ENABLED:'true',CRM_BRIDGE_ENABLED:'true',CRM_SALE_SYNC_ENABLED:'true'},triggers:{crons:['* * * * *','* * * * *','0 0 * * *']}};
+  assert.deepEqual(configureMediaArchiveSchedule(base).triggers.crons,['0 0 * * *','* * * * *']);
+  assert.deepEqual(configureMediaArchiveSchedule({...base,vars:{...base.vars,FLOWS_ENABLED:'false'}}).triggers.crons,['0 0 * * *','* * * * *']);
+  assert.throws(()=>configureMediaArchiveSchedule({...base,vars:{...base.vars,SOCIAL_MEDIA_ARCHIVE_ENABLED:'true',SOCIAL_CHANNELS_OWNER:'sale'}}),/ownership/);
+  assert.throws(()=>checkMediaArchiveSchedule({...base,triggers:{crons:[]}}),/Minute cron/);
+  for(const vars of [{BROADCAST_RUNNER_ENABLED:'true'},{CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED:'true'},{EXTERNAL_CONNECTOR_RUNNER_ENABLED:'true'},{CRM_SALE_SYNC_ENABLED:'true'}])assert.deepEqual(configureMediaArchiveSchedule({vars,triggers:{crons:[]}}).triggers.crons,[]);
+});
 
 test('edge request uses actual HTTPS URL and strips forged forwarding without changing signed bytes', async () => {
   const url='https://crm-fixture.test/api/bridge/a%20b?q=%2F&x=1',body='{"synthetic":true}';

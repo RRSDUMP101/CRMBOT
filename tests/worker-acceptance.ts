@@ -7,7 +7,7 @@ const origin='http://127.0.0.1:8787';
 const mf=new Miniflare(convertV4MiniflareOptions({
   host:'127.0.0.1',port:8787,modules:true,scriptPath:'.wrangler/bundle/worker.js',
   compatibilityDate:'2026-10-28',compatibilityFlags:['nodejs_compat','global_fetch_strictly_public'],
-  bindings:{APP_ORIGIN:origin,RRS_WORKERS:'true',DEMO_MODE:'false',PUBLIC_ORG_SLUG:'rrs',AI_PROVIDER:'demo',AI_DAILY_CALL_LIMIT:'1000',SESSION_SECRET:'synthetic-local-worker-secret-never-use-in-production',TRUSTED_IP_HEADER:'cf-connecting-ip'},
+  bindings:{APP_ORIGIN:origin,RRS_WORKERS:'true',DEMO_MODE:'false',PUBLIC_ORG_SLUG:'rrs',AI_PROVIDER:'demo',AI_DAILY_CALL_LIMIT:'1000',SESSION_SECRET:'synthetic-local-worker-secret-never-use-in-production',TRUSTED_IP_HEADER:'cf-connecting-ip',WEB_CHAT_ATTACHMENTS_ENABLED:'true'},
   d1Databases:['DB'],r2Buckets:['BUCKET'],
 }));
 async function run(file:string){await new Promise<void>((resolve,reject)=>{
@@ -35,6 +35,15 @@ async function main(){try {
   if(!assets.length)throw new Error('No static asset URLs in login page');
   for(const asset of assets){const response=await mf.dispatchFetch(new URL(asset,origin));if(response.status!==200)throw new Error(`Broken asset ${asset}`);}
   console.log(`Worker health, login HTML and ${assets.length} static assets passed.`);
+  // Browser module workers reject octet-stream under nosniff, even when bytes are correct.
+  for(const path of ['/pdf.worker.min.mjs','/sw.js']){
+    const response=await mf.dispatchFetch(origin+path);
+    if(response.status!==200||!response.headers.get('content-type')?.includes('javascript'))throw new Error(`Browser worker MIME invalid: ${path}`);
+    const bytes=Buffer.from(await response.arrayBuffer()),source=await readFile('public'+path);
+    if(!bytes.equals(source))throw new Error(`Browser worker bytes changed in packaging: ${path}`);
+  }
+  const manifest=await mf.dispatchFetch(origin+'/manifest.webmanifest');
+  if(manifest.status!==200||(await manifest.json() as {start_url?:string}).start_url!=='/')throw new Error('PWA manifest unavailable');
   await run('tests/api.test.ts');await run('tests/helpdesk.test.ts');await run('tests/files-api.test.ts');
 } finally {await mf.dispose();}}
 main().catch(error=>{console.error(error);process.exitCode=1;});

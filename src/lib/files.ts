@@ -5,6 +5,7 @@ import { ApiError, str, uuid, type Staff } from './auth';
 export type PrivateBucket = {
   put(key:string,value:Uint8Array,options?:unknown):Promise<unknown>;
   get(key:string):Promise<{body:ReadableStream<Uint8Array>}|null>;
+  delete?(key:string):Promise<unknown>;
 };
 async function bucket():Promise<PrivateBucket> {
   if(process.env.RRS_WORKERS==='true') {

@@ -1,26 +1,52 @@
 "use client";
+import {DataView} from "./data-view";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { subscribeCRMChanges } from './realtime';
-import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Menu, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe } from "lucide-react";
-import { Button, Card, Badge, Empty, Field, Input } from "./ui";
+import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartColumn, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Megaphone, Menu, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe, Zap, Search } from "lucide-react";
+import { Button, Card, Badge, Empty, Field, Input, RrsBrand } from "./ui";
 import { api, date, number, stages, stageNames, type Member, type Snapshot } from "./data";
 import { Customers, Tasks, KnowledgePanel, SettingsPanel, MembersPanel } from "./workspace-panels";
 import { InboxWorkspace } from "./inbox-workspace";
 import { useFocusScope } from "./focus-scope";
 import { ReplyTemplatesPanel } from "./reply-templates";
 import { WidgetSettingsPanel } from "./widget-settings";
+import { ReportsPanel } from "./reports-panel";
+import { BroadcastPanel } from "./broadcast-panel";
+import { FlowsPanel } from "./flows-panel";
+import { AiLifecyclePanel } from "./ai-lifecycle-panel";
+import { WhatsappTemplatesPanel } from './whatsapp-templates';
+import { IntegrationsApiPanel } from './integrations-api-panel';
+import { OperatorWorkspace } from './operator-workspace';
+import {SystemHealthPanel} from './system-health';
+import {ConnectorsPanel} from './connectors-panel';
 
 const nav = [
-  { id: "inbox", label: "กล่องข้อความ", short: "แชต", icon: MessageSquare },
-  { id: "customers", label: "ลูกค้าและโอกาสขาย", short: "ลูกค้า", icon: Users },
-  { id: "tasks", label: "งานและนัดหมาย", short: "ติดตาม", icon: CalendarDays },
-  { id: "dashboard", label: "รายงานภาพรวม", short: "รายงาน", icon: ChartNoAxesCombined },
-  { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark },
-  { id: "knowledge", label: "คลังความรู้", short: "ความรู้", icon: BookOpen },
-  { id: "settings", label: "ตั้งค่าผู้ช่วย AI", short: "ผู้ช่วย AI", icon: Sparkles },
-  { id: "members", label: "สมาชิกและสิทธิ์", short: "ทีม", icon: ShieldCheck },
-  { id: "integrations", label: "เว็บไซต์และช่องทาง", short: "เว็บแชต", icon: Workflow },
+  { id: "dashboard", label: "ภาพรวม", short: "ภาพรวม", icon: LayoutDashboard, group: "งานประจำวัน" },
+  { id: "inbox", label: "กล่องข้อความ", short: "แชต", icon: MessageSquare, group: "งานประจำวัน" },
+  { id: "customers", label: "ลูกค้าและโอกาสขาย", short: "ลูกค้า", icon: Users, group: "งานประจำวัน" },
+  { id: "tasks", label: "งานติดตาม", short: "งาน", icon: CalendarDays, group: "งานประจำวัน" },
+  { id: "reports", label: "รายงานและ SLA", short: "รายงาน", icon: ChartColumn, group: "งานประจำวัน" },
+  { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark, group: "สื่อสารและแคมเปญ" },
+  { id: "broadcast", label: "แคมเปญข้อความ", short: "แคมเปญ", icon: Megaphone, group: "สื่อสารและแคมเปญ" },
+  { id: "wa-templates", label: "All Inbox", short: "เทมเพลต", icon: MessageSquare, group: "สื่อสารและแคมเปญ" },
+  { id: "operators", label: "ทีมและการจัดสรรงาน", short: "ทีม", icon: Users, group: "AI และระบบอัตโนมัติ" },
+  { id: "flows", label: "Flow Builder", short: "Flow", icon: Zap, group: "AI และระบบอัตโนมัติ" },
+  { id: "knowledge", label: "คลังความรู้", short: "ความรู้", icon: BookOpen, group: "AI และระบบอัตโนมัติ" },
+  { id: "ai-lifecycle", label: "ทดสอบและอนุมัติ AI", short: "ทดสอบ AI", icon: Sparkles, group: "AI และระบบอัตโนมัติ" },
+  { id: "settings", label: "บุคลิกผู้ช่วย AI", short: "ผู้ช่วย AI", icon: Sparkles, group: "AI และระบบอัตโนมัติ" },
+  { id: "integrations", label: "ช่องทางและเว็บแชต", short: "เว็บแชต", icon: Workflow, group: "ตั้งค่าและเชื่อมต่อ" },
+  { id: "connectors", label: "อีเมลและร้านค้า", short: "เชื่อมต่อ", icon: Globe, group: "ตั้งค่าและเชื่อมต่อ" },
+  { id: "members", label: "สมาชิกและสิทธิ์", short: "สิทธิ์", icon: ShieldCheck, group: "ตั้งค่าและเชื่อมต่อ" },
+  { id: "public-api", label: "API และ Webhooks", short: "API", icon: Workflow, group: "ตั้งค่าและเชื่อมต่อ", admin: true },
+  { id: "system-health", label: "สถานะซิงก์และระบบ", short: "สถานะ", icon: RefreshCw, group: "ตั้งค่าและเชื่อมต่อ", admin: true },
 ];
+const navGroups = [...new Set(nav.map(item => item.group))];
+const viewDescriptions: Record<string, string> = {
+  inbox: "ดูแลลูกค้าและติดตามงานในหน้าเดียว", dashboard: "ภาพรวมบทสนทนาและโอกาสขายของทีม",
+  customers: "ข้อมูลลูกค้าและขั้นตอนการขาย", tasks: "จัดลำดับงานและนัดหมายที่ต้องดูแล",
+  reports: "เวลาตอบกลับ งานค้าง และผลงานจากข้อมูลจริง", templates: "คำตอบที่ใช้บ่อยของทีม",
+  broadcast: "จัดเตรียมข้อความสำหรับลูกค้าที่ให้ความยินยอม", flows: "ออกแบบ ทดลอง และจัดการขั้นตอนอัตโนมัติ",
+};
 type Bootstrap = { demo: boolean; provider: string; user: Member | null };
 export type PanelProps = { data: Snapshot; reload: () => Promise<void>; notify: (text: string) => void };
 
@@ -28,6 +54,12 @@ export default function Workspace() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [data, setData] = useState<Snapshot | null>(null);
   const [view, setView] = useState("inbox"); const [mobile, setMobile] = useState(false);
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [inboxSearch, setInboxSearch] = useState({ value: "", revision: 0 });
+  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const navigate = useCallback((next: string) => {
+    setView(next); setMobile(false); window.history.replaceState(null, "", "#" + next);
+  }, []);
   const railRef = useRef<HTMLElement>(null);
   useFocusScope(mobile, railRef, () => setMobile(false), true, "#workspace-menu-trigger");
   useEffect(() => { const resize = () => { if (window.innerWidth > 780) setMobile(false); }; window.addEventListener("resize", resize); return () => window.removeEventListener("resize", resize); }, []);
@@ -36,36 +68,51 @@ export default function Workspace() {
   const notify = useCallback((text: string) => { setToast(text); }, []);
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(""), 4500); return () => clearTimeout(timer); } }, [toast]);
   const initialize = useCallback(async () => { setError(""); try { setBootstrap(await api<Bootstrap>("/api/bootstrap")); } catch (e) { setError((e as Error).message); } }, []);
-  const reload = useCallback(async () => { if (!bootstrap?.user) return; setLoading(true); try { const params = new URLSearchParams(); if (from) params.set("from", from); if (to) params.set("to", to); setData(await api<Snapshot>("/api/admin/snapshot?" + params)); setError(""); } catch (e) { setError((e as Error).message); } finally { setLoading(false); } }, [bootstrap?.user, from, to]);
+  const reload = useCallback(async () => { if (!bootstrap?.user) return; setLoading(true); try { const params = new URLSearchParams(); if (from) params.set("from", from); if (to) params.set("to", to); setData(await api<Snapshot>("/api/admin/snapshot?" + params)); setRefreshedAt(new Date()); setError(""); } catch (e) { setError((e as Error).message); } finally { setLoading(false); } }, [bootstrap?.user, from, to]);
   useEffect(() => { void initialize(); }, [initialize]);
+  // The channel connection wizard returns here from the provider's consent screen.
+  useEffect(() => {
+    const restoreView = () => { const hash = window.location.hash.slice(1); if (hash === "social-accounts") setView("integrations"); else if (nav.some(item => item.id === hash)) setView(hash); };
+    restoreView(); window.addEventListener("hashchange", restoreView); return () => window.removeEventListener("hashchange", restoreView);
+  }, []);
   useEffect(() => { void reload(); }, [reload]);
   useEffect(()=>bootstrap?.user?subscribeCRMChanges(()=>void reload()):undefined,[bootstrap?.user,reload]);
   useEffect(() => { if (!bootstrap?.user) return; const timer = setInterval(() => void reload(), 15000); return () => clearInterval(timer); }, [bootstrap?.user, reload]);
   if (!bootstrap) return <main className="full-state">{error ? <><h2>เชื่อมต่อระบบไม่สำเร็จ</h2><p role="alert">{error}</p><Button onClick={initialize}>ลองอีกครั้ง</Button></> : <><span className="spinner" /><p>กำลังเตรียมพื้นที่ทำงาน</p></>}</main>;
   if (!bootstrap.user) return <Login demo={bootstrap.demo} onLogin={async () => { setData(null); await initialize(); }} />;
   const props: PanelProps | null = data ? { data, reload, notify } : null;
-  const active = nav.find(n => n.id === view)!;
-  return <div className={`workspace workspace-v2 ${view === "inbox" ? "is-inbox" : ""}`}>
+  const active = nav.find(n => n.id === view) || nav[1];
+  const visibleNav = nav.filter(item => !item.admin || bootstrap.user?.role === "Admin");
+  const restricted = !!active.admin && bootstrap.user.role !== "Admin";
+  return <div className={`workspace workspace-v2 rrs-workspace ${view === "inbox" ? "is-inbox" : ""}`}>
+    <a className="skip-link" href="#workspace-main">ข้ามไปยังเนื้อหา</a>
     {mobile && <button className="mobile-shade" aria-label="ปิดเมนู" onClick={() => setMobile(false)} />}
     <aside ref={railRef} tabIndex={-1} role={mobile ? "dialog" : undefined} aria-modal={mobile || undefined} aria-label="เมนูพื้นที่ทำงาน" className={`app-rail ${mobile ? "is-open" : ""}`}>
-      <a href="/" className="rail-brand" title="RRS Connect"><span>R</span><small>RRS</small></a>
-      <nav aria-label="เมนูหลัก">{nav.map((item, index) => <div key={item.id}>{index === 5 && <div className="rail-divider"><span>AI</span></div>}{index === 7 && <div className="rail-divider" />}<button title={item.label} aria-label={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobile(false); }} className={`rail-item ${view === item.id ? "active" : ""}`}><item.icon size={21} /><span>{item.short}</span></button></div>)}</nav>
-      <div className="rail-account"><span className="user-avatar" title={`${bootstrap.user.name} · ${bootstrap.user.role}`}>{bootstrap.user.name.slice(0, 1)}</span><button title="ออกจากระบบ" aria-label="ออกจากระบบ" onClick={async () => { try { await api("/api/auth/logout", {}); setData(null); await initialize(); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div>
+      <a href="#inbox" onClick={() => navigate("inbox")} className="rail-brand" title="RRS CRM"><RrsBrand /></a>
+      <nav aria-label="เมนูหลัก">{navGroups.map(group => <div className="rail-group" key={group}><p className="rail-group-label">{group}</p>{visibleNav.filter(item => item.group === group).map(item => <button key={item.id} title={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => navigate(item.id)} className={`rail-item ${view === item.id ? "active" : ""}`}><item.icon size={20} /><span>{item.label}</span></button>)}</div>)}</nav>
+      <div className="rail-operator-links"><a href="/operators?tab=mentions">บันทึกและการกล่าวถึง</a><a href="/operators?tab=fields">ฟิลด์เพิ่มเติม</a></div>
+      <a className="rail-sale-link" href="https://rrs-sales-office-hub.com/" target="_blank" rel="noreferrer">เปิด Sale Office <ArrowUpRight size={16} /></a>
+      <div className="rail-account"><span className="user-avatar">{bootstrap.user.name.slice(0, 1)}</span><div><strong>{bootstrap.user.name}</strong><small>{bootstrap.user.role === "Admin" ? "ผู้ดูแลระบบ" : "ทีมขาย RRS"}</small></div><button title="ออกจากระบบ" aria-label="ออกจากระบบ" onClick={async () => { try { await api("/api/auth/logout", {}); setData(null); await initialize(); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div>
     </aside>
-    <div className="workspace-body" inert={mobile || undefined}><header className="workspace-topbar"><div className="workspace-brandline"><button id="workspace-menu-trigger" className="mobile-menu" aria-label="เปิดเมนู" onClick={() => setMobile(true)}><Menu size={21} /></button><strong>RRS Connect</strong><span className="topbar-divider" /><span>รุ่งเรืองดั๊มพ์ 101</span></div><div className="workspace-topbar-actions"><Badge tone="green"><Globe size={12} />เว็บไซต์</Badge>{(bootstrap.demo || bootstrap.provider === "demo") && <span className="workspace-demo-label" title={bootstrap.provider === "demo" ? "ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อม AI ภายนอก ใช้ฐานข้อมูลสาธิต"}>{bootstrap.provider === "demo" ? "Demo · AI จำลอง" : "ฐานข้อมูลสาธิต"}</span>}{bootstrap.provider === "disabled" && <span className="workspace-demo-label">แชตกับทีมงาน · AI ยังไม่เปิด</span>}<a href="/chat" target="_blank" rel="noreferrer" className="button button-secondary button-sm">เปิดแชตลูกค้า <ArrowUpRight size={15} /></a></div></header>
-      <main className={`main-content ${view === "inbox" ? "inbox-main" : ""}`}>
-        {view !== "inbox" && <><div className="page-heading"><div><h1>{active.label}</h1><p>{view === "dashboard" ? "ติดตามทุกบทสนทนาและโอกาสขาย ด้วยข้อมูลจริงของทีม" : view === "templates" ? "คำตอบที่ใช้บ่อย ช่วยทีมตอบได้เร็วและสม่ำเสมอ" : "จัดการข้อมูลของทีมในที่เดียว"}</p></div><Button variant="secondary" size="sm" disabled={loading} onClick={reload}><RefreshCw size={15} className={loading ? "spin" : ""} />รีเฟรช</Button></div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
+    <div className="workspace-body" inert={mobile || undefined}>
+      <header className="workspace-topbar">
+        <div className="workspace-brandline"><button id="workspace-menu-trigger" className="mobile-menu" aria-label="เปิดเมนู" aria-expanded={mobile} onClick={() => setMobile(true)}><Menu size={21} /></button><div><strong>{active.label}</strong><small>{viewDescriptions[view] || "พื้นที่ทำงาน RRS CRM"}</small></div></div>
+        <form className="workspace-search" role="search" onSubmit={event => { event.preventDefault(); setInboxSearch(previous => ({ value: globalSearch.trim(), revision: previous.revision + 1 })); navigate("inbox"); }}><Search size={18} /><Input aria-label="ค้นหาลูกค้าและข้อความในกล่องข้อความ" placeholder="ค้นหาลูกค้าหรือข้อความ…" value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} /><button type="submit" aria-label="ค้นหาในกล่องข้อความ"><ChevronRight size={18} /></button></form>
+        <div className="workspace-topbar-actions"><button className="workspace-refresh" title="รีเฟรชข้อมูลพื้นที่ทำงาน" aria-label="รีเฟรชข้อมูลพื้นที่ทำงาน" disabled={loading} onClick={reload}><RefreshCw size={18} className={loading ? "spin" : ""} /><span>{refreshedAt ? `อัปเดต ${refreshedAt.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}` : "กำลังโหลด"}</span></button>{(bootstrap.demo || bootstrap.provider === "demo") && <span className="workspace-demo-label">ข้อมูลสาธิต</span>}{bootstrap.provider === "disabled" && <span className="workspace-demo-label">AI ยังไม่เปิด</span>}<a href="/chat" target="_blank" rel="noreferrer" className="button button-secondary button-sm">เปิดเว็บแชต <ArrowUpRight size={15} /></a></div>
+      </header>
+      <main id="workspace-main" tabIndex={-1} className={`main-content ${view === "inbox" ? "inbox-main" : ""}`}>
+        {view !== "inbox" && <><div className="page-heading"><div><h1>{active.label}</h1><p>{view === "dashboard" ? "ติดตามทุกบทสนทนาและโอกาสขาย ด้วยข้อมูลจริงของทีม" : view === "templates" ? "คำตอบที่ใช้บ่อย ช่วยทีมตอบได้เร็วและสม่ำเสมอ" : view === "flows" ? "ติดแท็ก มอบหมาย สร้างงาน และส่งข้อความตามเงื่อนไข ทดสอบก่อนเผยแพร่ทุกครั้ง" : view === "broadcast" ? "ส่งข่าวสารถึงลูกค้า WhatsApp และ LINE ที่ยินยอมแล้วเท่านั้น ปิดไว้เป็นค่าเริ่มต้น" : view === "reports" ? "เวลาตอบกลับ งานค้าง และผลงานรายช่องทาง คำนวณจากข้อมูลจริงเท่านั้น" : "จัดการข้อมูลของทีมในที่เดียว"}</p></div>{view !== "reports" && <Button variant="secondary" size="sm" disabled={loading} onClick={reload}><RefreshCw size={15} className={loading ? "spin" : ""} />รีเฟรช</Button>}</div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
         {error && <div className="alert alert-error" role="alert">{error}<Button variant="ghost" size="sm" onClick={reload}>ลองอีกครั้ง</Button></div>}
         {!data && !error && <div className="workspace-loading"><span className="spinner" /><p>กำลังเปิดพื้นที่ทำงาน…</p></div>}
-        {props && <>{view === "inbox" && <InboxWorkspace {...props} />}{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={setView} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "settings" && <SettingsPanel {...props} />}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
+        {restricted && <Card><Empty title="พื้นที่สำหรับผู้ดูแลระบบ" detail="เลือกเมนูอื่นเพื่อทำงานต่อ หรือติดต่อผู้ดูแลหากต้องการสิทธิ์เพิ่มเติม" /></Card>}{props && !restricted && <>{view === "inbox" && <DataView table={false} title="All Inbox"><InboxWorkspace {...props} searchRequest={inboxSearch} navigate={navigate} /></DataView> }{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={navigate} />}{view === "reports" && <ReportsPanel user={data!.user} members={data!.members} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "broadcast" && <BroadcastPanel isAdmin={data!.user.role === "Admin"} />}{view === "flows" && <FlowsPanel {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "ai-lifecycle" && <AiLifecyclePanel />}{view === "wa-templates" && <WhatsappTemplatesPanel isAdmin={data!.user.role === "Admin"} />}{view === "operators" && <><div className="operator-shortcuts"><a href="/operators?tab=teams" className="button button-secondary">ทีมและเวลาทำการ <ArrowUpRight size={15} /></a><a href="/operators?tab=fields" className="button button-secondary">ฟิลด์เพิ่มเติม <ArrowUpRight size={15} /></a><a href="/operators?tab=mentions" className="button button-secondary">บันทึกและการกล่าวถึง <ArrowUpRight size={15} /></a></div><OperatorWorkspace embedded /></>}{view === "public-api" && data!.user.role === "Admin" && <IntegrationsApiPanel />}{view === "connectors" && <ConnectorsPanel />}{view === "system-health" && data!.user.role === "Admin" && <SystemHealthPanel />}{view === "settings" && <><SettingsPanel {...props} /><Card className="rrs-optional-integration"><div><Badge>F26 · ส่วนเสริม</Badge><h2>REA ยังไม่ได้เชื่อมต่อ</h2><p>ระบบ CRM และ Sale Office ใช้งานได้ตามปกติ การวิเคราะห์เพิ่มเติมด้วย REA ยังไม่มีการเชื่อมต่อที่ได้รับอนุญาต</p></div><Button disabled>ยังไม่เปิดใช้งาน</Button></Card></>}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
       </main>{view !== "inbox" && <footer className="workspace-footer">RRS Connect <span>เขตเวลา Asia/Bangkok (UTC+7)</span></footer>}
-    </div>{toast && <div className="toast" role="status"><ShieldCheck size={18} />{toast}<button onClick={() => setToast("")} aria-label="ปิดข้อความ"><X size={14} /></button></div>}
+    </div><nav className="mobile-bottom-nav" aria-label="เมนูมือถือ" inert={mobile || undefined}>{["inbox", "tasks", "customers"].map(id => { const item = nav.find(item => item.id === id)!; return <button key={id} aria-current={view === id ? "page" : undefined} onClick={() => navigate(id)}><item.icon size={21} /><span>{item.short}</span></button>; })}<button onClick={() => setMobile(true)} aria-label="เปิดเมนูทั้งหมด"><Menu size={21} /><span>เพิ่มเติม</span></button></nav>{toast && <div className="toast" role="status"><ShieldCheck size={18} />{toast}<button onClick={() => setToast("")} aria-label="ปิดข้อความ"><X size={14} /></button></div>}
   </div>;
 }
 
 function Login({ demo, onLogin }: { demo: boolean; onLogin: () => Promise<void> }) {
   const [email, setEmail] = useState(demo ? "admin@rrs.demo" : ""); const [password, setPassword] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  return <main className="login-page login-v2"><section className="login-story"><div className="brand"><span className="brand-mark">R</span><span>RRS <b>Connect</b><small>พื้นที่ทำงานทีมขาย</small></span></div><div className="login-message"><span className="login-symbol"><MessageSquare size={28} /></span><h1>ดูแลทุกบทสนทนา<br />พาลูกค้าไปต่อได้ง่ายขึ้น</h1><p>ทีมขาย ผู้ช่วย AI และข้อมูลลูกค้า<br />เชื่อมกันในพื้นที่ทำงานเดียว</p><div className="login-pills"><span><MessageSquare size={17} />ประวัติแชตครบในที่เดียว</span><span><Users size={17} />รับช่วงดูแลได้ทันที</span><span><ChartNoAxesCombined size={17} />ติดตามผลจากข้อมูลจริง</span></div></div><small>สำหรับรุ่งเรืองดั๊มพ์ 101 · ไทยและตลาดส่งออก</small></section><section className="login-form"><div className="login-form-inner"><Badge tone="green">พื้นที่ทำงานสำหรับทีม</Badge><h2>ยินดีต้อนรับกลับมา</h2><p>เข้าสู่ระบบเพื่อดูแลลูกค้าและติดตามโอกาสขาย</p><form onSubmit={async e => { e.preventDefault(); setBusy(true); setError(""); try { await api("/api/auth/login", { username: email, password }); await onLogin(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } }}><Field label="ชื่อผู้ใช้หรืออีเมล"><Input type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} required value={email} onChange={e => setEmail(e.target.value)} /></Field><Field label="รหัสผ่าน"><Input type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)} /></Field>{error && <div className="alert alert-error" role="alert">{error}</div>}<Button disabled={busy} type="submit" className="full-width">{busy ? "กำลังเข้าสู่ระบบ…" : "เข้าสู่พื้นที่ทำงาน"}<ArrowUpRight size={18} /></Button></form>{demo && <div className="demo-login"><strong>บัญชีสำหรับฐานข้อมูลสาธิต</strong><p>Admin: admin@rrs.demo<br />Agent: agent@rrs.demo<br />รหัสผ่าน: <code>Demo-only-2026!</code></p><Button variant="secondary" size="sm" onClick={() => setPassword("Demo-only-2026!")}>กรอกรหัสผ่านสาธิต</Button></div>}<a href="/chat" className="text-link">เปิดแชตในมุมมองลูกค้า <ArrowUpRight size={15} /></a></div></section></main>;
+  return <main className="login-page login-v2"><section className="login-story"><div className="brand"><RrsBrand /></div><div className="login-message"><span className="login-symbol"><MessageSquare size={28} /></span><h1>ดูแลทุกบทสนทนา<br />พาลูกค้าไปต่อได้ง่ายขึ้น</h1><p>ทีมขาย ผู้ช่วย AI และข้อมูลลูกค้า<br />เชื่อมกันในพื้นที่ทำงานเดียว</p><div className="login-pills"><span><MessageSquare size={17} />ประวัติแชตครบในที่เดียว</span><span><Users size={17} />รับช่วงดูแลได้ทันที</span><span><ChartNoAxesCombined size={17} />ติดตามผลจากข้อมูลจริง</span></div></div><small>สำหรับรุ่งเรืองดั๊มพ์ 101 · ไทยและตลาดส่งออก</small></section><section className="login-form"><div className="login-form-inner"><Badge tone="green">พื้นที่ทำงานสำหรับทีม</Badge><h2>ยินดีต้อนรับกลับมา</h2><p>เข้าสู่ระบบเพื่อดูแลลูกค้าและติดตามโอกาสขาย</p><form onSubmit={async e => { e.preventDefault(); setBusy(true); setError(""); try { await api("/api/auth/login", { username: email, password }); await onLogin(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } }}><Field label="ชื่อผู้ใช้หรืออีเมล"><Input type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} required value={email} onChange={e => setEmail(e.target.value)} /></Field><Field label="รหัสผ่าน"><Input type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)} /></Field>{error && <div className="alert alert-error" role="alert">{error}</div>}<Button disabled={busy} type="submit" className="full-width">{busy ? "กำลังเข้าสู่ระบบ…" : "เข้าสู่พื้นที่ทำงาน"}<ArrowUpRight size={18} /></Button></form>{demo && <div className="demo-login"><strong>บัญชีสำหรับฐานข้อมูลสาธิต</strong><p>Admin: admin@rrs.demo<br />Agent: agent@rrs.demo<br />รหัสผ่าน: <code>Demo-only-2026!</code></p><Button variant="secondary" size="sm" onClick={() => setPassword("Demo-only-2026!")}>กรอกรหัสผ่านสาธิต</Button></div>}<a href="/chat" className="text-link">เปิดแชตในมุมมองลูกค้า <ArrowUpRight size={15} /></a></div></section></main>;
 }
 function auditActionLabel(action: string, metadata?: Record<string, unknown>) {
   const key = action.split(" ")[0];
@@ -75,12 +122,16 @@ function auditActionLabel(action: string, metadata?: Record<string, unknown>) {
     "conversation.claim": "รับช่วงสนทนา", "conversation.release": "ส่งกลับให้ผู้ช่วย AI",
     "conversation.resolve": "จบการสนทนา", "conversation.handoff": "ส่งต่อเจ้าหน้าที่",
     "conversation.summarize": "สรุปความต้องการ", "lead.contact": "บันทึกข้อมูลติดต่อ",
-    "widget.updated": "ปรับตั้งค่าวิดเจ็ต", updateLead: "อัปเดตข้อมูลลูกค้า",
+    "widget.updated": "ปรับตั้งค่าวิดเจ็ต", "report.exported": "ส่งออกรายงาน", updateLead: "อัปเดตข้อมูลลูกค้า",
     saveReplyTemplate: "บันทึกข้อความสำเร็จรูป", deleteReplyTemplate: "ลบข้อความสำเร็จรูป",
     createTask: "สร้างงานติดตาม", updateTask: "อัปเดตงานหรือนัดหมาย",
     saveKnowledge: "บันทึกคลังความรู้", deleteKnowledge: "ลบเนื้อหาความรู้",
     updateSettings: "ปรับตั้งค่าผู้ช่วย AI", createMember: "เพิ่มสมาชิกทีม",
     updateMember: "อัปเดตบัญชีสมาชิก", revokeMemberSessions: "ให้สมาชิกออกจากระบบทุกอุปกรณ์",
+    "flow.created": "สร้างระบบอัตโนมัติ", "flow.draft_saved": "บันทึกร่างระบบอัตโนมัติ", "flow.published": "เผยแพร่ระบบอัตโนมัติ",
+    "flow.paused": "หยุดระบบอัตโนมัติชั่วคราว", "flow.resumed": "เปิดระบบอัตโนมัติต่อ", "flow.global_paused": "หยุดฉุกเฉินระบบอัตโนมัติทั้งหมด",
+    "flow.global_resumed": "เปิดระบบอัตโนมัติทั้งหมดต่อ", "flow.execution_cancelled": "ยกเลิกการทำงานอัตโนมัติ", "flow.send_queued": "ระบบอัตโนมัติเข้าคิวส่งข้อความ",
+    "flow.handoff_requested": "ระบบอัตโนมัติส่งต่อเจ้าหน้าที่", "flow.conversation_closed": "ระบบอัตโนมัติปิดบทสนทนา", "flow.conversation_reopened": "ระบบอัตโนมัติเปิดบทสนทนา",
   };
   return labels[key] || "อัปเดตข้อมูลในระบบ";
 }

@@ -38,7 +38,7 @@ function cursorValue(value:string) {
 
 export async function inbox(staff:Staff,url:URL) {
   const UNREAD=unreadCount(staff);
-  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
+  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
   const query=str(url.searchParams.get('q'),'คำค้น',200);
   const view=oneOf(url.searchParams.get('view')||'all',['all','mine','unassigned','waiting','closed','unread'],'กล่องข้อความ');
   const rawLimit=url.searchParams.get('limit')||'30';
@@ -53,7 +53,18 @@ export async function inbox(staff:Staff,url:URL) {
   const unread=url.searchParams.get('unread');
   if(unread!==null&&unread!==''){oneOf(unread,['true','false'],'ตัวกรองยังไม่อ่าน');where.push(`${UNREAD}${unread==='true'?'>0':'=0'}`);}
   const status=url.searchParams.get('status');if(status)where.push(`c.status=${bind(oneOf(status,['bot_active','human_active','waiting_human','resolved'],'สถานะ'))}`);
-  const owner=url.searchParams.get('assignee');if(owner)where.push(`c.assignee_id=${bind(uuid(owner,'ผู้รับผิดชอบ'))}`);
+  const owner=url.searchParams.get('assignee');
+  if(owner==='me')where.push('c.assignee_id=$2');
+  else if(owner==='unassigned')where.push('c.assignee_id IS NULL');
+  else if(owner)where.push(`c.assignee_id=${bind(uuid(owner,'ผู้รับผิดชอบ'))}`);
+  const provider=url.searchParams.get('provider'),account=str(url.searchParams.get('account'),'บัญชีช่องทาง',160);
+  if(account&&(!provider||provider==='web'))throw new ApiError(400,'กรุณาเลือกช่องทางของบัญชี');
+  if(provider){
+    oneOf(provider,['web','whatsapp','line','facebook','instagram','email','gmail','outlook'],'ช่องทาง');
+    if(provider==='web')where.push('NOT EXISTS(SELECT 1 FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id) AND NOT EXISTS(SELECT 1 FROM external_threads et WHERE et.org_id=c.org_id AND et.conversation_id=c.id)');
+    else if(['email','gmail','outlook'].includes(provider))where.push(`EXISTS(SELECT 1 FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=c.org_id AND et.conversation_id=c.id AND ${provider==='email'?"ea.provider IN ('gmail','outlook')":`ea.provider=${bind(provider)}`}${account?` AND ea.id=${bind(account)}`:''})`);
+    else where.push(`EXISTS(SELECT 1 FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id AND si.provider=${bind(provider)}${account?` AND si.account_id=${bind(account)}`:''})`);
+  }
   const tag=str(url.searchParams.get('tag'),'แท็ก',40);if(tag)where.push(`EXISTS(SELECT 1 FROM json_each(l.tags) t WHERE lower(t.value)=lower(${bind(tag)}))`);
   if(query) {
     // D1 limits LIKE patterns to 50 bytes, too short for normal Thai names.
@@ -69,6 +80,8 @@ export async function inbox(staff:Staff,url:URL) {
     const total=await connection.query(`SELECT count(*) AS total FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${totalWhere}`,totalParams);
     const result=await connection.query(`SELECT c.id,c.lead_id,c.status,c.version,c.assignee_id,c.created_at,c.updated_at,l.name AS lead_name,l.tags,
       c.updated_at AS cursor_updated_at,
+      COALESCE((SELECT si.provider FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1),'web') AS provider,
+      COALESCE((SELECT si.account_id FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT et.account_id FROM external_threads et WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1)) AS account_id,
       ${UNREAD} AS unread_count,
       (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user'${visibleMessage(staff,'m')} ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,
       (SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent')${visibleMessage(staff,'m')} ORDER BY ${messageOrder('m',true)} LIMIT 1) AS last_message
@@ -132,11 +145,11 @@ export async function templateAction(staff:Staff,body:Record<string,unknown>) {
   return {ok:true};
 }
 
-export type WidgetConfig={enabled:boolean;title:string;greeting:string;accentColor:string;position:'left'|'right';allowedOrigins:string[]};
-const DEFAULT_WIDGET:WidgetConfig={enabled:true,title:'คุยกับ RRS',greeting:'สวัสดีค่ะ ฉันเป็นผู้ช่วย AI ของ RRS สนใจสอบถามเรื่องไหนคะ',accentColor:'#0f766e',position:'right',allowedOrigins:[]};
+export type WidgetConfig={enabled:boolean;title:string;greeting:string;accentColor:string;position:'left'|'right';allowedOrigins:string[];language:'th'|'en';prechatRequired:boolean;icebreakers:string[]};
+const DEFAULT_WIDGET:WidgetConfig={enabled:true,title:'คุยกับ RRS',greeting:'สวัสดีค่ะ ฉันเป็นผู้ช่วย AI ของ RRS สนใจสอบถามเรื่องไหนคะ',accentColor:'#0f766e',position:'right',allowedOrigins:[],language:'th',prechatRequired:false,icebreakers:['สนใจชุดดั๊มพ์สำหรับรถกระบะ','ต้องการส่งออกชุดไฮดรอลิก']};
 function validateWidgetConfig(raw:unknown):WidgetConfig {
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new ApiError(400,'ตั้งค่าวิดเจ็ตไม่ถูกต้อง');
-  const input=raw as Record<string,unknown>;fields(input,['enabled','title','greeting','accentColor','position','allowedOrigins']);
+  const input=raw as Record<string,unknown>;fields(input,['enabled','title','greeting','accentColor','position','allowedOrigins','language','prechatRequired','icebreakers']);
   if(typeof input.enabled!=='boolean')throw new ApiError(400,'สถานะวิดเจ็ตไม่ถูกต้อง');
   const title=str(input.title,'ชื่อหน้าต่างแชต',80,true);const greeting=str(input.greeting,'ข้อความต้อนรับ',400,true);
   const accentColor=str(input.accentColor,'สี',7,true);if(!/^#[0-9a-f]{6}$/i.test(accentColor))throw new ApiError(400,'สีต้องอยู่ในรูปแบบ #RRGGBB');
@@ -150,9 +163,12 @@ function validateWidgetConfig(raw:unknown):WidgetConfig {
     if(parsed.username||parsed.password||parsed.search||parsed.hash||parsed.pathname!=='/'||origin.includes('*')||/[\r\n]/.test(origin)||(parsed.protocol!=='https:'&&!(parsed.protocol==='http:'&&permitLocal)))throw new ApiError(400,'ใช้ต้นทาง HTTPS เช่น https://example.com โดยไม่ใส่ path หรือ wildcard');
     return parsed.origin;
   }))];
-  return {enabled:input.enabled,title,greeting,accentColor:accentColor.toLowerCase(),position,allowedOrigins};
+  const language=oneOf(input.language??'th',['th','en'],'ภาษา') as 'th'|'en';
+  if(input.prechatRequired!==undefined&&typeof input.prechatRequired!=='boolean')throw new ApiError(400,'ค่าฟอร์มก่อนแชตไม่ถูกต้อง');
+  const prompts=input.icebreakers??DEFAULT_WIDGET.icebreakers;if(!Array.isArray(prompts)||prompts.length>6)throw new ApiError(400,'ข้อความเริ่มต้นได้สูงสุด 6 รายการ');
+  return {enabled:input.enabled,title,greeting,accentColor:accentColor.toLowerCase(),position,allowedOrigins,language,prechatRequired:input.prechatRequired===true,icebreakers:prompts.map(p=>str(p,'ข้อความเริ่มต้น',200,true))};
 }
-async function widgetForOrg(orgId:string,connection:Executor=database):Promise<WidgetConfig> {
+export async function widgetForOrg(orgId:string,connection:Executor=database):Promise<WidgetConfig> {
   const row=(await connection.query('SELECT widget_config FROM organizations WHERE id=$1',[orgId])).rows[0];
   if(!row)throw new ApiError(404,'ไม่พบองค์กร');
   return validateWidgetConfig({...DEFAULT_WIDGET,...row.widget_config});
