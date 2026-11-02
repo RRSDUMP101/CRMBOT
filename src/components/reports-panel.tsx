@@ -1,4 +1,5 @@
 "use client";
+import { FeatureHeading } from "./specialist-workspace";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { CircleHelp, Clock, Download, Inbox, MessageSquare, RefreshCw, TriangleAlert, Users, Workflow, Timer, CheckCheck, MessagesSquare } from "lucide-react";
 import type { GroupMetrics, Report, Stat } from "@/lib/reports";
@@ -58,7 +59,7 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
   const exportHref = "/api/admin/reports/export?" + new URLSearchParams([["format", "csv"], ...new URLSearchParams(applied)]).toString();
   const t = report?.totals;
 
-  return <div className="reports-panel">
+  return <div className="reports-panel rrs-specialist"><FeatureHeading eyebrow="TEAM PERFORMANCE" title="รายงานและเวลาบริการ" description="ติดตามปริมาณงาน เวลาตอบ และงานรอเกินกำหนดจากข้อมูลจริง"/>
     <form className="reports-filters" aria-label="ตัวกรองรายงาน" onSubmit={submit}>
       <Field label="ตั้งแต่วันที่"><Input type="date" required value={filters.from} max={filters.to || undefined} onChange={set("from")} /></Field>
       <Field label="ถึงวันที่"><Input type="date" required value={filters.to} min={filters.from || undefined} onChange={set("to")} /></Field>

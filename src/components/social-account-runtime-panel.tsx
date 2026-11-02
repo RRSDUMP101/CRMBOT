@@ -14,7 +14,7 @@ export function SocialAccountRuntimePanel({ account, refresh }: { account: { id:
     try { await action(); await refresh(); setConfirm(false); setNotice(message); try { setStatus(await api(path)); } catch { setStatus(null); } }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
-  return <section className="form-stack" aria-label="การรับและส่งของบัญชีนี้" style={{ borderTop: '1px solid var(--border)', paddingTop: 20, marginTop: 20 }}>
+  return <section className="form-stack rrs-account-runtime" aria-label="การรับและส่งของบัญชีนี้">
     <h3>การรับและส่งของบัญชีนี้</h3><p className="helper-text">เปิดรับข้อความก่อน ทดสอบกับผู้รับที่กำหนด แล้วตรวจผลส่งก่อนเปิดส่งให้ลูกค้า การตั้งค่านี้ใช้เฉพาะบัญชีที่เลือก</p>
     <label><input type="checkbox" checked={inbound} onChange={e => setInbound(e.target.checked)} /> อนุญาตรับข้อความของบัญชีนี้</label>
     <label><input type="checkbox" checked={live} onChange={e => setLive(e.target.checked)} /> อนุญาตระบบส่งสำหรับขั้นทดสอบและเปิดใช้งาน</label>

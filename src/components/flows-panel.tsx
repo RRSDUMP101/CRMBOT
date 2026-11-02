@@ -1,4 +1,5 @@
 "use client";
+import { FeatureHeading } from "./specialist-workspace";
 import { useCallback, useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, CirclePause, CirclePlay, FlaskConical, GitBranch, History, Plus, RefreshCw, Save, Send, ShieldAlert, Trash2, Zap } from "lucide-react";
 import { api, date, stageNames, stages, statusNames, type Member } from "./data";
@@ -83,15 +84,15 @@ export function FlowsPanel({ data, notify }: PanelProps) {
     try { const detail = await api<Detail>("/api/admin/flows", { name: name.trim() }); setName(""); await load(); setSelected(detail.flow.id); notify("สร้างร่างระบบอัตโนมัติแล้ว"); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   const status = list && <Card className="flows-status">
-    <Zap size={20} /><Badge tone={list.enabled ? "green" : "neutral"}>{list.enabled ? "ระบบทำงาน" : "ระบบปิดอยู่ (FLOWS_ENABLED)"}</Badge>
+    <Zap size={20} /><Badge tone={list.enabled ? "green" : "neutral"}>{list.enabled ? "ระบบทำงาน" : "ระบบอัตโนมัติยังปิดอยู่"}</Badge>
     <Badge tone={list.sendEnabled ? "green" : "neutral"}>{list.sendEnabled ? "ส่งข้อความอัตโนมัติได้" : "ไม่ส่งข้อความอัตโนมัติ"}</Badge>
     {list.globalPaused && <Badge tone="amber">หยุดฉุกเฉินทั้งหมด</Badge>} {!!list.ingress.length&&<details><summary>เหตุการณ์รอประมวลผล ({list.ingress.length})</summary><ul>{list.ingress.map(event=><li key={event.eventId}>{event.status} · ลอง {event.attempts} ครั้ง · {event.errorCode} · {date(event.retryAt)} {admin&&<Button size="sm" disabled={busy} onClick={async()=>{setBusy(true);try{setList(await api<FlowList>("/api/admin/flows/ingress/retry",{eventId:event.eventId,confirm:true}));}catch(e){setError((e as Error).message);}finally{setBusy(false);}}}>นำกลับเข้าคิว</Button>}</li>)}</ul></details>}
     <p>ข้อความอัตโนมัติส่งผ่านช่องทางเดิมพร้อมการตรวจสิทธิ์ ความยินยอม และการหยุดฉุกเฉินทุกครั้ง จะไม่ส่งเมื่อเจ้าหน้าที่รับช่วงแล้ว และส่งข้อความต้อนรับได้ครั้งเดียวต่อบทสนทนา</p>
     {admin && <Button variant={list.globalPaused ? "secondary" : "destructive"} size="sm" disabled={busy} onClick={() => globalPause(!list.globalPaused)}>{list.globalPaused ? <><CirclePlay size={15} />เปิดทำงานต่อ</> : <><ShieldAlert size={15} />หยุดฉุกเฉินทั้งหมด</>}</Button>}
   </Card>;
-  if (selected) return <>{status}<FlowEditor id={selected} data={data} admin={admin} notify={notify} back={() => { setSelected(null); void load(); }} /></>;
-  return <>
-    {status}
+  if (selected) return <div className="rrs-specialist"><FeatureHeading eyebrow="AUTOMATION" title="Flow Builder" description="ออกแบบลำดับงาน ตรวจเงื่อนไข และทดลองก่อนเผยแพร่"/>{status}<FlowEditor id={selected} data={data} admin={admin} notify={notify} back={() => { setSelected(null); void load(); }} /></div>;
+  return <div className="rrs-specialist">
+    <FeatureHeading eyebrow="AUTOMATION" title="ระบบอัตโนมัติ" description="เลือก Flow เพื่อแก้ไข ทดสอบ หรือดูประวัติการทำงาน"/>{status}
     <div className="section-toolbar"><p className="helper-text">ระบบอัตโนมัติ {list?.flows.length ?? 0} รายการ · ทำงานได้สูงสุด {list?.limits.stepsPerRun ?? 20} ขั้นตอนต่อรอบ</p>
       <div className="button-row"><Button variant="secondary" size="sm" disabled={loading} onClick={load}><RefreshCw size={15} />รีเฟรช</Button>
         {admin && <form className="button-row" onSubmit={e => { e.preventDefault(); void create(); }}><Input aria-label="ชื่อระบบอัตโนมัติใหม่" placeholder="ชื่อระบบอัตโนมัติใหม่" maxLength={120} value={name} onChange={e => setName(e.target.value)} /><Button type="submit" disabled={busy || !name.trim()}><Plus size={16} />สร้าง</Button></form>}</div></div>
@@ -102,7 +103,7 @@ export function FlowsPanel({ data, notify }: PanelProps) {
       <h3>{flow.name}</h3><p>{triggerSummary(flow.trigger)}</p>
       <small>รอเวลา {flow.executions.waiting || 0} · เสร็จ {flow.executions.completed || 0} · ยกเลิก {flow.executions.cancelled || 0}{flow.executions.failed ? ` · ล้มเหลว ${flow.executions.failed}` : ""} · แก้ไข {date(flow.updatedAt)}</small>
     </button>)}</div>
-  </>;
+  </div>;
 }
 
 function FlowEditor({ id, data, admin, notify, back }: { id: string; data: PanelProps["data"]; admin: boolean; notify: (text: string) => void; back: () => void }) {
@@ -129,7 +130,7 @@ function FlowEditor({ id, data, admin, notify, back }: { id: string; data: Panel
         {dirty && <small className="flow-hint">มีการแก้ไขที่ยังไม่บันทึก</small>}
       </div>}
     </Card>
-    <Card className="flow-section"><h2>1. เริ่มทำงานเมื่อ</h2><TriggerEditor value={draft.trigger} disabled={ctx.disabled} onChange={trigger => edit({ ...draft, trigger })} /></Card>
+    <section className="rrs-flow-map" aria-label="ภาพรวมลำดับงาน"><h3>ภาพรวม Flow ฉบับร่าง</h3><ol><li><div className="rrs-flow-node">{triggerSummary(draft.trigger)}<small>จุดเริ่มต้น</small></div></li>{draft.conditions.length>0&&<li><span aria-hidden="true">→</span><div className="rrs-flow-node">ตรวจ {draft.conditions.length} เงื่อนไข<small>ต้องผ่านทุกเงื่อนไข</small></div></li>}{draft.steps.map((step,index)=><li key={index}><span aria-hidden="true">→</span><div className="rrs-flow-node">{stepNames[step.type]}<small>ขั้นตอน {index+1}{step.type==='branch'?' · แยกตามเงื่อนไข':''}</small></div></li>)}<li><span aria-hidden="true">→</span><div className="rrs-flow-node">จบการทำงาน</div></li></ol><p className="flow-hint">แก้ไขเงื่อนไขและรายละเอียดของแต่ละขั้นตอนด้านล่าง ภาพรวมจะเปลี่ยนตามฉบับร่าง</p></section><Card className="flow-section"><h2>1. เริ่มทำงานเมื่อ</h2><TriggerEditor value={draft.trigger} disabled={ctx.disabled} onChange={trigger => edit({ ...draft, trigger })} /></Card>
     <Card className="flow-section"><h2>2. เงื่อนไขเริ่มต้น</h2><p className="flow-hint">ทุกเงื่อนไขต้องผ่าน ลูกค้าที่ขอหยุดรับข้อความจะไม่ถูกเริ่มเสมอ</p>
       {draft.conditions.map((condition, index) => <div className="flow-step" key={index}><ConditionEditor value={condition} ctx={ctx} onChange={next => edit({ ...draft, conditions: draft.conditions.map((c, i) => i === index ? next : c) })} />{!ctx.disabled && <Button variant="ghost" size="sm" onClick={() => edit({ ...draft, conditions: draft.conditions.filter((_, i) => i !== index) })}><Trash2 size={14} />ลบเงื่อนไข</Button>}</div>)}
       {!ctx.disabled && draft.conditions.length < 10 && <Button variant="secondary" size="sm" onClick={() => edit({ ...draft, conditions: [...draft.conditions, defaultCondition("market")] })}><Plus size={14} />เพิ่มเงื่อนไข</Button>}

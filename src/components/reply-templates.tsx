@@ -1,4 +1,5 @@
 "use client";
+import { FeatureHeading } from "./specialist-workspace";
 
 import { useCallback, useEffect, useState } from "react";
 import { Bookmark, Copy, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
@@ -24,7 +25,7 @@ export function ReplyTemplatesPanel({ data, notify }: PanelProps) {
   useEffect(() => { void load(); }, [load]);
   const filtered = items.filter(item => `${item.title} ${item.content} ${item.shortcut} ${item.category}`.toLowerCase().includes(search.toLowerCase()));
   const admin = data.user.role === "Admin";
-  return <>
+  return <div className="rrs-specialist"><FeatureHeading eyebrow="TEAM LIBRARY" title="ข้อความสำเร็จรูป" description="ค้นหาคำตอบที่ทีมตรวจแล้ว เติมในร่าง และปรับให้เหมาะกับลูกค้าก่อนส่ง"/>
     <div className="section-toolbar">
       <div className="search-input"><Search size={17} /><Input placeholder="ค้นหาชื่อ ข้อความ หรือคำลัด…" value={search} onChange={e => setSearch(e.target.value)} /></div>
       <div className="button-row"><Button variant="secondary" size="sm" onClick={load} disabled={loading}><RefreshCw size={15} />รีเฟรช</Button>{admin && <Button onClick={() => setEditing("new")}><Plus size={16} />สร้างข้อความ</Button>}</div>
@@ -38,7 +39,7 @@ export function ReplyTemplatesPanel({ data, notify }: PanelProps) {
     </Card>)}</div>}
     {!loading && !filtered.length && <Card><Empty title={search ? "ไม่พบข้อความที่ค้นหา" : "ยังไม่มีข้อความสำเร็จรูป"} detail={admin ? "สร้างข้อความที่ใช้บ่อย เพื่อให้ทีมเลือกเติมในร่างคำตอบ" : "ผู้ดูแลระบบสามารถเพิ่มข้อความสำหรับทีมได้"} /></Card>}
     {editing && <Modal title={editing === "new" ? "สร้างข้อความสำเร็จรูป" : "แก้ไขข้อความสำเร็จรูป"} close={() => setEditing(null)}><TemplateEditor item={editing === "new" ? null : editing} close={() => setEditing(null)} onSaved={async () => { setEditing(null); await load(); notify("บันทึกข้อความสำเร็จรูปแล้ว"); }} /></Modal>}
-  </>;
+  </div>;
 }
 
 function TemplateEditor({ item, close, onSaved }: { item: ReplyTemplate | null; close: () => void; onSaved: () => Promise<void> }) {

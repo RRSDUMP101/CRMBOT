@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, date, statusNames, type Detail } from './data';
 import { Button, Card, Field, Input, Select, Textarea } from './ui';
 import styles from './operator-workspace.module.css';
+import { ArrowLeft, Inbox, AtSign, MessageSquare, Users, SlidersHorizontal, RefreshCw, ShieldCheck } from 'lucide-react';
 
 type Item = Record<string, any>;
 type Snapshot = { user: { id: string; name: string; role: string }; views: Item[]; teams: Item[]; definitions: Item[]; members: Item[]; templates: Item[]; assets: Item[]; mentions: Item[] };
@@ -27,24 +28,40 @@ function useAction(refresh?: () => Promise<void>) {
   return { busy, error, done, run, setError };
 }
 
-export function OperatorWorkspace() {
+export function OperatorWorkspace({ embedded = false }: { embedded?: boolean }) {
   const [data, setData] = useState<Snapshot | null>(null), [error, setError] = useState(''), [tab, setTab] = useState('inbox');
   const [selected, setSelected] = useState('');
+  useEffect(() => {
+    const sync = () => { const next = new URLSearchParams(window.location.search).get('tab'); setTab(next && ['inbox', 'mentions', 'templates', 'teams', 'fields'].includes(next) ? next : 'inbox'); };
+    sync(); window.addEventListener('popstate', sync); return () => window.removeEventListener('popstate', sync);
+  }, []);
+  const navigate = (next: string) => { setTab(next); const url = new URL(window.location.href); url.searchParams.set('tab', next); window.history.pushState(null, '', url); };
   const load = useCallback(async () => { const next = await api<Snapshot>(base + 'snapshot'); setData(next); setError(''); }, []);
   useEffect(() => { void load().catch(e => setError(e.message)); }, [load]);
   if (!data) return <main className={styles.page}><Card className={styles.section}><h1>พื้นที่ทำงานเจ้าหน้าที่</h1><ErrorText text={error} />{error ? <a href="/">เข้าสู่ระบบ</a> : <p role="status">กำลังโหลด…</p>}</Card></main>;
   const admin = data.user.role === 'Admin';
-  return <main className={styles.page}>
-    <header className={styles.header}><div><a href="/">← กลับ RRS Connect</a><h1>พื้นที่ทำงานเจ้าหน้าที่</h1><p>มุมมองส่วนตัว งานร่วมกัน และการแบ่งงานของทีม</p></div><span>{data.user.name} · {data.user.role}</span></header>
-    <nav className={styles.tabs} aria-label="งานเจ้าหน้าที่">
-      {[['inbox', 'กล่องข้อความ'], ['mentions', `กล่าวถึงฉัน (${data.mentions.filter(m => !m.seenAt).length})`], ['templates', 'ข้อความและสื่อ'], ...(admin ? [['teams', 'ทีมและเวลาทำการ'], ['fields', 'ฟิลด์ข้อมูล']] : [])].map(([key, label]) => <Button key={key} variant={tab === key ? 'default' : 'secondary'} onClick={() => setTab(key)}>{label}</Button>)}
-      <Button variant="ghost" onClick={() => void load().catch(e => setError(e.message))}>รีเฟรช</Button>
-    </nav><ErrorText text={error} />
+  const navigation = [{ key: 'inbox', label: 'กล่องข้อความ', icon: Inbox }, { key: 'mentions', label: 'กล่าวถึงฉัน', icon: AtSign }, { key: 'templates', label: 'ข้อความและสื่อ', icon: MessageSquare }, ...(admin ? [{ key: 'teams', label: 'ทีมและเวลาทำการ', icon: Users }, { key: 'fields', label: 'ฟิลด์ข้อมูล', icon: SlidersHorizontal }] : [])];
+  const currentNav = navigation.find(item => item.key === tab) || navigation[0];
+  const descriptions: Record<string, string> = { inbox: 'ค้นหาแชต บันทึกมุมมอง และดูแลลูกค้าร่วมกับทีม', mentions: 'ติดตามบันทึกภายในที่เพื่อนร่วมทีมกล่าวถึงคุณ', templates: 'ข้อความสำเร็จรูปและไฟล์ที่พร้อมใช้สำหรับทีม', teams: 'จัดสมาชิก ความจุ และเวลาทำการก่อนแบ่งงานอัตโนมัติ', fields: 'จัดข้อมูลลูกค้าและข้อมูลที่ต้องกรอกก่อนจบงาน' };
+  return <main className={`${styles.page} ${embedded ? styles.embedded : ''}`}>
+    <a className={styles.skip} href="#operator-content">ข้ามไปเนื้อหา</a>
+    <aside className={styles.rail}>
+      <a href="/" className={styles.brand} aria-label="RRS CRM หน้าหลัก"><i aria-hidden="true" /><span><strong>RRS</strong><small>CRM • TEAM WORKSPACE</small></span></a>
+      <a href="/" className={styles.back}><ArrowLeft size={18} /> กลับหน้าหลัก</a>
+      <small className={styles.navLabel}>พื้นที่ทำงาน</small>
+      <nav className={styles.tabs} aria-label="งานเจ้าหน้าที่">{navigation.map(({ key, label, icon: Icon }) => <button key={key} aria-current={tab === key ? 'page' : undefined} onClick={() => navigate(key)}><Icon size={20} /><span>{label}</span>{key === 'mentions' && data.mentions.some(m => !m.seenAt) && <b>{data.mentions.filter(m => !m.seenAt).length}</b>}</button>)}</nav>
+      <div className={styles.identity}><span className={styles.avatar}>{data.user.name.slice(0, 1)}</span><div><strong>{data.user.name}</strong><small>{admin ? 'ผู้ดูแลระบบ' : 'เจ้าหน้าที่'}</small></div><ShieldCheck size={17} /></div>
+    </aside>
+    <div className={styles.body}>
+    <header className={styles.header}><div><span className={styles.eyebrow}>RRS / พื้นที่ทำงานทีม</span><h1>{currentNav.label}</h1><p>{descriptions[currentNav.key]}</p></div><Button variant="secondary" onClick={() => void load().catch(e => setError(e.message))}><RefreshCw size={16} /> รีเฟรชข้อมูล</Button></header>
+    <div id="operator-content" className={styles.content}><ErrorText text={error} />
+    {!admin && ['teams', 'fields'].includes(tab) && <Card className={styles.section}><h2>สำหรับผู้ดูแลระบบ</h2><p>บัญชีนี้ไม่มีสิทธิ์จัดการทีมและฟิลด์ข้อมูล</p><Button onClick={() => navigate('inbox')}>กลับกล่องข้อความ</Button></Card>}
     {tab === 'inbox' && <OperatorInbox data={data} refresh={load} selected={selected} select={setSelected} />}
     {tab === 'mentions' && <Card className={styles.section}><h2>บันทึกที่กล่าวถึงฉัน</h2>{!data.mentions.length && <p>ยังไม่มีการกล่าวถึง</p>}{data.mentions.map(m => <article className={styles.listRow} key={m.id}><div><strong>{m.seenAt ? 'อ่านแล้ว' : 'ใหม่'}</strong><p className={styles.pre}>{m.content}</p><small>{date(m.createdAt)}</small></div><Button onClick={async () => { try { await api(base + 'mentions/' + m.id, {}); setSelected(m.conversationId); setTab('inbox'); await load(); } catch (e) { setError((e as Error).message); } }}>เปิดบทสนทนา</Button></article>)}</Card>}
     {tab === 'templates' && <TemplateLibrary data={data} refresh={load} />}
     {tab === 'teams' && admin && <TeamManager data={data} refresh={load} />}
     {tab === 'fields' && admin && <FieldManager data={data} refresh={load} />}
+    </div></div>
   </main>;
 }
 
@@ -66,12 +83,14 @@ function OperatorInbox({ data, refresh, selected, select }: { data: Snapshot; re
       <h2>ค้นหาและกรอง</h2><Field label="มุมมองที่บันทึก"><Select value={saved} onChange={e => apply(e.target.value)}><option value="">เลือกมุมมอง</option>{data.views.map(v => <option key={v.id} value={v.id}>{v.name} · {v.visibility === 'personal' ? 'ส่วนตัว' : 'ทีม'}</option>)}</Select></Field>
       <Field label="กล่องข้อความ"><Select value={filters.view || 'all'} onChange={e => put('view', e.target.value)}><Options values={queues} /></Select></Field>
       <Field label="ค้นหาชื่อ เบอร์ หรือข้อความ"><Input value={filters.q || ''} onChange={e => put('q', e.target.value)} /></Field>
-      <div className={styles.two}><Field label="ผู้รับผิดชอบ"><Select value={filters.assignee || ''} onChange={e => put('assignee', e.target.value)}><option value="">ทุกคน</option><option value="me">ฉัน</option><option value="unassigned">ยังไม่มอบหมาย</option>{data.members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</Select></Field><Field label="สถานะ"><Select value={filters.status || ''} onChange={e => put('status', e.target.value)}><option value="">ทุกสถานะ</option><Options values={statusNames} /></Select></Field></div>
+      <details className={styles.filterDetails}><summary>ตัวกรองเพิ่มเติม{Object.entries(filters).some(([key, value]) => !['view', 'q'].includes(key) && value) ? ' • ใช้งานอยู่' : ''}</summary><div className={styles.two}><Field label="ผู้รับผิดชอบ"><Select value={filters.assignee || ''} onChange={e => put('assignee', e.target.value)}><option value="">ทุกคน</option><option value="me">ฉัน</option><option value="unassigned">ยังไม่มอบหมาย</option>{data.members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</Select></Field><Field label="สถานะ"><Select value={filters.status || ''} onChange={e => put('status', e.target.value)}><option value="">ทุกสถานะ</option><Options values={statusNames} /></Select></Field></div>
       <div className={styles.two}><Field label="แท็ก"><Input value={filters.tag || ''} onChange={e => put('tag', e.target.value)} /></Field><Field label="การอ่าน"><Select value={filters.unread || ''} onChange={e => put('unread', e.target.value)}><option value="">ทั้งหมด</option><option value="true">ยังไม่อ่าน</option><option value="false">อ่านแล้ว</option></Select></Field></div>
       <Field label="ช่องทาง"><Select value={filters.provider || ''} onChange={e => { put('provider', e.target.value); setFilters(old => ({ ...old, account: '' })); }}><Options values={providers} /></Select></Field>
       {!!filters.provider && filters.provider !== 'web' && <Field label="รหัสบัญชีช่องทาง"><Input value={filters.account || ''} onChange={e => put('account', e.target.value)} /></Field>}
+      <Button variant="ghost" onClick={() => { setFilters({ view: filters.view || 'all', q: filters.q || '' }); setSaved(''); }}>ล้างตัวกรองเพิ่มเติม</Button></details>
+      <details className={styles.filterDetails}><summary>บันทึกมุมมองนี้</summary>
       <form onSubmit={e => { e.preventDefault(); const old = data.views.find(x => x.id === saved); void action.run(async () => { const v = await api<Item>(base + 'views', { ...(old ? { id: old.id, version: old.version } : {}), name, visibility, filters }); setSaved(v.id); }); }}><Field label="ชื่อมุมมอง"><Input required maxLength={80} value={name} onChange={e => setName(e.target.value)} /></Field><Field label="ขอบเขต"><Select value={visibility} onChange={e => setVisibility(e.target.value)}><option value="personal">ส่วนตัว</option>{data.user.role === 'Admin' && <option value="organization">ทุกคนในองค์กร</option>}</Select></Field><div className={styles.actions}><Button type="submit" disabled={action.busy}>บันทึกมุมมอง{saved ? 'เดิม' : 'ใหม่'}</Button>{saved && <Button variant="ghost" type="button" onClick={() => void action.run(async () => { const old = data.views.find(x => x.id === saved)!; await api(base + 'views', { id: old.id, version: old.version, remove: true }); setSaved(''); setName(''); }, 'ลบมุมมองแล้ว')}>ลบ</Button>}</div></form>
-      <ErrorText text={action.error} /><p role="status">{action.done}</p>
+      </details><ErrorText text={action.error} /><p role="status">{action.done}</p>
     </Card><section className={styles.conversationList} aria-label="รายการบทสนทนา"><div className={styles.listHeading}><strong>{result.total} บทสนทนา</strong><Button variant="ghost" disabled={loading} onClick={() => void search()}>รีเฟรช</Button></div>{result.items.map(row => <button className={`${styles.conversationButton} ${selected === row.id ? styles.selected : ''}`} key={row.id} onClick={() => select(row.id)}><strong>{row.leadName || 'ลูกค้ายังไม่ระบุชื่อ'}</strong><span>{providers[row.provider as keyof typeof providers] || row.provider} · {statusNames[row.status]} · {row.unreadCount} ยังไม่อ่าน</span><p>{row.lastMessage || 'ยังไม่มีข้อความ'}</p></button>)}{!loading && !result.items.length && <p className={styles.empty}>ไม่พบบทสนทนาตามตัวกรอง</p>}{result.nextCursor && <Button disabled={loading} variant="secondary" onClick={() => void search(result.nextCursor!)}>ดูเพิ่มเติม</Button>}</section></aside>
     <section className={styles.conversationPane}>{selected ? <ConversationPanel key={selected} id={selected} data={data} refresh={refresh} onChange={() => search()} /> : <Card className={`${styles.section} ${styles.empty}`}><h2>เลือกบทสนทนา</h2><p>ร่างข้อความ ฟิลด์ และบันทึกภายในอยู่ในพื้นที่นี้</p></Card>}</section>
   </div>;

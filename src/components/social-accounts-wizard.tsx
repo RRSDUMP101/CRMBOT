@@ -94,7 +94,7 @@ export function SocialAccountsWizard(){
   }
 
   const expiring=overview?.expiring??[];
-  return <section ref={sectionRef} id="social-accounts" aria-label="เชื่อมต่อช่องทาง" className="social-wizard">
+  return <section ref={sectionRef} id="social-accounts" aria-label="เชื่อมต่อช่องทาง" className="social-wizard rrs-account-onboarding">
     <div className="card-heading"><h2>เชื่อมต่อช่องทาง</h2><Button size="sm" disabled={busy} onClick={()=>{setSelection({kind:'new',provider:null});setStep(1);setProblem(null);setNotice('');}}>เพิ่มช่องทาง</Button></div>
     <p className="helper-text">เชื่อมเพจ บัญชี และเบอร์ธุรกิจทีละขั้น ระบบตรวจทุกขั้นก่อน และไม่ส่งข้อความถึงลูกค้าระหว่างเชื่อมต่อ</p>
     {expiring.map(item=><div key={item.id} className="alert alert-warning" role="status"><span><strong>{PROVIDERS[item.provider]} · {item.displayName} ({item.maskedIdentity})</strong> {item.expired?'สิทธิ์เชื่อมต่อหมดอายุแล้ว':`สิทธิ์เชื่อมต่อจะหมดอายุใน ${item.daysLeft} วัน`} — เชื่อมต่อบัญชีนี้ใหม่</span></div>)}
