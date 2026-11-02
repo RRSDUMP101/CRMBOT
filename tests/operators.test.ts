@@ -1,10 +1,12 @@
 /** SQLite/D1 transaction planner tests. Synthetic tenants only; no provider traffic. */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { before, after, test } from 'node:test';
 import { database, closeDatabase, transaction } from '../src/lib/db';
 import { ApiError, hashToken, type Staff } from '../src/lib/auth';
-import { addInternalNote, heartbeat, linkContactIdentity, markMentionSeen, mergeContacts, operatorConversation, operatorSnapshot, previewTemplate, routeWaitingConversation, saveDraft, saveFieldDefinition, saveFieldValue, saveOperatorTemplate, saveTeam, saveView, validateRequiredFields, viewInbox, withinHours } from '../src/lib/operators';
+import { addInternalNote, heartbeat, linkContactIdentity, markMentionSeen, mergeContacts, unmergeContacts, operatorConversation, operatorSnapshot, previewTemplate, routeWaitingConversation, saveDraft, saveFieldDefinition, saveFieldValue, saveOperatorTemplate, saveTeam, saveView, validateRequiredFields, viewInbox, withinHours } from '../src/lib/operators';
 import { downloadOperatorAsset, uploadOperatorAsset } from '../src/lib/operator-assets';
 import { GET, POST } from '../src/app/api/admin/operators/[...path]/route';
 
@@ -114,6 +116,49 @@ test('F03 explicit merge is admin-only, audited, non-destructive, same market an
   assert.equal((await database.query('SELECT lead_id FROM conversations WHERE id=$1', [a.id])).rows[0].lead_id, a.leadId);
   assert.equal((await database.query("SELECT count(*) AS n FROM audit_events WHERE org_id=$1 AND action='operator.contact.merge'", [f.org])).rows[0].n, 1);
   await assert.rejects(mergeContacts(f.admin, { sourceId: b.leadId, targetId: a.leadId, reason: 'cycle' }), rejected(409));
+});
+
+test('F03 revision migration preserves existing links and gives rolling old writers fresh revisions', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); CREATE TABLE operator_contact_links(org_id TEXT,source_lead_id TEXT,canonical_lead_id TEXT,reason TEXT,PRIMARY KEY(org_id,source_lead_id)); INSERT INTO operator_contact_links VALUES('o','a','b','original');");
+    db.exec(readFileSync('migrations/d1/091_contact_link_revision.sql', 'utf8'));
+    const first = db.prepare('SELECT * FROM operator_contact_links').get()!;
+    assert.equal(first.reason, 'original'); assert.equal(first.canonical_lead_id, 'b'); assert.match(String(first.revision), /^[a-f0-9]{32}$/);
+    db.exec("INSERT INTO operator_contact_links(org_id,source_lead_id,canonical_lead_id,reason) VALUES('o','c','b','old writer');");
+    const second = db.prepare("SELECT revision FROM operator_contact_links WHERE source_lead_id='c'").get()!;
+    assert.match(String(second.revision), /^[a-f0-9]{32}$/); assert.notEqual(first.revision, second.revision);
+  } finally { db.close(); }
+});
+
+test('F03 undo preserves source data and consent, audits once and fences stale re-linked groups', async () => {
+  const f = await fixture(), a = await chat(f), b = await chat(f), sibling = await chat(f), foreign = await fixture();
+  await database.query("UPDATE leads SET contact_consent_at='2026-01-01T00:00:00Z' WHERE id=$1", [a.leadId]);
+  await linkContactIdentity(f.admin, { leadId: a.leadId, provider: 'line', accountId: 'account', remoteId: 'remote', reason: 'verified' });
+  const before = (await database.query('SELECT * FROM leads WHERE org_id=$1 ORDER BY id', [f.org])).rows;
+  await mergeContacts(f.admin, { sourceId: a.leadId, targetId: b.leadId, reason: 'verified' });
+  await mergeContacts(f.admin, { sourceId: sibling.leadId, targetId: b.leadId, reason: 'verified sibling' });
+  const link = (await operatorConversation(f.admin, a.id)).contactGroup.links.find(x => x.sourceLeadId === a.leadId)!;
+  const body = { sourceId: a.leadId, targetId: b.leadId, revision: link.revision, reason: 'incorrect grouping' };
+  assert.equal((await operatorConversation(f.a, a.id)).contactGroup.links.length, 0);
+  await assert.rejects(unmergeContacts(f.a, body), rejected(403));
+  await assert.rejects(unmergeContacts(foreign.admin, body), rejected(404));
+  await assert.rejects(unmergeContacts(f.admin, { ...body, reason: '' }), rejected(400));
+  await assert.rejects(unmergeContacts(f.admin, { ...body, revision: '0'.repeat(32) }), rejected(409));
+  const outcomes = await Promise.all([unmergeContacts(f.admin, body), unmergeContacts(f.admin, body)]);
+  assert.equal(outcomes.filter(x => x.alreadyUnlinked).length, 1);
+  assert.equal((await operatorConversation(f.admin, a.id)).contactGroup.contacts.length, 1);
+  assert.equal((await operatorConversation(f.admin, b.id)).contactGroup.contacts.length, 2);
+  assert.equal((await operatorConversation(f.admin, a.id)).contactGroup.identities.length, 1);
+  assert.deepEqual((await database.query('SELECT * FROM leads WHERE org_id=$1 ORDER BY id', [f.org])).rows, before);
+  assert.equal((await database.query('SELECT lead_id FROM conversations WHERE id=$1', [a.id])).rows[0].lead_id, a.leadId);
+  assert.equal((await database.query("SELECT count(*) AS n FROM audit_events WHERE org_id=$1 AND action='operator.contact.unmerge'", [f.org])).rows[0].n, 1);
+  await mergeContacts(f.admin, { sourceId: a.leadId, targetId: b.leadId, reason: 'new reviewed grouping' });
+  await assert.rejects(unmergeContacts(f.admin, body), rejected(409));
+  const fresh = (await operatorConversation(f.admin, a.id)).contactGroup.links.find(x => x.sourceLeadId === a.leadId)!;
+  assert.notEqual(fresh.revision, link.revision);
+  await database.query('UPDATE members SET active=0 WHERE org_id=$1 AND id=$2', [f.org, f.admin.id]);
+  await assert.rejects(unmergeContacts(f.admin, { ...body, revision: fresh.revision }), rejected(403));
 });
 
 test('F03 explicit identity never crosses provider/account keys or rebinds another contact', async () => {

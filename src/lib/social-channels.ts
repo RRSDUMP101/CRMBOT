@@ -51,8 +51,13 @@ export function socialVerificationReady(control:Row|undefined,config:SocialChann
   const fp=socialConfigFingerprint(config);
   return !!control?.verified_at&&control.verification_fingerprint===fp&&Date.parse(control.verification_expires_at)>Date.now();
 }
+/** The Instagram adapter accepts exact messaging_seen/read.mid evidence;
+ * Messenger delivery/watermark shapes and submission/echo never prove seen. */
+export function controlledTestStatusPassed(provider:SocialProvider,status:string){
+  return (provider==='line'?['submitted','sent','delivered','read']:provider==='instagram'?['read']:['delivered','read']).includes(status);
+}
 async function markTestPassed(c:Executor,config:SocialChannelConfig,messageId:string,status:string){
-  if(!(config.provider==='line'?['submitted','sent','delivered','read']:['delivered','read']).includes(status))return;
+  if(!controlledTestStatusPassed(config.provider,status))return;
   const control=(await c.query('SELECT * FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3',[config.orgId,config.provider,config.accountId])).rows[0];
   const command=(await c.query('SELECT remote_id,control_epoch,attempt_id FROM social_outbound_commands WHERE org_id=$1 AND message_id=$2',[config.orgId,messageId])).rows[0];
   if(control?.send_mode!=='test'||control.emergency_stop||!control.send_enabled||!command?.attempt_id||command.control_epoch!==control.epoch||command.remote_id!==control.test_recipient||!socialVerificationReady(control,config))return;
@@ -174,9 +179,11 @@ function normalize(payload: Record<string,any>, config: SocialChannelConfig): Ev
           if(config.provider==='instagram'&&m.is_deleted===true){result.push({id:'unsend:'+mid+':'+remote,kind:'unsend',remote,mid,at});continue;}
           result.push({id:'message:'+mid,kind:'message',remote,mid,at,echo,text:String(m.text || (config.provider==='instagram'?'[ไฟล์แนบ Instagram]':'[ไฟล์แนบ Facebook]')).slice(0,15000),messageType:typeof m.text === 'string' ? 'text' : String(m.attachments?.[0]?.type || 'attachment').slice(0,80),metadata:messageMetadata(m),attachments:attachmentsFor(config.provider,m,mid)});
         } else if(config.provider==='instagram') {
-          // Facebook Login IG receipt contracts vary by API version. Keep signed
-          // evidence, but do not invent delivery/read success from a FB shape.
-          result.push({id:digest(JSON.stringify(e)),kind:'ignored',remote,at,metadata:{receiptUnsupported:!!(e.read||e.delivery)}});
+          // Meta's Instagram webhook example maps messaging_seen to read.mid.
+          // Match only that exact message; never expand a Messenger watermark
+          // or synthesize delivery from an echo/HTTP response. See docs/instagram-receipts.md.
+          if(e.read?.mid!==undefined){const mid=identifier(e.read.mid);result.push({id:'seen:'+digest(JSON.stringify([remote,mid])),kind:'receipt',remote,mid,at,status:'read'});}
+          else result.push({id:digest(JSON.stringify(e)),kind:'ignored',remote,at,metadata:{receiptUnsupported:!!(e.read||e.delivery)}});
         } else if(e.delivery?.mids) {
           for(const value of array(e.delivery.mids)) {const mid=identifier(value);result.push({id:`receipt:${mid}:delivered:${e.delivery.watermark || e.timestamp}`,kind:'receipt',remote,mid,at,status:'delivered'});}
         } else if(e.read?.watermark) {
@@ -202,10 +209,17 @@ async function createIdentity(c: Executor, config: SocialChannelConfig, event: E
 }
 async function updateReceipt(c: Executor, config: SocialChannelConfig, event: Event) {
   const args=[config.orgId,config.provider,config.accountId,event.mid!,event.remote,event.status!,deliveryRank[event.status!],event.at,now()];
+  const matched=(await c.query('SELECT * FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[...args.slice(0,4)])).rows[0];
+  if(config.provider==='instagram'&&matched){
+    // A read of inbound content or a different peer is not proof for this reply.
+    if(matched.direction!=='out'||matched.remote_id!==event.remote)return;
+    // An unmatched early receipt may have arrived for another peer. Once the
+    // canonical outbound MID is known, only its exact peer can repair that row.
+    await c.query('DELETE FROM social_delivery_receipts WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4 AND remote_id<>$5',args.slice(0,5));
+  }
   await c.query(`INSERT INTO social_delivery_receipts(org_id,provider,account_id,provider_message_id,remote_id,status,rank,provider_timestamp,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
     ON CONFLICT(org_id,provider,account_id,provider_message_id) DO UPDATE SET status=excluded.status,rank=excluded.rank,updated_at=excluded.updated_at WHERE excluded.rank>=social_delivery_receipts.rank`,args);
   if(await (await import('./reviewed-sale-media')).applyReviewedSaleReceipt(c,config,event))return;
-  const matched=(await c.query('SELECT * FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND provider_message_id=$4',[...args.slice(0,4)])).rows[0];
   if(matched && matched.direction === 'out' && (!event.remote || event.remote === matched.remote_id) && deliveryRank[matched.delivery_status] <= deliveryRank[event.status!]) {
     await c.query('UPDATE social_message_provenance SET delivery_status=$3 WHERE org_id=$1 AND message_id=$2',[config.orgId,matched.message_id,event.status!]);
     await c.query('UPDATE social_outbound_commands SET status=$3,updated_at=$4 WHERE org_id=$1 AND message_id=$2',[config.orgId,matched.message_id,event.status!,now()]);

@@ -15,6 +15,7 @@ class Element {
   replaceChildren(){for(const child of this.children)child.parent=null;this.children=[];}
   remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);this.parent=null;this.removed=true;}
   focus(){}
+  click(){return this.onclick?.();}
   querySelector(selector:string):Element|null {
     if(selector==='[type=submit]')return this.elements.submit||null;
     for(const child of this.children){if(selector.startsWith('.')&&child.className.split(' ').includes(selector.slice(1)))return child;const found=child.querySelector(selector);if(found)return found;}return null;
@@ -32,19 +33,35 @@ function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>
 
 function runtime(handler:(request:RequestRecord)=>Promise<Response>|Response) {
   const nodes=new Map<string,Element>();
-  for(const id of ['title','greeting','notice','error-text','error','retry','close','status','handoff','mode','messages','send','text','quick','composer','contact','contact-open','contact-cancel']){const node=new Element();node.id=id;nodes.set(id,node);}
+  for(const id of ['title','greeting','notice','error-text','error','retry','close','status','handoff','mode','messages','send','text','quick','composer','contact','contact-open','contact-cancel','file-tools','file','file-name','file-send']){const node=new Element();node.id=id;nodes.set(id,node);}
   for(const key of ['name','phone','email','consent','submit'])nodes.get('contact')!.elements[key]=new Element();
   const find=(id:string,element:Element):Element|null=>{if(element.id===id&&!element.removed)return element;for(const child of element.children){const result=find(id,child);if(result)return result;}return null;};
-  const document={documentElement:new Element(),referrer:'https://allowed.example/',addEventListener(){},querySelectorAll(){return [];},createElement(){return new Element();},getElementById(id:string){const fixed=nodes.get(id);if(fixed&&!fixed.removed)return fixed;for(const node of nodes.values()){const result=find(id,node);if(result)return result;}return null;}};
+  const anchors:Element[]=[];
+  const document={documentElement:new Element(),referrer:'https://allowed.example/',addEventListener(){},querySelectorAll(){return [];},createElement(tag?:string){const el=new Element();if(tag==='a')anchors.push(el);return el;},getElementById(id:string){const fixed=nodes.get(id);if(fixed&&!fixed.removed)return fixed;for(const node of nodes.values()){const result=find(id,node);if(result)return result;}return null;}};
   const requests:RequestRecord[]=[];const intervals:Array<()=>void>=[];
   const context=createContext({document,window:{parent:{postMessage(){}}},crypto:{randomUUID},AbortController,TextDecoder,URL,console,
-    setInterval(fn:()=>void){intervals.push(fn);return intervals.length;},
+    setInterval(fn:()=>void){intervals.push(fn);return intervals.length;},setTimeout(fn:()=>void){fn();},
     fetch(path:string,options:RequestInit={}){const request={path,options};requests.push(request);return handler(request);}
   });
   const html=widgetDocument({title:'RRS',greeting:'สวัสดี',accentColor:'#24bfa6',position:'right',enabled:true});
   new Script(html.match(/<script>([\s\S]*)<\/script>/)![1]).runInContext(context);
-  return {nodes,requests,poll(){intervals[0]();},send(text:string){nodes.get('text')!.value=text;nodes.get('composer')!.onsubmit!({preventDefault(){}});}};
+  return {nodes,requests,anchors,poll(){intervals[0]();},send(text:string){nodes.get('text')!.value=text;nodes.get('composer')!.onsubmit!({preventDefault(){}});}};
 }
+
+test('widget file confirmation retries one client id and downloads with its widget cookie context',async()=>{
+ const id=randomUUID(),file={name:'<private>.pdf',type:'application/pdf',size:20};let attempts=0,sent=false;
+ const app=runtime(request=>{
+  if(request.path==='/api/chat')return response({...data(sent?2:1,sent?'waiting_human':'bot_active',sent?[{id:'file-message',role:'user',status:'complete',content:'[file]',webAttachments:[{id,name:file.name,size:20,state:'ready'}]}]:[]),settings:{aiEnabled:false,attachmentsEnabled:true}});
+  assert.equal(new Headers(request.options.headers).get('X-RRS-Widget'),'1');assert.equal(request.options.credentials,'include');assert.equal(request.options.cache,'no-store');
+  if(request.path==='/api/chat/attachments'){assert.equal(request.options.body,file);if(++attempts===1)return response({error:'Synthetic lost response'},503);sent=true;return response({file:{id}},201);}
+  assert.equal(request.path,'/api/chat/attachments/'+id);return new Response('%PDF-synthetic',{headers:{'Content-Type':'application/pdf'}});
+ });
+ await settle();assert.equal(app.nodes.get('file-tools')!.style.display,'block');
+ (app.nodes.get('file') as any).onchange({target:{files:[file],value:'selected'}});assert.equal(app.nodes.get('file-name')!.textContent,file.name);
+ await app.nodes.get('file-send')!.onclick!();assert.equal(app.nodes.get('file-send')!.disabled,false);await app.nodes.get('file-send')!.onclick!();
+ const uploads=app.requests.filter(r=>r.path==='/api/chat/attachments');assert.equal(uploads.length,2);assert.equal(new Headers(uploads[0].options.headers).get('X-Client-Id'),new Headers(uploads[1].options.headers).get('X-Client-Id'));assert.equal(new Headers(uploads[0].options.headers).get('X-File-Name'),encodeURIComponent(file.name));
+ const button=app.nodes.get('messages')!.querySelector('.secondary');assert.ok(button);await button.onclick!();assert.equal(app.anchors.length,1);assert.equal((app.anchors[0] as any).download,file.name);assert.match((app.anchors[0] as any).href,/^blob:/);assert.equal(app.nodes.get('file-send')!.disabled,true);
+});
 
 function streamed() {
   let controller!:ReadableStreamDefaultController<Uint8Array>;

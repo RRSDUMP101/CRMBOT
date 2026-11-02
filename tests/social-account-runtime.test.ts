@@ -171,7 +171,7 @@ test('Instagram Page-token send is once-only, does not infer delivery and ignore
   const f=await fixture(),a=await account(f,'instagram','179333333333');await igInbound(a);await enable(f,a);const id=await command(f,a);let calls=0;
   const transport=(async(url,init)=>{calls++;assert.equal(url,'https://graph.facebook.com/v24.0/me/messages');assert.equal(init?.redirect,'manual');assert.equal(new Headers(init?.headers).get('authorization'),'Bearer '+a.token);assert.deepEqual(JSON.parse(String(init?.body)),{recipient:{id:'66812345678'},message:{text:'synthetic reply'}});return Response.json({recipient_id:'66812345678',message_id:'ig.sent.1'});}) as typeof fetch;
   assert.equal((await dispatchSocialReply(f.org,id,{fetch:transport})).status,'submitted');await dispatchSocialReply(f.org,id,{fetch:transport});assert.equal(calls,1);
-  const input=signed('instagram',{object:'instagram',entry:[{id:a.accountId,messaging:[{sender:{id:'66812345678'},recipient:{id:a.accountId},timestamp:Date.now(),read:{mid:'ig.sent.1',watermark:Date.now()}}]}]});
+  const input=signed('instagram',{object:'instagram',entry:[{id:a.accountId,messaging:[{sender:{id:'66812345678'},recipient:{id:a.accountId},timestamp:Date.now(),read:{watermark:Date.now()}}]}]});
   await ingestRegisteredWebhook('instagram',input.raw,input.headers);
   assert.equal((await database.query('SELECT status FROM social_outbound_commands WHERE id=$1',[id])).rows[0].status,'submitted');
   assert.equal((await database.query('SELECT count(*) AS n FROM social_delivery_receipts WHERE org_id=$1',[f.org])).rows[0].n,0);

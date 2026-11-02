@@ -6,7 +6,7 @@ import {configureMediaArchiveSchedule,checkMediaArchiveSchedule} from '../script
 
 test('minute cron serves each independent automation gate while archive remains disabled',()=>{
   const base={vars:{SOCIAL_MEDIA_ARCHIVE_ENABLED:'false'},triggers:{crons:['15 3 * * *']},d1_databases:[{binding:'DB',database_id:'fixture'}],r2_buckets:[{binding:'BUCKET',bucket_name:'fixture'}],services:[{binding:'SALE_SERVICE',service:'sale-fixture'}]};
-  const gates=[{CRM_BRIDGE_ENABLED:'true',CRM_SALE_SYNC_ENABLED:'true'},{CRM_BRIDGE_ENABLED:'true',CRM_SALE_CONTEXT_ENABLED:'true'},{FLOWS_ENABLED:'true'},{BROADCAST_ENABLED:'true',BROADCAST_RUNNER_ENABLED:'true'},{CRM_PUBLIC_WEBHOOKS_ENABLED:'true',CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED:'true'},{EXTERNAL_CONNECTORS_ENABLED:'true',EXTERNAL_CONNECTOR_RUNNER_ENABLED:'true'}];
+  const gates=[{WEB_CHAT_ATTACHMENTS_ENABLED:'true'},{CRM_BRIDGE_ENABLED:'true',CRM_SALE_SYNC_ENABLED:'true'},{CRM_BRIDGE_ENABLED:'true',CRM_SALE_CONTEXT_ENABLED:'true'},{FLOWS_ENABLED:'true'},{BROADCAST_ENABLED:'true',BROADCAST_RUNNER_ENABLED:'true'},{CRM_PUBLIC_WEBHOOKS_ENABLED:'true',CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED:'true'},{EXTERNAL_CONNECTORS_ENABLED:'true',EXTERNAL_CONNECTOR_RUNNER_ENABLED:'true'}];
   for(const gate of gates){
     const input={...base,vars:{...base.vars,...gate}},configured=configureMediaArchiveSchedule(input);
     assert.deepEqual(configured.triggers.crons,['15 3 * * *','* * * * *']);

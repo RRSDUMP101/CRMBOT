@@ -1,0 +1,11 @@
+# Knowledge website import
+
+Website import accepts one HTTPS page from an exact administrator-configured hostname allowlist. It rejects IP literals (including IPv6 and alternate IPv4 spellings), local DNS names, user information, non-default ports and redirects. It sends no session cookies or authorization and does not cache the result. The existing 10-second and 1 MB limits apply; content becomes an unreviewed draft.
+
+The hostname filter is not the SSRF boundary. Real requests use only Cloudflare Workers global fetch, whose public network rejects private resolved destinations when making the connection. Keep `global_fetch_strictly_public` in every deployment: it additionally prevents same-zone requests from bypassing the public Cloudflare front door. Do not substitute a private service/VPC binding, custom outbound network, resolve override, or a DNS-check-then-fetch implementation. A hostname changing DNS to a private address remains blocked by the network itself.
+
+Local Node refuses website import before any outbound request. Text and file import remain available. Local workerd testing must explicitly use a network service with `allow: ['public']` as the Worker's `globalOutbound`; a development proxy configured to reach private addresses is not an accepted crawler environment. The optional `crawlSource` transport argument is only a trusted synthetic-test seam; the HTTP route does not expose it.
+
+`tests/knowledge-crawl.test.ts` covers hostile canonical URLs, Node refusal, actual workerd request isolation, and a loopback HTTP listener that the public-only network cannot contact but a deliberately private test control can. It also checks the committed deployment flag. Lifecycle tests retain redirect rejection and draft-only persistence. These tests do not claim a live production crawl canary.
+
+Primary transport contracts: [Cloudflare global fetch compatibility](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public), [Cloudflare's public-network SSRF boundary](https://github.com/cloudflare/workerd/discussions/1523), and [global fetch security model](https://blog.cloudflare.com/workers-environment-live-object-bindings/).

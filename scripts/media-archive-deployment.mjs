@@ -5,7 +5,7 @@ const cron='* * * * *';
 // off must never remove the clock for an enabled bridge or another durable runner.
 function needsMinuteSchedule(vars={}){
   const on=key=>vars[key]==='true';
-  return on('SOCIAL_MEDIA_ARCHIVE_ENABLED')||
+  return on('SOCIAL_MEDIA_ARCHIVE_ENABLED')||on('WEB_CHAT_ATTACHMENTS_ENABLED')||
     on('CRM_BRIDGE_ENABLED')&&(on('CRM_SALE_SYNC_ENABLED')||on('CRM_SALE_CONTEXT_ENABLED'))||
     on('FLOWS_ENABLED')||
     on('BROADCAST_ENABLED')&&on('BROADCAST_RUNNER_ENABLED')||

@@ -27,6 +27,11 @@ test('crawl requires exact allowlist and never follows redirect, drafts content 
  await assert.rejects(crawlSource(staff,{url:'https://127.0.0.1/',title:'Bad',scopes:['web']},fetcher));assert.equal(calls,0);
  const result=await crawlSource(staff,{url:'https://docs.example.invalid/',title:'Web',scopes:['web']},fetcher);const source=(result.sources as Record<string,any>[]).find(s=>s.id===result.id)!;assert.equal(source.status,'draft');assert.doesNotMatch(source.content,/SECRET/);
  await assert.rejects(crawlSource(staff,{url:'https://docs.example.invalid/',title:'Redirect',scopes:['web']},(async()=>new Response(null,{status:302,headers:{location:'https://127.0.0.1'}})) as typeof fetch));
+ const before=Number((await database.query('SELECT COUNT(*) AS n FROM knowledge WHERE org_id=$1',[staff.orgId])).rows[0].n);let cancelled=false;
+ const oversized=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new Uint8Array(1_000_001));},cancel(){cancelled=true;}});
+ await assert.rejects(crawlSource(staff,{url:'https://docs.example.invalid/',title:'Too large',scopes:['web']},async()=>new Response(oversized,{headers:{'content-type':'text/plain'}})),/ขีดจำกัด/);
+ assert.equal(cancelled,true);assert.equal(Number((await database.query('SELECT COUNT(*) AS n FROM knowledge WHERE org_id=$1',[staff.orgId])).rows[0].n),before);
+ await assert.rejects(crawlSource(staff,{url:'https://docs.example.invalid/',title:'Local default',scopes:['web']}),/Cloudflare/);
 });
 test('bounded Office parsers extract actual paragraphs/shared strings and reject entities and expansion bombs',async()=>{
  const docx=zipSync({'word/document.xml':strToU8('<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t> world</w:t></w:r></w:p></w:body></w:document>')});assert.equal(await extractKnowledge(docx,'docx'),'Hello world');

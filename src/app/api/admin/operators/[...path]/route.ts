@@ -1,5 +1,5 @@
 import { ApiError, assertOrigin, fields, rateLimit, readJson, requireAdmin, staffSession, uuid } from '@/lib/auth';
-import { addInternalNote, heartbeat, linkContactIdentity, markMentionSeen, mergeContacts, operatorConversation, operatorSnapshot, previewTemplate, routeWaitingConversation, saveDraft, saveFieldDefinition, saveFieldValue, saveOperatorTemplate, saveTeam, saveView, viewInbox } from '@/lib/operators';
+import { addInternalNote, heartbeat, linkContactIdentity, markMentionSeen, mergeContacts, unmergeContacts, operatorConversation, operatorSnapshot, previewTemplate, routeWaitingConversation, saveDraft, saveFieldDefinition, saveFieldValue, saveOperatorTemplate, saveTeam, saveView, viewInbox } from '@/lib/operators';
 import { downloadOperatorAsset, uploadOperatorAsset } from '@/lib/operator-assets';
 
 export const runtime = 'nodejs';
@@ -26,6 +26,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
         if (resource === 'fields') return json(await saveFieldDefinition(staff, body));
         if (resource === 'templates') return json(await saveOperatorTemplate(staff, body));
         if (resource === 'merge') return json(await mergeContacts(staff, body));
+        if (resource === 'unmerge') return json(await unmergeContacts(staff, body));
         if (resource === 'identities') return json(await linkContactIdentity(staff, body));
       }
       if (path.length === 2 && resource === 'mentions') { fields(body, []); return json(await markMentionSeen(staff, uuid(id))); }
