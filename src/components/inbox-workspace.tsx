@@ -13,10 +13,12 @@ import { WhatsAppConsent } from "./whatsapp-consent";
 import {HumanAttachments} from "./human-attachments";
 import {WebChatAttachments} from "./web-chat-attachments";
 
+function ChannelIcon({provider}: {provider?: string}) { const p = provider || "web"; const marks: Record<string, string> = {whatsapp:"☎",line:"LINE",facebook:"f",instagram:"◎",gmail:"M",outlook:"O",email:"✉"}; return <span className={`channel-platform channel-${p}`} title={p} aria-label={p}>{marks[p] || <Globe size={14}/>}</span>; }
 const queues: InboxQueue[] = ["all", "unread", "waiting", "mine", "unassigned", "closed"];
 type Drafts = Record<string, { reply: string; note: string }>;
 
 export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }: PanelProps & { searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
+  const [pageSize, setPageSize] = useState(25);
   const [queue, setQueue] = useState<InboxQueue>("all");
   useEffect(() => {
     if (!searchRequest?.revision) return;
@@ -42,11 +44,11 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
   const putDraft = (value: string) => setDrafts(previous => ({ ...previous, [selected]: { reply: previous[selected]?.reply || "", note: previous[selected]?.note || "", [draftKey]: value } }));
 
   useEffect(() => { const timer = setTimeout(() => setQuery(search.trim()), 250); return () => clearTimeout(timer); }, [search]);
-  const listUrl = useCallback((cursor?: string, limit = 30) => {
+  const listUrl = useCallback((cursor?: string, limit = pageSize) => {
     const params = new URLSearchParams({ view: queue, limit: String(limit) });
     if (query) params.set("q", query); if (owner) params.set("assignee", owner); if (tag.trim()) params.set("tag", tag.trim()); if (status) params.set("status", status); if (cursor) params.set("cursor", cursor);
     return "/api/admin/inbox?" + params;
-  }, [query, queue, owner, tag, status]);
+  }, [query, queue, owner, tag, status, pageSize]);
   const refreshList = useCallback(async (visible = false) => {
     const request = ++listRequest.current; const version = queryVersion.current;
     if (visible) setListLoading(true);
@@ -137,9 +139,9 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
       <div className="desk-queues" role="group" aria-label="คิวบทสนทนา">{queues.map(key => <button key={key} className={queue === key ? "active" : ""} aria-pressed={queue === key} onClick={() => { setQueue(key); setStatus(""); }}><span>{queueNames[key]}</span><b>{result.counts[key] || 0}</b></button>)}</div>
       <div className="desk-search"><Search size={17} /><Input aria-label="ค้นหาบทสนทนา" placeholder="ค้นหาลูกค้าและข้อความ" value={search} onChange={e => setSearch(e.target.value)} /><Button size="icon" variant="ghost" aria-label="ตัวกรองเพิ่มเติม" aria-expanded={filters} onClick={() => setFilters(!filters)}><SlidersHorizontal size={17} /></Button></div>
       {filters && <div className="desk-advanced-filters"><Select aria-label="สถานะบทสนทนา" value={status} onChange={e => setStatus(e.target.value)}><option value="">ทุกสถานะในคิว</option>{Object.entries(statusNames).filter(([key]) => queue === "closed" ? key === "resolved" : key !== "resolved").map(([key, name]) => <option key={key} value={key}>{name}</option>)}</Select><Select aria-label="ผู้รับผิดชอบแชต" value={owner} onChange={e => setOwner(e.target.value)}><option value="">ทุกผู้รับผิดชอบ</option>{data.members.filter(member => member.active !== false).map(member => <option key={member.id} value={member.id}>{member.name}</option>)}</Select><Input aria-label="แท็กที่ต้องการค้นหา" value={tag} onChange={e => setTag(e.target.value)} placeholder="ชื่อแท็กตรงกัน" /><Button variant="ghost" size="sm" onClick={() => { setOwner(""); setTag(""); setStatus(""); setSearch(""); }}>ล้างตัวกรอง</Button></div>}
-      <div className="desk-result-count"><span>{queueNames[queue]} <b>{result.total}</b></span><span>ล่าสุดก่อน</span></div>
+      <div className="desk-result-count"><span>{queueNames[queue]} <b>{result.total}</b></span><label>แสดง <Select aria-label="จำนวนบทสนทนาต่อครั้ง" value={pageSize} onChange={e => setPageSize(Number(e.target.value))}>{[10,25,50,100].map(n => <option key={n} value={n}>{n} รายการ</option>)}</Select></label></div>
       {listError && <div className="desk-inline-error" role="alert">{listError}<button onClick={() => refreshList(true)}>ลองอีกครั้ง</button></div>}
-      <div className="desk-conversations">{listLoading && !result.items.length ? <div className="desk-loading"><span className="spinner" />กำลังโหลดบทสนทนา</div> : result.items.length ? result.items.map(item => <button key={item.id} className={`desk-conversation ${selected === item.id ? "selected" : ""} ${item.unreadCount > 0 ? "unread" : ""}`} onClick={() => selectConversation(item.id)}><span className="desk-avatar"><span>{(item.leadName || "ล").slice(0, 1)}</span><i><Globe size={10} /></i></span><span className="desk-conversation-text"><span className="desk-conversation-top"><strong>{item.leadName || "ลูกค้าใหม่"}</strong><time>{date(item.updatedAt, false)}</time></span><span className="desk-conversation-preview">{item.lastMessage || "ยังไม่มีข้อความ"}</span><span className="desk-conversation-bottom"><Badge tone={item.status === "waiting_human" ? "amber" : item.status === "human_active" ? "blue" : item.status === "resolved" ? "neutral" : "green"}>{statusNames[item.status]}</Badge>{item.unreadCount > 0 && <b className="unread-count" aria-label={`${item.unreadCount} ข้อความยังไม่อ่าน`}>{item.unreadCount}</b>}</span></span></button>) : <Empty title="ไม่มีแชตในคิวนี้" detail="ลองเปลี่ยนคิวหรือตัวกรองเพื่อดูบทสนทนาอื่น" />}{result.nextCursor && <Button className="desk-load-more" variant="ghost" disabled={loadingMore} onClick={more}>{loadingMore ? "กำลังโหลด…" : "โหลดบทสนทนาเพิ่มเติม"}</Button>}</div>
+      <div className="desk-conversations">{listLoading && !result.items.length ? <div className="desk-loading"><span className="spinner" />กำลังโหลดบทสนทนา</div> : result.items.length ? result.items.map(item => <button key={item.id} className={`desk-conversation ${selected === item.id ? "selected" : ""} ${item.unreadCount > 0 ? "unread" : ""}`} onClick={() => selectConversation(item.id)}><span className="desk-avatar"><span>{(item.leadName || "ล").slice(0, 1)}</span><i><ChannelIcon provider={item.provider} /></i></span><span className="desk-conversation-text"><span className="desk-conversation-top"><strong>{item.leadName || "ลูกค้าใหม่"}</strong><time>{date(item.updatedAt, false)}</time></span><span className="desk-conversation-preview">{item.lastMessage || "ยังไม่มีข้อความ"}</span><span className="desk-conversation-bottom"><Badge tone={item.status === "waiting_human" ? "amber" : item.status === "human_active" ? "blue" : item.status === "resolved" ? "neutral" : "green"}>{statusNames[item.status]}</Badge>{item.unreadCount > 0 && <b className="unread-count" aria-label={`${item.unreadCount} ข้อความยังไม่อ่าน`}>{item.unreadCount}</b>}</span></span></button>) : <Empty title="ไม่มีแชตในคิวนี้" detail="ลองเปลี่ยนคิวหรือตัวกรองเพื่อดูบทสนทนาอื่น" />}{result.nextCursor && <Button className="desk-load-more" variant="ghost" disabled={loadingMore} onClick={more}>{loadingMore ? "กำลังโหลด…" : "โหลดบทสนทนาเพิ่มเติม"}</Button>}</div>
       <div className="desk-list-footer"><Globe size={14} /><span>รับข้อความจากช่องทางที่เชื่อมต่อ</span><i className="status-dot" /></div>
     </aside>
     <section className="desk-chat-pane" inert={profileOpen || undefined}>

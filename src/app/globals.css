@@ -681,3 +681,11 @@ button, input, textarea, select { font: inherit; } button, a, summary { -webkit-
  .rrs-workspace .template-picker { position:fixed; inset:78px 12px auto; width:auto; max-width:none; max-height:calc(100dvh - 158px); z-index:72; }
  .rrs-workspace .template-picker-items { max-height:min(300px,calc(100dvh - 315px)); }
 }
+/* Keep the conversation list usable on short desktop windows. */
+.rrs-workspace .desk-inbox{min-height:720px}
+.rrs-workspace .desk-conversations{min-height:320px}
+.rrs-workspace .desk-conversation-preview{font-size:14px;-webkit-line-clamp:2;line-height:1.6}
+.rrs-workspace .desk-conversation-top strong{font-size:15px}
+.desk-result-count label{display:flex;align-items:center;gap:6px}.desk-result-count select{width:auto;min-height:36px;font-size:13px}
+.channel-platform{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#64748b;color:#fff;font:bold 12px Arial}.channel-whatsapp,.channel-line{background:#06a954}.channel-line{font-size:7px}.channel-facebook{background:#1877f2;font-size:18px}.channel-instagram{background:#c13584;font-size:19px}.channel-gmail{background:#c5221f}.channel-outlook{background:#0078d4}.desk-avatar i{width:22px;height:22px}
+@media(max-width:720px){.rrs-workspace .desk-inbox{min-height:650px}}

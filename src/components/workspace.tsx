@@ -27,7 +27,7 @@ const nav = [
   { id: "reports", label: "รายงานและ SLA", short: "รายงาน", icon: ChartColumn, group: "งานประจำวัน" },
   { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark, group: "สื่อสารและแคมเปญ" },
   { id: "broadcast", label: "แคมเปญข้อความ", short: "แคมเปญ", icon: Megaphone, group: "สื่อสารและแคมเปญ" },
-  { id: "wa-templates", label: "เทมเพลต WhatsApp", short: "เทมเพลต", icon: MessageSquare, group: "สื่อสารและแคมเปญ" },
+  { id: "wa-templates", label: "All Inbox", short: "เทมเพลต", icon: MessageSquare, group: "สื่อสารและแคมเปญ" },
   { id: "operators", label: "ทีมและการจัดสรรงาน", short: "ทีม", icon: Users, group: "AI และระบบอัตโนมัติ" },
   { id: "flows", label: "Flow Builder", short: "Flow", icon: Zap, group: "AI และระบบอัตโนมัติ" },
   { id: "knowledge", label: "คลังความรู้", short: "ความรู้", icon: BookOpen, group: "AI และระบบอัตโนมัติ" },
