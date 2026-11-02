@@ -29,12 +29,13 @@ function useAction(refresh?: () => Promise<void>) {
 }
 
 export function OperatorWorkspace({ embedded = false }: { embedded?: boolean }) {
-  const [data, setData] = useState<Snapshot | null>(null), [error, setError] = useState(''), [tab, setTab] = useState('inbox');
+  const defaultTab = embedded ? 'teams' : 'inbox';
+  const [data, setData] = useState<Snapshot | null>(null), [error, setError] = useState(''), [tab, setTab] = useState(defaultTab);
   const [selected, setSelected] = useState('');
   useEffect(() => {
-    const sync = () => { const next = new URLSearchParams(window.location.search).get('tab'); setTab(next && ['inbox', 'mentions', 'templates', 'teams', 'fields'].includes(next) ? next : 'inbox'); };
+    const sync = () => { const next = new URLSearchParams(window.location.search).get('tab'); setTab(next && ['inbox', 'mentions', 'templates', 'teams', 'fields'].includes(next) ? next : defaultTab); };
     sync(); window.addEventListener('popstate', sync); return () => window.removeEventListener('popstate', sync);
-  }, []);
+  }, [defaultTab]);
   const navigate = (next: string) => { setTab(next); const url = new URL(window.location.href); url.searchParams.set('tab', next); window.history.pushState(null, '', url); };
   const load = useCallback(async () => { const next = await api<Snapshot>(base + 'snapshot'); setData(next); setError(''); }, []);
   useEffect(() => { void load().catch(e => setError(e.message)); }, [load]);
