@@ -6,7 +6,7 @@ import { api, type Member } from "./data";
 import { Badge, Button, Card, Empty, Field, Input, Select } from "./ui";
 
 const NO_DATA = "ไม่มีข้อมูล";
-const channelOptions = [["", "ทุกช่องทาง"], ["website", "เว็บไซต์"], ["whatsapp", "WhatsApp"], ["line", "LINE"], ["facebook", "Facebook"], ["legacy", "ประวัติที่นำเข้า"]] as const;
+const channelOptions = [["", "ทุกช่องทาง"], ["website", "เว็บไซต์"], ["whatsapp", "WhatsApp"], ["line", "LINE"], ["facebook", "Facebook"], ["instagram", "Instagram"], ["gmail", "Gmail"], ["outlook", "Outlook"], ["legacy", "ประวัติที่นำเข้า"]] as const;
 const marketOptions = [["", "ทุกตลาด"], ["domestic", "ในประเทศ"], ["export", "ส่งออก"], ["unknown", "ยังไม่ระบุตลาด"]] as const;
 const bangkokDay = (offsetDays = 0) => new Date(Date.now() + 7 * 3600000 - offsetDays * 86400000).toISOString().slice(0, 10);
 const decimal = (value: number, digits = 1) => new Intl.NumberFormat("th-TH", { maximumFractionDigits: digits }).format(value);
@@ -119,13 +119,14 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
           {report.byAgent.length ? <GroupTable labelledBy={ids.agents} firstColumn="ผู้รับผิดชอบ" rows={report.byAgent.map(row => ({ key: row.agentId ?? "unassigned", label: row.name + (row.active ? "" : " (ปิดใช้งาน)"), metrics: row }))} /> : <Empty title={NO_DATA} detail="ยังไม่มีบทสนทนาที่มอบหมายตามตัวกรองนี้" />}
         </Card>
 
+        <Card><h2>ผลงานตามผู้เขียนจริง</h2><p>นับผู้ส่งข้อความที่ระบบบันทึกไว้ แม้เปลี่ยนผู้รับผิดชอบภายหลัง · ไม่นำประวัติที่ไม่ทราบผู้เขียนหรือข้อความอัตโนมัติมาให้เครดิตพนักงาน</p><div className="table-wrap"><table><thead><tr><th>ผู้เขียน</th><th>คำตอบสาธารณะ</th><th>บันทึกภายใน</th><th>บทสนทนา</th></tr></thead><tbody>{report.byAuthor.map(row=><tr key={row.memberId}><th>{row.name}</th><td>{row.replies}</td><td>{row.notes}</td><td>{row.conversations}</td></tr>)}</tbody></table></div></Card>
         <details className="definitions"><summary><CircleHelp size={16} aria-hidden="true" />นิยามตัวชี้วัด</summary><dl className="reports-definitions">{Object.entries(definitionLabels).map(([key, label]) => report.definitions[key] ? <div key={key}><dt>{label}</dt><dd>{report.definitions[key]}</dd></div> : null)}</dl></details>
       </>}
     </section>
   </div>;
 }
 
-const definitionLabels: Record<string, string> = { cohort: "กลุ่มข้อมูล", newConversations: "บทสนทนาใหม่", inboundMessages: "ข้อความจากลูกค้า", firstResponse: "ตอบครั้งแรก", humanFirstResponse: "เจ้าหน้าที่ตอบครั้งแรก", resolution: "เวลาจบการสนทนา", percentiles: "p50 / p90 / เฉลี่ย", handoff: "อัตราส่งต่อ", outcome: "AI และเจ้าหน้าที่", backlog: "งานค้าง", overdue: "รอเกินกำหนด", channel: "ช่องทาง", agent: "ผู้รับผิดชอบ" };
+const definitionLabels: Record<string, string> = { cohort: "กลุ่มข้อมูล", newConversations: "บทสนทนาใหม่", inboundMessages: "ข้อความจากลูกค้า", firstResponse: "ตอบครั้งแรก", humanFirstResponse: "เจ้าหน้าที่ตอบครั้งแรก", resolution: "เวลาจบการสนทนา", percentiles: "p50 / p90 / เฉลี่ย", handoff: "อัตราส่งต่อ", outcome: "AI และเจ้าหน้าที่", backlog: "งานค้าง", overdue: "รอเกินกำหนด", channel: "ช่องทาง", agent: "ผู้รับผิดชอบ", author: "ผู้เขียนจริง" };
 function statCaption(stat: Stat) { return stat.samples ? `${count(stat.samples)} ตัวอย่าง · p90 ${formatDuration(stat.p90Ms)}` : "ยังไม่มีตัวอย่างในช่วงนี้"; }
 function Metric({ title, value, caption, icon: Icon, accent }: { title: string; value: string; caption: string; icon: typeof Clock; accent: string }) {
   return <Card className="stat-card"><div className="stat-top"><span>{title}</span><span className={`stat-icon icon-${accent}`} aria-hidden="true"><Icon size={20} /></span></div><strong className="stat-number">{value}</strong><small>{caption}</small></Card>;

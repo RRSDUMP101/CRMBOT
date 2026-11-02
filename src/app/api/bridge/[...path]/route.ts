@@ -37,8 +37,8 @@ async function handle(request: Request) {
       const {approvedAiStatus}=await import('@/lib/approved-ai');return json(await approvedAiStatus(url.searchParams.get('commandId')!));
     }
     if (path === 'events' && request.method === 'GET') {
-      if ([...url.searchParams.keys()].some(key => !['after', 'limit'].includes(key)) || [...new Set(url.searchParams.keys())].some(key => url.searchParams.getAll(key).length !== 1)) throw new BridgeError(400, 'Invalid event query');
-      return json(await readBridgeEvents(config.orgId, bridgeInteger(url.searchParams.get('after') ?? '0', 'cursor'), bridgeInteger(url.searchParams.get('limit') ?? '100', 'limit', 100, 1)));
+      if ([...url.searchParams.keys()].some(key => !['after', 'limit','envelope'].includes(key)) || [...new Set(url.searchParams.keys())].some(key => url.searchParams.getAll(key).length !== 1)||url.searchParams.has('envelope')&&url.searchParams.get('envelope')!=='2') throw new BridgeError(400, 'Invalid event query');
+      return json(await readBridgeEvents(config.orgId, bridgeInteger(url.searchParams.get('after') ?? '0', 'cursor'), bridgeInteger(url.searchParams.get('limit') ?? '100', 'limit', 100, 1),url.searchParams.get('envelope')==='2'?2:1));
     }
     if(path.startsWith('attachments/')&&request.method==='GET'){
       if([...url.searchParams.keys()].some(k=>k!=='owner')||url.searchParams.getAll('owner').length>1||url.searchParams.has('owner')&&url.searchParams.get('owner')!=='true')throw new BridgeError(400,'Invalid attachment query');
@@ -46,6 +46,7 @@ async function handle(request: Request) {
       return await downloadSocialAttachment(config.orgId,path.slice('attachments/'.length),fetch,url.searchParams.get('owner')==='true');
     }
     if (url.search) throw new BridgeError(400, 'Unexpected bridge query');
+    if(path==='ai-policy'&&request.method==='POST')return json(await (await import('@/lib/ai-policy-bridge')).resolveBridgeAiPolicy(config.orgId,objectBody(body,['conversationId','expectedVersion'])));
     if(path==='domestic-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-domestic-messages')).acceptDomestic(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','source'])));
     if(path==='reviewed-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-sale-messages')).acceptReviewedSale(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','template','parts','source'])));
     if(path==='approved-commands'&&request.method==='POST'){

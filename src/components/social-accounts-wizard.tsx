@@ -7,11 +7,12 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {date} from './data';
 import {Badge,Button,Card,Field,Input} from './ui';
+import {SocialAccountRuntimePanel} from './social-account-runtime-panel';
 
 type Provider='whatsapp'|'line'|'facebook'|'instagram';
 type MetaProvider=Exclude<Provider,'line'>;
 type Problem={code?:string;message:string;next:string}|null;
-type Account={id:string;provider:Provider;displayName:string;maskedIdentity:string;state:string;readiness:{auth:string;inbound:string;outbound:string};expiresAt:string|null;lastVerifiedAt:string|null;verificationFresh:boolean;connectedAt:string|null;updatedAt:string;step:number;callbackUrl:string;problem:Problem;revision:number};
+type Account={id:string;provider:Provider;displayName:string;maskedIdentity:string;state:string;readiness:{auth:string;inbound:string;outbound:string};expiresAt:string|null;lastVerifiedAt:string|null;verificationFresh:boolean;connectedAt:string|null;updatedAt:string;step:number;callbackUrl:string;problem:Problem;revision:number;runtime?:{available:boolean;inboundEnabled:boolean;liveEnabled:boolean;testRecipient:string}};
 type Attempt={id:string;provider:MetaProvider;status:string;createdAt:string;expiresAt:string|null;step:number;assets:{key:string;name:string;maskedIdentity:string;alreadyConnected:boolean}[];problem:Problem};
 type Overview={enabled:boolean;prerequisites:{tokenStorage:boolean;appOrigin:boolean;meta:Record<MetaProvider,boolean>;line:boolean};callbackUrls:Record<Provider,string>;accounts:Account[];attempts:Attempt[];expiring:{id:string;provider:Provider;displayName:string;maskedIdentity:string;expiresAt:string;daysLeft:number;expired:boolean}[]};
 type Selection={kind:'new';provider:Provider|null}|{kind:'account';id:string}|{kind:'attempt';id:string};
@@ -33,7 +34,7 @@ const INBOUND:Record<string,string>={ready:'ยืนยันแล้ว',pend
 const OUTBOUND:Record<string,string>={ready:'เปิดใช้งานแล้ว',test_passed:'ทดสอบผ่าน',pending:'รอทดสอบ',blocked:'ปิดอยู่',unsupported:'ยังไม่รองรับ'};
 const PREPARE:Record<Provider,string[]>={
   facebook:['เป็นผู้ดูแลเพจ Facebook ที่ต้องการเชื่อมต่อ','เข้าสู่ระบบ Facebook ด้วยบัญชีที่ดูแลเพจนั้นได้','ระหว่างอนุญาต ให้เลือกเพจที่ต้องการและกดอนุญาตทุกรายการที่ระบบขอ'],
-  instagram:['บัญชี Instagram เป็นบัญชีธุรกิจหรือครีเอเตอร์ และเชื่อมกับเพจ Facebook แล้ว','เปิด “อนุญาตให้เข้าถึงข้อความ” ในการตั้งค่าข้อความของ Instagram','ระบบบันทึกบัญชีได้ แต่ยังไม่รองรับการรับข้อความ Instagram'],
+  instagram:['บัญชี Instagram เป็นบัญชีธุรกิจหรือครีเอเตอร์ และเชื่อมกับเพจ Facebook แล้ว','เปิด “อนุญาตให้เข้าถึงข้อความ” ในการตั้งค่าข้อความของ Instagram','ต้องผ่านสิทธิ์การส่งข้อความและเปิดการรับส่งของบัญชี จากนั้นทดสอบข้อความและผลอ่านก่อนเปิดให้ลูกค้า'],
   whatsapp:['มีบัญชี WhatsApp Business ใน Meta Business และเป็นผู้ดูแลธุรกิจ','เบอร์ธุรกิจผ่านการยืนยันและใช้งานกับ Cloud API แล้ว','ระหว่างอนุญาต ให้เลือกบัญชี WhatsApp และเบอร์ที่ต้องการ'],
   line:['มี LINE Official Account ที่เปิดใช้ Messaging API แล้ว','เข้า LINE Developers Console ของช่องทางนี้ได้','เตรียม Channel ID, Channel secret และ Your user ID จากแท็บ Basic settings และออก Channel access token (long-lived) ในแท็บ Messaging API'],
 };
@@ -114,6 +115,7 @@ export function SocialAccountsWizard(){
         {step===4&&attempt&&<SelectAsset attempt={attempt} busy={busy} onSelect={key=>run(()=>call<Account>('/api/admin/social-accounts/select',{attemptId:attempt.id,assetKey:key}),value=>{setSelection({kind:'account',id:value.id});setStep(value.step);},'บันทึกบัญชีแล้ว ต่อไปตรวจสิทธิ์')}/>}
         {step===4&&!attempt&&<p className="helper-text">ไม่พบรายการรอเลือกบัญชี กรุณาเริ่มเชื่อมต่อใหม่</p>}
         {step>=5&&account&&<AccountStep account={account} step={step} busy={busy} setStep={setStep} act={(action,extra,message)=>accountAction(account.id,action,extra,message)}/>}
+        {step>=5&&account&&<SocialAccountRuntimePanel account={account} refresh={load}/>}
         {step>=5&&!account&&<p className="helper-text">ยังไม่มีบัญชีสำหรับขั้นนี้ กลับไปเชื่อมต่อบัญชีก่อน</p>}
         <div className="button-row social-wizard-nav">
           <Button variant="ghost" size="sm" disabled={busy||step<=1||(step>=5&&!!account&&step<=5)} onClick={()=>setStep(step-1)}>ย้อนกลับ</Button>

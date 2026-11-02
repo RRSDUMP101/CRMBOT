@@ -1,14 +1,25 @@
 import {readFile,writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 const cron='* * * * *';
+// One Worker scheduled handler serves several independent jobs. Turning archive
+// off must never remove the clock for an enabled bridge or another durable runner.
+function needsMinuteSchedule(vars={}){
+  const on=key=>vars[key]==='true';
+  return on('SOCIAL_MEDIA_ARCHIVE_ENABLED')||
+    on('CRM_BRIDGE_ENABLED')&&(on('CRM_SALE_SYNC_ENABLED')||on('CRM_SALE_CONTEXT_ENABLED'))||
+    on('FLOWS_ENABLED')||
+    on('BROADCAST_ENABLED')&&on('BROADCAST_RUNNER_ENABLED')||
+    on('CRM_PUBLIC_WEBHOOKS_ENABLED')&&on('CRM_PUBLIC_WEBHOOK_RUNNER_ENABLED')||
+    on('EXTERNAL_CONNECTORS_ENABLED')&&on('EXTERNAL_CONNECTOR_RUNNER_ENABLED');
+}
 export function configureMediaArchiveSchedule(config){
   const copy=structuredClone(config),enabled=copy.vars?.SOCIAL_MEDIA_ARCHIVE_ENABLED==='true';
   if(enabled&&(copy.vars.SOCIAL_CHANNELS_OWNER!=='crm'||copy.vars.SOCIAL_INBOUND_ENABLED!=='true'||!/^[a-f0-9-]{36}$/i.test(copy.vars.SOCIAL_CHANNELS_ORG_ID||'')))throw Error('Archive schedule requires explicit CRM inbound ownership and organization');
-  copy.triggers={...copy.triggers,crons:[...(copy.triggers?.crons||[]).filter(value=>value!==cron),...enabled?[cron]:[]]};return copy;
+  copy.triggers={...copy.triggers,crons:[...(copy.triggers?.crons||[]).filter(value=>value!==cron),...needsMinuteSchedule(copy.vars)?[cron]:[]]};return copy;
 }
 export function checkMediaArchiveSchedule(config){
   const expected=configureMediaArchiveSchedule(config).triggers.crons;
-  if(JSON.stringify(expected)!==JSON.stringify(config.triggers?.crons||[]))throw Error('Archive cron does not match the configured ownership gate');
+  if(JSON.stringify(expected)!==JSON.stringify(config.triggers?.crons||[]))throw Error('Minute cron does not match the enabled automation jobs');
   return {enabled:config.vars?.SOCIAL_MEDIA_ARCHIVE_ENABLED==='true',cronConfigured:expected.includes(cron)};
 }
 export function parseDeploymentConfig(text){

@@ -1,7 +1,7 @@
 /** Uses a fresh, ignored .data directory containing only synthetic fixtures. Never opens the app's configured database. */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
@@ -68,7 +68,9 @@ describe('Database upgrade and durable inbox state', {concurrency:false},()=>{
     assert.equal((await readItem()).unreadCount,0);
     assert.equal((await readItem(ids.secondMember)).unreadCount,2);
     const versions=await database.query('SELECT version FROM schema_migrations ORDER BY version');
-    assert.deepEqual(versions.rows.map(row=>row.version),[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]);
+    const expected=(await readdir(path.join(process.cwd(),'migrations/d1'))).filter(name=>/^\d+_.*\.sql$/.test(name)).map(name=>Number(name.split('_')[0])).sort((a,b)=>a-b);
+    assert.equal(new Set(expected).size,expected.length,'migration versions must be unique');
+    assert.deepEqual(versions.rows.map(row=>row.version),expected);
   });
 
   test('cursor pagination preserves microseconds and UUID tie-breaks without skipping records',async()=>{

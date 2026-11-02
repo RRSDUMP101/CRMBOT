@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { database, transaction, type Row, type Executor } from './db';
 import { ApiError, uuid } from './auth';
 import { getPrivateBucket } from './files';
-import { readSocialConfig, socialProvider } from './social-channels';
-import {signBridgeRequest} from './bridge-protocol';
+import { socialProvider } from './social-channels';
+import {resolveSocialConfig} from './social-account-runtime';
+import {signBridgeRequest,bridgeKeyConfig} from './bridge-protocol';
 
 const maxBytes=25*1024*1024;
 function metaLocation(value:string){
@@ -33,13 +34,13 @@ async function providerMedia(row:Row,transport:typeof fetch,allowOwnerOnly:boole
     let base:URL;try{base=new URL(origin);}catch{throw new ApiError(503,'Legacy source is not configured');}
     if(base.protocol!=='https:'||base.origin!==origin||base.username||base.password||secret.length<32||process.env.CRM_BRIDGE_ORG_ID!==row.org_id)throw new ApiError(503,'Legacy source is not configured');
     const url=origin+'/api/rrs/chat-migration/files?workspace='+workspace+'&id='+encodeURIComponent(id)+(allowOwnerOnly?'&owner=true':'');
-    const response=await transport(url,{headers:await signBridgeRequest(url,{secret,orgId:row.org_id}),redirect:'manual',signal:AbortSignal.timeout(20000)});
+    const response=await transport(url,{headers:await signBridgeRequest(url,{secret,orgId:row.org_id,...bridgeKeyConfig(process.env)}),redirect:'manual',signal:AbortSignal.timeout(20000)});
     if(response.headers.get('x-rrs-source-owner-only')==='true'&&!allowOwnerOnly)throw new ApiError(403,'Original file requires owner access');
     const content=await bytes(response),expected=response.headers.get('x-file-sha256');
     if(!expected||!/^[a-f0-9]{64}$/.test(expected)||createHash('sha256').update(content).digest('hex')!==expected)throw new ApiError(502,'Legacy file checksum mismatch');
     return {bytes:content,type:response.headers.get('content-type')||'application/octet-stream',ownerOnly:response.headers.get('x-rrs-source-owner-only')==='true'};
   }
-  const config=readSocialConfig(socialProvider(row.provider));
+  const config=await resolveSocialConfig(row.org_id,socialProvider(row.provider),row.account_id);
   if(config.orgId!==row.org_id||config.accountId!==row.account_id||!config.accessToken)throw new ApiError(503,'Media account is not configured');
   const headers={Authorization:'Bearer '+config.accessToken};
   const get=(url:string,authorization=true)=>transport(url,{headers:authorization?headers:{},redirect:'manual',signal:AbortSignal.timeout(20000)});

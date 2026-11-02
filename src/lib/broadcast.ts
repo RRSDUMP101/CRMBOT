@@ -1,7 +1,10 @@
 import {randomUUID} from 'node:crypto';
 import {ApiError,fields,hashToken,oneOf,requireAdmin,str,uuid,type Staff} from './auth';
-import {database,transaction,type Executor,type Row} from './db';
+import {database,transaction,withDatabase,type D1Binding,type Executor,type Row} from './db';
 import {dispatchSocialReply,readSocialConfig,socialConfigFingerprint,socialVerificationReady,type SocialChannelConfig} from './social-channels';
+import {resolveSocialConfig,listRuntimeAccounts} from './social-account-runtime';
+import {broadcastContentHash,broadcastRenderHash,renderBroadcast,validateBroadcastVariables} from './broadcast-render';
+import {broadcastAssetSnapshot,bindBroadcastAsset} from './broadcast-media';
 
 /**
  * WhatsApp/LINE broadcast. Safety model:
@@ -18,6 +21,31 @@ export type BroadcastOptions={env?:Record<string,string|undefined>;configs?:Part
 type TemplatePayload={name:string;language:string;components?:unknown[]};
 
 export const BROADCAST_BATCH_MAX=10;
+/** Automatic runner is independent from the send flag, so rollout can keep it off. */
+export async function runBroadcasts(db:D1Binding,env:Record<string,string|undefined>=process.env,options:Omit<BroadcastOptions,'env'>&{orgId?:string}={}) {
+  if(!broadcastEnabled(env)||env.BROADCAST_RUNNER_ENABLED!=='true')return {status:'disabled' as const,campaigns:0,dispatched:0,blocked:0};
+  return withDatabase(db,async()=>{
+    const at=utc(Date.now()),budget=positive(env.BROADCAST_RUNNER_CAMPAIGNS,5,20);
+    const due=(await database.query(`SELECT c.org_id,c.id,c.approved_by,m.name,m.email,m.role,m.active FROM broadcast_campaigns c LEFT JOIN members m ON m.org_id=c.org_id AND m.id=c.approved_by WHERE (c.status='sending' OR c.status='scheduled' AND c.scheduled_at<=$1) AND c.next_runner_at<=$1 AND (c.runner_lease_until IS NULL OR c.runner_lease_until<=$1) ${options.orgId?'AND c.org_id=$3':''} ORDER BY c.next_runner_at,COALESCE(c.scheduled_at,c.launched_at),c.id LIMIT $2`,[at,budget,options.orgId??''])).rows;
+    let dispatched=0,blocked=0;
+    for(const row of due){
+      if(!row.active||row.role!=='Admin'){blocked++;await transaction(row.org_id,c=>c.query("UPDATE broadcast_campaigns SET next_runner_at=$3 WHERE org_id=$1 AND id=$2",[row.org_id,row.id,utc(Date.now()+300_000)]));continue;}
+      const staff:Staff={id:row.approved_by,orgId:row.org_id,name:row.name,email:row.email,role:'Admin'};
+      try{
+        const result=await runBroadcastBatch(staff,row.id,{limit:BROADCAST_BATCH_MAX},{...options,env});
+        dispatched+=result.batch.dispatched;
+        await transaction(row.org_id,c=>c.query('UPDATE broadcast_campaigns SET next_runner_at=$3 WHERE org_id=$1 AND id=$2',[row.org_id,row.id,utc(Date.now()+60_000)]));
+      }catch(error){
+        blocked++;
+        // Record only a bounded reason code; never recipient/content/provider bodies.
+        const code=error instanceof ApiError?'http_'+error.status:'runner_error';
+        await transaction(row.org_id,c=>audit(c,staff,'runner_blocked',row.id,{code},at)).catch(()=>undefined);
+        await transaction(row.org_id,c=>c.query('UPDATE broadcast_campaigns SET next_runner_at=$3 WHERE org_id=$1 AND id=$2',[row.org_id,row.id,utc(Date.now()+300_000)])).catch(()=>undefined);
+      }
+    }
+    return {status:'ok' as const,campaigns:due.length,dispatched,blocked};
+  });
+}
 const IMPORT_ROW_MAX=5000;
 const WINDOW_MARGIN_MS=5*60_000;
 const providers:BroadcastProvider[]=['whatsapp','line'];
@@ -34,7 +62,12 @@ export const broadcastEnabled=(env:Record<string,string|undefined>=process.env)=
 function positive(value:string|undefined,fallback:number,maximum:number){const n=Number(value);return value&&Number.isSafeInteger(n)&&n>0?Math.min(n,maximum):fallback;}
 const dailyLimit=(env:Record<string,string|undefined>)=>positive(env.BROADCAST_DAILY_LIMIT,200,10_000);
 const maxRecipients=(env:Record<string,string|undefined>)=>positive(env.BROADCAST_MAX_RECIPIENTS,1000,5000);
-function channelConfig(provider:BroadcastProvider,options:BroadcastOptions){return options.configs?.[provider]||readSocialConfig(provider,environment(options));}
+async function channelConfig(provider:BroadcastProvider,options:BroadcastOptions,orgId:string,accountId?:string,connection?:Executor){
+ const fixture=options.configs?.[provider];if(fixture){if(accountId&&fixture.accountId!==accountId)throw new ApiError(409,'บัญชีช่องทางไม่ตรงกับแคมเปญ');return fixture;}
+ const env=environment(options);
+ if(env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true'&&!accountId)throw new ApiError(422,'กรุณาเลือกบัญชีที่จะส่งแคมเปญ');
+ return resolveSocialConfig(orgId,provider,accountId||readSocialConfig(provider,env).accountId,{env,connection});
+}
 export function maskRemote(provider:string,remote:string){const tail=String(remote||'').slice(-4);return provider==='line'?'U••••'+tail:'••••'+tail;}
 function assertEnabled(options:BroadcastOptions){if(!broadcastEnabled(environment(options)))throw new ApiError(503,'บรอดแคสต์ปิดอยู่ (BROADCAST_ENABLED ไม่ได้เปิด) ส่งข้อความไม่ได้');}
 function json(value:unknown,fallback:unknown){if(typeof value!=='string')return value??fallback;try{return JSON.parse(value);}catch{return fallback;}}
@@ -77,6 +110,7 @@ function parseTemplate(value:unknown){
   if(!Array.isArray(params)||params.length>20)throw new ApiError(400,'ตัวแปรเทมเพลตไม่ถูกต้อง');
   // WhatsApp rejects parameters with newlines, tabs or more than four consecutive spaces.
   for(const item of params)if(typeof item!=='string'||!item.trim()||item.length>1024||/[\n\t\r]/.test(item)||/ {5,}/.test(item))throw new ApiError(400,'ตัวแปรเทมเพลตต้องเป็นข้อความบรรทัดเดียว 1–1024 ตัวอักษร');
+  for(const item of params)validateBroadcastVariables(item);
   return {name,language,params:params as string[]};
 }
 type Draft={name?:string;messageKind?:'text'|'template';messageText?:string;template?:{name:string;language:string;params:string[]}|null;segment?:BroadcastSegment};
@@ -87,6 +121,7 @@ function parseDraft(provider:BroadcastProvider,input:Record<string,unknown>):Dra
   if(input.messageText!==undefined){
     if(typeof input.messageText!=='string'||input.messageText.length>maxText[provider])throw new ApiError(400,`ข้อความต้องยาวไม่เกิน ${maxText[provider]} ตัวอักษร`);
     draft.messageText=input.messageText;
+    validateBroadcastVariables(input.messageText);
   }
   if(input.template!==undefined)draft.template=parseTemplate(input.template);
   if(input.segment!==undefined)draft.segment=parseSegment(input.segment);
@@ -142,20 +177,27 @@ async function assertChannelGates(c:Executor,orgId:string,campaign:Row,config:So
   if(mode==='live'&&campaign.provider==='whatsapp'&&config.whatsappAccountMode==='meta-test')throw new ApiError(409,'บัญชีทดสอบ Meta ส่งบรอดแคสต์ถึงลูกค้าไม่ได้');
   return control;
 }
-async function gates(c:Executor,staff:Staff,options:BroadcastOptions){
-  const env=environment(options),channels:Record<string,unknown>={};
+async function gates(c:Executor,staff:Staff,options:BroadcastOptions,campaign?:Row){
+  const env=environment(options),channels:Record<string,unknown>={},accounts:Record<string,unknown>[]=[];
+  const available=options.configs?providers.flatMap(provider=>options.configs?.[provider]?[{provider,accountId:options.configs[provider]!.accountId,displayName:provider}]:[]):await listRuntimeAccounts(staff.orgId,undefined,env);
   for(const provider of providers){
-    const config=channelConfig(provider,options),scoped=config.orgId===staff.orgId&&!!config.accountId;
+   const candidates=available.filter(a=>a.provider===provider&&(campaign?.provider!==provider||a.accountId===campaign.account_id));
+   channels[provider]={configured:false,accountId:'',environmentLive:false,verified:false,emergencyStop:true,sendMode:'disabled',live:false,testReady:false,testRecipient:null};
+   for(const account of candidates){
+    let config:SocialChannelConfig;try{config=await channelConfig(provider,options,staff.orgId,account.accountId,c);}catch{accounts.push({provider,accountId:account.accountId,displayName:account.displayName,configured:false,environmentLive:false,verified:false,emergencyStop:true,sendMode:'disabled',live:false,testReady:false,testRecipient:null});continue;}
+    const scoped=config.orgId===staff.orgId&&!!config.accountId;
     const control=scoped?await controlRow(c,staff.orgId,provider,config.accountId):undefined;
     const verified=!!control&&socialVerificationReady(control,config)&&control.webhook_fingerprint===socialConfigFingerprint(config);
     const environmentLive=scoped&&config.owner==='crm'&&config.inboundEnabled&&config.liveEnabled;
     const open=environmentLive&&verified&&!!control?.send_enabled&&!control?.emergency_stop;
-    channels[provider]={configured:scoped,accountId:scoped?config.accountId:'',environmentLive,verified,emergencyStop:!control||!!control.emergency_stop,sendMode:control?.send_mode||'disabled',
+    const entry={provider,displayName:account.displayName,configured:scoped,accountId:scoped?config.accountId:'',environmentLive,verified,emergencyStop:!control||!!control.emergency_stop,sendMode:control?.send_mode||'disabled',
       live:open&&control?.send_mode==='live'&&!(provider==='whatsapp'&&config.whatsappAccountMode==='meta-test'),
       testReady:open&&['test','live'].includes(control?.send_mode)&&!!config.testRecipient,
       testRecipient:scoped&&config.testRecipient?maskRemote(provider,config.testRecipient):null};
+    accounts.push(entry);if(!(channels[provider] as {configured:boolean}).configured)channels[provider]=entry;
+   }
   }
-  return {enabled:broadcastEnabled(env),dailyLimit:dailyLimit(env),maxRecipients:maxRecipients(env),batchLimit:BROADCAST_BATCH_MAX,channels};
+  return {enabled:broadcastEnabled(env),runnerEnabled:env.BROADCAST_RUNNER_ENABLED==='true',mediaEnabled:env.CRM_BROADCAST_MEDIA_ENABLED==='true',dailyLimit:dailyLimit(env),maxRecipients:maxRecipients(env),batchLimit:BROADCAST_BATCH_MAX,channels,accounts};
 }
 
 /* ---------------------------------------------------------------- audience */
@@ -185,7 +227,7 @@ function audienceSql(p:Params,orgId:string,campaign:Row,filter:AudienceFilter,no
   // Outside the 24 hour customer-service window WhatsApp allows approved templates only.
   if(provider==='whatsapp'&&campaign.message_kind!=='template')rules.push(`WHEN x.last_inbound IS NULL OR x.last_inbound<${p.add(utc(nowMs-86_400_000+WINDOW_MARGIN_MS))} THEN 'outside_24h_window'`);
   return `SELECT x.*,CASE ${rules.join(' ')} ELSE '' END AS reason FROM (SELECT i.id AS identity_id,i.remote_id,i.lead_id,i.conversation_id,i.opt_out,i.created_at AS identity_created_at,
- l.market,l.stage,l.contact_consent_at,l.contact_consent_version,c.lead_id AS conversation_lead_id,
+ l.name,l.market,l.stage,l.contact_consent_at,l.contact_consent_version,c.lead_id AS conversation_lead_id,
  (SELECT MAX(m.provider_timestamp) FROM social_message_provenance m WHERE m.org_id=i.org_id AND m.provider=i.provider AND m.account_id=i.account_id AND m.remote_id=i.remote_id AND m.direction='in' AND m.removed_at IS NULL) AS last_inbound,
  (SELECT e.event_kind FROM social_events e WHERE e.org_id=i.org_id AND e.provider=i.provider AND e.account_id=i.account_id AND e.remote_id=i.remote_id AND e.event_kind IN ('follow','unfollow') ORDER BY e.received_at DESC,e.event_id DESC LIMIT 1) AS friendship,
  EXISTS(SELECT 1 FROM social_identities o WHERE o.org_id=i.org_id AND o.lead_id=i.lead_id AND o.provider=i.provider AND o.opt_out=1) AS lead_opted_out,
@@ -203,6 +245,22 @@ async function audienceCounts(c:Executor,orgId:string,campaign:Row,filter:Audien
 async function reasonsFor(c:Executor,orgId:string,campaign:Row,identityIds:string[],launchedAt:string|null,nowMs:number){
   const p=new Params(),sql=audienceSql(p,orgId,campaign,{identityIds,launchedAt},nowMs);
   return new Map((await c.query(sql,p.values)).rows.map(row=>[row.identity_id as string,row]));
+}
+/** Preview and approval share one bounded rendering plan under the org CAS transaction. */
+async function audiencePlan(c:Executor,orgId:string,campaign:Row,source:string,nowMs:number,limit:number){
+  const segment=parseSegment(json(campaign.segment,{})),counts=await audienceCounts(c,orgId,campaign,{segment},nowMs);
+  const asset=await broadcastAssetSnapshot(c,orgId,campaign),contentHash=broadcastContentHash(campaign,source,asset);
+  const p=new Params(),sql=audienceSql(p,orgId,campaign,{segment},nowMs);
+  const candidates=(await c.query(`SELECT * FROM (${sql}) y WHERE reason='' ORDER BY identity_id LIMIT ${limit+1}`,p.values)).rows;
+  const rows:{identity:Row;render:ReturnType<typeof renderBroadcast>}[]=[],excludedSamples:Row[]=[];
+  if(counts.eligible<=limit){
+    for(const identity of candidates){try{rows.push({identity,render:renderBroadcast(campaign,identity,source,contentHash)});}catch(error){
+      if(!(error instanceof ApiError)||!['personalization_missing','personalization_invalid'].includes(error.message))throw error;
+      counts.eligible--;counts.excluded[error.message]=(counts.excluded[error.message]||0)+1;excludedSamples.push({...identity,reason:error.message});
+    }}
+  }
+  const audienceHash=counts.eligible>limit?null:hashToken(JSON.stringify([1,campaign.id,Number(campaign.version),contentHash,rows.map(({identity,render})=>[identity.identity_id,identity.remote_id,identity.lead_id,identity.conversation_id,render.hash])]));
+  return {counts,rows,excludedSamples,audienceHash,contentHash,asset};
 }
 
 /* ---------------------------------------------------------------- read API */
@@ -225,7 +283,7 @@ export async function getBroadcast(staff:Staff,id:string,options:BroadcastOption
       recipients[row.status]=(recipients[row.status]||0)+Number(row.n);if(row.status==='skipped')skipReasons[row.skip_reason||'unknown']=Number(row.n);
     }
     for(const row of (await c.query('SELECT o.status,COUNT(*) AS n FROM broadcast_recipients r JOIN social_outbound_commands o ON o.org_id=r.org_id AND o.id=r.outbound_command_id WHERE r.org_id=$1 AND r.campaign_id=$2 GROUP BY o.status',[staff.orgId,id])).rows)delivery[row.status]=Number(row.n);
-    const base={campaign:view(campaign),stats:{recipients,skipReasons,delivery},gates:await gates(c,staff,options)};
+    const base={campaign:{...view(campaign),asset:await broadcastAssetSnapshot(c,staff.orgId,campaign)},stats:{recipients,skipReasons,delivery},gates:await gates(c,staff,options,campaign)};
     if(staff.role!=='Admin')return {...base,canManage:false,testSends:[],imports:[],testPassedForVersion:false};
     const tests=(await c.query('SELECT t.campaign_version,t.remote_id,t.created_at,o.status,o.error_code,o.body FROM broadcast_test_sends t JOIN social_outbound_commands o ON o.org_id=t.org_id AND o.id=t.outbound_command_id WHERE t.org_id=$1 AND t.campaign_id=$2 ORDER BY t.created_at DESC LIMIT 5',[staff.orgId,id])).rows;
     const imports=(await c.query(`SELECT import_id,MIN(created_at) AS created_at,COUNT(*) AS total,SUM(CASE WHEN status='valid' THEN 1 ELSE 0 END) AS valid,SUM(CASE WHEN matched_identity_id IS NOT NULL THEN 1 ELSE 0 END) AS matched,SUM(CASE WHEN matched_identity_id IS NOT NULL AND eligibility='' THEN 1 ELSE 0 END) AS eligible FROM broadcast_import_rows WHERE org_id=$1 AND campaign_id=$2 GROUP BY import_id ORDER BY MIN(created_at) DESC LIMIT 5`,[staff.orgId,id])).rows;
@@ -238,12 +296,12 @@ export async function getBroadcast(staff:Staff,id:string,options:BroadcastOption
 
 /* ---------------------------------------------------------------- drafts */
 export async function createBroadcast(staff:Staff,input:Record<string,unknown>,options:BroadcastOptions={}){
-  requireAdmin(staff);fields(input,['name','provider','messageKind','messageText','template','segment']);
+  requireAdmin(staff);fields(input,['name','provider','accountId','messageKind','messageText','template','segment']);
   const provider=oneOf(input.provider,providers,'ช่องทาง') as BroadcastProvider;
   if(input.name===undefined)throw new ApiError(400,'กรุณาระบุชื่อแคมเปญ');
   const draft=parseDraft(provider,input);
   if(draft.segment?.importId)throw new ApiError(400,'นำเข้ารายชื่อได้หลังสร้างแคมเปญแล้ว');
-  const config=channelConfig(provider,options);
+  const config=await channelConfig(provider,options,staff.orgId,input.accountId===undefined?undefined:String(input.accountId));
   if(config.orgId!==staff.orgId||!config.accountId)throw new ApiError(409,'ช่องทางนี้ยังไม่ได้ตั้งค่าบัญชีสำหรับองค์กรนี้');
   const id=randomUUID(),time=utc(Date.now()),kind=draft.messageKind||'text';
   await transaction(staff.orgId,async c=>{
@@ -263,6 +321,7 @@ export async function updateBroadcast(staff:Staff,id:string,input:Record<string,
     const draft=parseDraft(campaign.provider,input);
     if(draft.segment?.importId&&!(await c.query('SELECT 1 FROM broadcast_import_rows WHERE org_id=$1 AND campaign_id=$2 AND import_id=$3 LIMIT 1',[staff.orgId,id,draft.segment.importId])).rows.length)throw new ApiError(400,'ไม่พบรายการนำเข้าของแคมเปญนี้');
     const kind=draft.messageKind||campaign.message_kind,template=draft.template===undefined?{name:campaign.template_name,language:campaign.template_language,params:json(campaign.template_params,[])}:draft.template;
+    if(kind==='template'&&campaign.media_asset_id)throw new ApiError(409,'กรุณานำไฟล์แนบออกก่อนเปลี่ยนเป็นเทมเพลต');
     await c.query('UPDATE broadcast_campaigns SET name=$4,message_kind=$5,message_text=$6,template_name=$7,template_language=$8,template_params=$9,segment=$10,template_body=NULL,template_verified_at=NULL,version=version+1,updated_at=$11 WHERE org_id=$1 AND id=$2 AND version=$3',
       [staff.orgId,id,version,draft.name??campaign.name,kind,draft.messageText??campaign.message_text,template?.name||null,template?.language||null,JSON.stringify(template?.params||[]),draft.segment?JSON.stringify(draft.segment):campaign.segment,time]);
     await audit(c,staff,'updated',id,{version:version+1,fields:Object.keys(input).filter(key=>key!=='expectedVersion')},time);
@@ -274,13 +333,16 @@ export async function updateBroadcast(staff:Staff,id:string,input:Record<string,
 export async function previewBroadcast(staff:Staff,id:string,options:BroadcastOptions={}){
   requireAdmin(staff);uuid(id);
   const nowMs=Date.now(),limit=maxRecipients(environment(options));
+  const initial=await loadCampaign(database,staff.orgId,id);
+  const source=initial.message_kind==='template'?await verifiedTemplateBody(await channelConfig(initial.provider,options,staff.orgId,initial.account_id),initial,options.fetch):String(initial.message_text);
   return transaction(staff.orgId,async c=>{
     const campaign=await loadCampaign(c,staff.orgId,id),segment=parseSegment(json(campaign.segment,{})),provider=campaign.provider as BroadcastProvider;
-    const counts=await audienceCounts(c,staff.orgId,campaign,{segment},nowMs);
+    if(Number(campaign.version)!==Number(initial.version))throw new ApiError(409,'แคมเปญเปลี่ยนแล้ว กรุณาดูตัวอย่างใหม่');
+    const plan=await audiencePlan(c,staff.orgId,campaign,source,nowMs,limit),counts=plan.counts;
     const sample=async(eligible:boolean)=>{const p=new Params(),sql=audienceSql(p,staff.orgId,campaign,{segment},nowMs);return (await c.query(`SELECT remote_id,market,stage,reason FROM (${sql}) y WHERE ${eligible?"reason=''":"reason<>''"} ORDER BY identity_created_at,identity_id LIMIT 10`,p.values)).rows;};
-    return {campaignId:id,version:Number(campaign.version),status:campaign.status,provider,accountId:campaign.account_id,dryRun:true,computedAt:utc(nowMs),...counts,maxRecipients:limit,overLimit:counts.eligible>limit,
-      samples:(await sample(true)).map(row=>({recipient:maskRemote(provider,row.remote_id),market:row.market,stage:row.stage})),
-      excludedSamples:(await sample(false)).map(row=>({recipient:maskRemote(provider,row.remote_id),market:row.market,stage:row.stage,reason:row.reason}))};
+    return {campaignId:id,version:Number(campaign.version),status:campaign.status,provider,accountId:campaign.account_id,dryRun:true,computedAt:utc(nowMs),...counts,maxRecipients:limit,overLimit:counts.eligible>limit,audienceHash:plan.audienceHash,asset:plan.asset,
+      samples:plan.rows.slice(0,10).map(({identity:row,render})=>({recipient:maskRemote(provider,row.remote_id),market:row.market,stage:row.stage,message:render.body})),
+      excludedSamples:[...plan.excludedSamples,...await sample(false)].slice(0,10).map(row=>({recipient:maskRemote(provider,row.remote_id),market:row.market,stage:row.stage,reason:row.reason}))};
   },staff);
 }
 
@@ -394,9 +456,9 @@ async function verifiedTemplateBody(config:SocialChannelConfig,campaign:Row,tran
   if(!rendered.trim()||rendered.length>4096)throw new ApiError(409,'เนื้อหาเทมเพลตไม่ถูกต้อง');
   return rendered;
 }
-function templatePayload(campaign:Row):TemplatePayload|null{
+function templatePayload(campaign:Row,renderedParams?:string[]):TemplatePayload|null{
   if(campaign.message_kind!=='template')return null;
-  const params=json(campaign.template_params,[]) as string[];
+  const params=renderedParams??json(campaign.template_params,[]) as string[];
   return {name:campaign.template_name,language:campaign.template_language,...(params.length?{components:[{type:'body',parameters:params.map(text=>({type:'text',text}))}]}:{})};
 }
 
@@ -408,6 +470,7 @@ async function stageOutbound(c:Executor,input:{orgId:string;campaign:Row;identit
     [commandId,orgId,identity.identity_id??identity.id,identity.conversation_id,messageId,input.campaign.provider,input.campaign.account_id,identity.remote_id,input.body,input.conversationVersion,input.approvedBy,time]);
   await c.query("INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_type,direction,delivery_status,provider_timestamp,metadata) VALUES($1,$2,$3,$4,$5,$6,'out','queued',$7,$8)",
     [orgId,messageId,input.campaign.provider,input.campaign.account_id,identity.remote_id,input.campaign.message_kind==='template'?'template':'text',time,JSON.stringify({...input.metadata,campaignId:input.campaign.id,commandId,approvedBy:input.approvedBy})]);
+  await bindBroadcastAsset(c,{orgId,campaign:input.campaign,commandId,body:input.body,approvedBy:input.approvedBy,command:{id:commandId,org_id:orgId,identity_id:identity.identity_id??identity.id,conversation_id:identity.conversation_id,message_id:messageId,provider:input.campaign.provider,account_id:input.campaign.account_id,remote_id:identity.remote_id,body:input.body,conversation_version:input.conversationVersion,approved_by:input.approvedBy}});
   return {messageId,commandId};
 }
 async function broadcastLink(c:Executor,orgId:string,commandId:string){
@@ -420,7 +483,7 @@ async function broadcastLink(c:Executor,orgId:string,commandId:string){
 /** Template payload for the provider request, read at claim time from the durable campaign. */
 export async function broadcastTemplate(c:Executor,orgId:string,commandId:string){
   const link=await broadcastLink(c,orgId,commandId);
-  return link?.campaign?templatePayload(link.campaign):null;
+  return link?.campaign?templatePayload(link.campaign,link.row.rendered_hash?json(link.row.rendered_params,[]) as string[]:undefined):null;
 }
 /**
  * Hook inside the shared outbound guard (claim, pre-send re-check and in-flight monitor).
@@ -428,18 +491,25 @@ export async function broadcastTemplate(c:Executor,orgId:string,commandId:string
  * requirement with: flag on, campaign still sending (or a current test), Admin approver,
  * no suppression or opt-out, LINE follow evidence and no reply since launch.
  */
-export async function broadcastCommandGuard(c:Executor,command:Row,config:SocialChannelConfig):Promise<null|{template:TemplatePayload|null}>{
+export async function broadcastCommandGuard(c:Executor,command:Row,config:SocialChannelConfig,options:{mediaFetch?:boolean}={}):Promise<null|{template:TemplatePayload|null}>{
   const link=await broadcastLink(c,command.org_id,command.id);if(!link)return null;
   if(process.env.BROADCAST_ENABLED!=='true')throw new ApiError(503,'Broadcast sending is disabled');
   const {campaign,row}=link;
+  const receiptFetch=options.mediaFetch===true&&['submitted','sent','delivered','read','unknown'].includes(command.status);
   if(!campaign||campaign.provider!==command.provider||campaign.account_id!==command.account_id||row.identity_id!==command.identity_id||row.remote_id!==command.remote_id)throw new ApiError(409,'Broadcast linkage changed');
+  if(row.rendered_hash){
+    const params=json(row.rendered_params,[]) as string[];
+    const contentHash=broadcastContentHash(campaign,row.render_source,await broadcastAssetSnapshot(c,command.org_id,campaign));
+    if(row.rendered_body!==command.body||row.content_hash!==contentHash||row.rendered_hash!==broadcastRenderHash(row.identity_id,row.rendered_body,params,contentHash))throw new ApiError(409,'Broadcast approval is stale or rendered content changed');
+    if(campaign.message_kind==='text'&&row.render_source!==campaign.message_text||link.kind==='campaign'&&campaign.message_kind==='template'&&row.render_source!==campaign.template_body)throw new ApiError(409,'Broadcast source changed');
+  }else if(campaign.media_asset_id||String(campaign.message_text).includes('{{')||String(campaign.template_params).includes('{{'))throw new ApiError(409,'Broadcast requires a rendered approval');
   if(link.kind==='campaign'){
-    if(campaign.status!=='sending')throw new ApiError(409,'Broadcast campaign is not sending');
+    if(campaign.status!=='sending'&&!(receiptFetch&&campaign.status==='completed'))throw new ApiError(409,'Broadcast campaign is not sending');
     if(campaign.approved_by!==command.approved_by)throw new ApiError(409,'Broadcast approval changed');
-    if((campaign.message_kind==='template'?campaign.template_body:campaign.message_text)!==command.body)throw new ApiError(409,'Broadcast message changed');
+    if(!row.rendered_hash&&(campaign.message_kind==='template'?campaign.template_body:campaign.message_text)!==command.body)throw new ApiError(409,'Broadcast message changed');
     if((await c.query("SELECT 1 FROM social_message_provenance WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND remote_id=$4 AND direction='in' AND removed_at IS NULL AND provider_timestamp>$5 LIMIT 1",[command.org_id,command.provider,command.account_id,command.remote_id,campaign.launched_at||''])).rows.length)throw new ApiError(409,'Recipient replied after the broadcast launched');
   }else{
-    if(['cancelled','completed'].includes(campaign.status)||Number(campaign.version)!==Number(row.campaign_version))throw new ApiError(409,'Broadcast test is stale');
+    if(receiptFetch?['paused','cancelled'].includes(campaign.status):['paused','cancelled','completed'].includes(campaign.status)||Number(campaign.version)!==Number(row.campaign_version))throw new ApiError(409,'Broadcast test is stale');
     if(!config.testRecipient||command.remote_id!==config.testRecipient)throw new ApiError(409,'Broadcast tests allow only the configured test recipient');
   }
   if((await c.query('SELECT 1 FROM broadcast_suppressions WHERE org_id=$1 AND provider=$2 AND remote_id=$3',[command.org_id,command.provider,command.remote_id])).rows.length)throw new ApiError(409,'Recipient is suppressed');
@@ -450,7 +520,7 @@ export async function broadcastCommandGuard(c:Executor,command:Row,config:Social
   }
   const member=(await c.query('SELECT role,active FROM members WHERE org_id=$1 AND id=$2',[command.org_id,command.approved_by])).rows[0];
   if(!member?.active||member.role!=='Admin')throw new ApiError(409,'Broadcast approver is no longer an active Admin');
-  return {template:templatePayload(campaign)};
+  return {template:templatePayload(campaign,row.rendered_hash?json(row.rendered_params,[]) as string[]:undefined)};
 }
 
 /* ---------------------------------------------------------------- test send */
@@ -458,9 +528,9 @@ export async function testSendBroadcast(staff:Staff,id:string,input:Record<strin
   requireAdmin(staff);uuid(id);fields(input,['requestId']);
   const requestId=uuid(input.requestId,'รหัสคำขอทดสอบ');assertEnabled(options);
   const initial=await loadCampaign(database,staff.orgId,id),provider=initial.provider as BroadcastProvider;
-  if(['cancelled','completed'].includes(initial.status))throw new ApiError(409,'แคมเปญนี้ปิดแล้ว');
+  if(['paused','cancelled','completed'].includes(initial.status))throw new ApiError(409,'แคมเปญนี้หยุดหรือปิดแล้ว');
   sendable(initial);
-  const config=channelConfig(provider,options),recipient=config.testRecipient||'';
+  const config=await channelConfig(provider,options,staff.orgId,initial.account_id),recipient=config.testRecipient||'';
   if(!remotePattern[provider].test(recipient))throw new ApiError(409,`ยังไม่ได้กำหนดผู้รับทดสอบของช่องทางนี้ (${provider==='whatsapp'?'WHATSAPP_TEST_RECIPIENT':'LINE_TEST_RECIPIENT'})`);
   await assertChannelGates(database,staff.orgId,initial,config,'test');
   const body=initial.message_kind==='template'?await verifiedTemplateBody(config,initial,options.fetch):String(initial.message_text);
@@ -473,16 +543,17 @@ export async function testSendBroadcast(staff:Staff,id:string,input:Record<strin
     await assertChannelGates(c,staff.orgId,campaign,config,'test');
     const identity=(await c.query('SELECT * FROM social_identities WHERE org_id=$1 AND provider=$2 AND account_id=$3 AND remote_id=$4',[staff.orgId,provider,campaign.account_id,recipient])).rows[0];
     if(!identity)throw new ApiError(409,'ผู้รับทดสอบต้องเคยส่งข้อความหรือเพิ่มเพื่อนกับช่องทางนี้ก่อน');
-    const reason=(await reasonsFor(c,staff.orgId,campaign,[identity.id],null,nowMs)).get(identity.id)?.reason??'identity_link_changed';
+    const candidate=(await reasonsFor(c,staff.orgId,campaign,[identity.id],null,nowMs)).get(identity.id),reason=candidate?.reason??'identity_link_changed';
     if(reason)throw new ApiError(409,'ผู้รับทดสอบยังไม่ผ่านเงื่อนไขการส่ง: '+reason);
     const conversation=(await c.query('SELECT version FROM conversations WHERE org_id=$1 AND id=$2',[staff.orgId,identity.conversation_id])).rows[0];
-    const staged=await stageOutbound(c,{orgId:staff.orgId,campaign,identity,conversationVersion:Number(conversation.version),body,approvedBy:staff.id,time,metadata:{approval:'broadcast_test',campaignVersion:Number(campaign.version)}});
-    await c.query('INSERT INTO broadcast_test_sends(id,org_id,campaign_id,campaign_version,request_id,identity_id,remote_id,outbound_command_id,actor_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[randomUUID(),staff.orgId,id,campaign.version,requestId,identity.id,identity.remote_id,staged.commandId,staff.id,time]);
+    const contentHash=broadcastContentHash(campaign,body,await broadcastAssetSnapshot(c,staff.orgId,campaign)),render=renderBroadcast(campaign,candidate!,body,contentHash);
+    const staged=await stageOutbound(c,{orgId:staff.orgId,campaign,identity,conversationVersion:Number(conversation.version),body:render.body,approvedBy:staff.id,time,metadata:{approval:'broadcast_test',campaignVersion:Number(campaign.version)}});
+    await c.query('INSERT INTO broadcast_test_sends(id,org_id,campaign_id,campaign_version,request_id,identity_id,remote_id,outbound_command_id,actor_id,created_at,render_source,rendered_body,rendered_params,rendered_hash,content_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',[randomUUID(),staff.orgId,id,campaign.version,requestId,identity.id,identity.remote_id,staged.commandId,staff.id,time,render.source,render.body,JSON.stringify(render.params),render.hash,render.contentHash]);
     await audit(c,staff,'test_sent',id,{campaignVersion:Number(campaign.version),recipient:maskRemote(provider,recipient),commandId:staged.commandId},time);
     return staged.commandId;
   },staff);
   let result:{commandId:string;status:string;error?:string};
-  try{result=await dispatchSocialReply(staff.orgId,prepared,{config,fetch:options.fetch});}
+  try{result=await dispatchSocialReply(staff.orgId,prepared,{config:options.configs?.[provider],readConfig:options.configs?.[provider]?undefined:c=>channelConfig(provider,options,staff.orgId,initial.account_id,c),fetch:options.fetch});}
   catch(error){
     if(!(error instanceof ApiError))throw error;
     // Rejected before any claim, so no provider attempt exists: retire the test intent instead of leaving it queued.
@@ -497,7 +568,7 @@ export async function testSendBroadcast(staff:Staff,id:string,input:Record<strin
 
 /* ---------------------------------------------------------------- launch and control */
 export async function launchBroadcast(staff:Staff,id:string,input:Record<string,unknown>,options:BroadcastOptions={}){
-  requireAdmin(staff);uuid(id);fields(input,['confirm','expectedVersion','expectedRecipients','scheduledAt']);
+  requireAdmin(staff);uuid(id);fields(input,['confirm','expectedVersion','expectedRecipients','expectedAudienceHash','scheduledAt']);
   if(input.confirm!==true)throw new ApiError(422,'กรุณายืนยันการส่งบรอดแคสต์อย่างชัดเจน');
   const version=expectedVersion(input.expectedVersion);
   if(typeof input.expectedRecipients!=='number'||!Number.isSafeInteger(input.expectedRecipients)||input.expectedRecipients<1)throw new ApiError(400,'กรุณาดูตัวอย่างกลุ่มผู้รับก่อนยืนยัน');
@@ -511,7 +582,7 @@ export async function launchBroadcast(staff:Staff,id:string,input:Record<string,
   assertEnabled(options);
   const env=environment(options),limit=maxRecipients(env),initial=await loadCampaign(database,staff.orgId,id);
   sendable(initial);
-  const config=channelConfig(initial.provider,options);
+  const config=await channelConfig(initial.provider,options,staff.orgId,initial.account_id);
   await assertChannelGates(database,staff.orgId,initial,config,'live');
   const body=initial.message_kind==='template'?await verifiedTemplateBody(config,initial,options.fetch):String(initial.message_text);
   await transaction(staff.orgId,async c=>{
@@ -519,16 +590,18 @@ export async function launchBroadcast(staff:Staff,id:string,input:Record<string,
     if(campaign.status!=='draft')throw new ApiError(409,'แคมเปญนี้ยืนยันส่งไปแล้วหรือถูกยกเลิก');
     if(Number(campaign.version)!==version||Number(campaign.version)!==Number(initial.version))throw new ApiError(409,'แคมเปญถูกแก้ไขหลังดูตัวอย่าง กรุณาดูตัวอย่างและยืนยันอีกครั้ง');
     await assertChannelGates(c,staff.orgId,campaign,config,'live');
-    // The exact text/template body of this version must have reached the test recipient.
-    const tested=(await c.query(`SELECT 1 FROM broadcast_test_sends t JOIN social_outbound_commands o ON o.org_id=t.org_id AND o.id=t.outbound_command_id WHERE t.org_id=$1 AND t.campaign_id=$2 AND t.campaign_version=$3 AND o.body=$4 AND o.status IN ('submitted','sent','delivered','read') LIMIT 1`,[staff.orgId,id,version,body])).rows.length;
+    const plan=await audiencePlan(c,staff.orgId,campaign,body,nowMs,limit),counts=plan.counts;
+    const requiresHash=!!campaign.media_asset_id||body.includes('{{')||String(campaign.template_params).includes('{{');
+    if((requiresHash||input.expectedAudienceHash!==undefined)&&(!plan.audienceHash||input.expectedAudienceHash!==plan.audienceHash))throw new ApiError(409,'รายชื่อหรือข้อความรายบุคคลเปลี่ยนหลังดูตัวอย่าง กรุณาตรวจตัวอย่างและยืนยันอีกครั้ง');
+    // Test proof binds the source/asset and its actual rendered command, not one recipient's name.
+    const tested=(await c.query(`SELECT 1 FROM broadcast_test_sends t JOIN social_outbound_commands o ON o.org_id=t.org_id AND o.id=t.outbound_command_id WHERE t.org_id=$1 AND t.campaign_id=$2 AND t.campaign_version=$3 AND ((t.content_hash=$5 AND t.rendered_body=o.body AND t.rendered_hash<>'') OR (t.content_hash='' AND o.body=$4 AND $6=0)) AND o.status IN ('submitted','sent','delivered','read') LIMIT 1`,[staff.orgId,id,version,body,plan.contentHash,requiresHash?1:0])).rows.length;
     if(!tested)throw new ApiError(409,'ต้องทดสอบส่งข้อความฉบับนี้ถึงผู้รับทดสอบให้สำเร็จก่อนยืนยันส่ง');
-    const segment=parseSegment(json(campaign.segment,{})),counts=await audienceCounts(c,staff.orgId,campaign,{segment},nowMs);
     if(counts.eligible!==input.expectedRecipients)throw new ApiError(409,`จำนวนผู้รับเปลี่ยนเป็น ${counts.eligible} ราย (ยืนยันไว้ ${input.expectedRecipients} ราย) กรุณาดูตัวอย่างและยืนยันอีกครั้ง`);
     if(counts.eligible>limit)throw new ApiError(409,`ผู้รับเกินขีดจำกัด ${limit} รายต่อแคมเปญ`);
-    const p=new Params(),sql=audienceSql(p,staff.orgId,campaign,{segment},nowMs),org=p.add(staff.orgId),campaignId=p.add(id),at=p.add(time);
-    // Same eligibility SQL as the count above; the org revision guard makes both see one state.
-    await c.query(`INSERT INTO broadcast_recipients(id,org_id,campaign_id,identity_id,remote_id,lead_id,conversation_id,status,skip_reason,idempotency_key,created_at,updated_at) SELECT lower(hex(randomblob(16))),${org},${campaignId},y.identity_id,y.remote_id,y.lead_id,y.conversation_id,'pending','',${campaignId}||':'||y.identity_id,${at},${at} FROM (${sql}) y WHERE y.reason=''`,p.values);
-    const summary={matched:counts.matched,eligible:counts.eligible,excluded:counts.excluded,computedAt:time};
+    const snapshots=plan.rows.map(({identity:r,render:v})=>({i:r.identity_id,r:r.remote_id,l:r.lead_id,c:r.conversation_id,s:v.source,b:v.body,p:v.params,h:v.hash}));
+    // Keep each D1 bound value comfortably below its size limit, still in one atomic CAS batch.
+    for(let offset=0;offset<snapshots.length;offset+=20)await c.query(`INSERT INTO broadcast_recipients(id,org_id,campaign_id,identity_id,remote_id,lead_id,conversation_id,status,skip_reason,idempotency_key,created_at,updated_at,render_source,rendered_body,rendered_params,rendered_hash,content_hash) SELECT lower(hex(randomblob(16))),$1,$2,json_extract(value,'$.i'),json_extract(value,'$.r'),json_extract(value,'$.l'),json_extract(value,'$.c'),'pending','',$2||':'||json_extract(value,'$.i'),$3,$3,json_extract(value,'$.s'),json_extract(value,'$.b'),json_extract(value,'$.p'),json_extract(value,'$.h'),$4 FROM json_each($5)`,[staff.orgId,id,time,plan.contentHash,JSON.stringify(snapshots.slice(offset,offset+20))]);
+    const summary={matched:counts.matched,eligible:counts.eligible,excluded:counts.excluded,computedAt:time,audienceHash:plan.audienceHash};
     await c.query('UPDATE broadcast_campaigns SET status=$4,scheduled_at=$5,approved_by=$6,launched_at=$7,launched_count=$8,launch_summary=$9,template_body=$10,template_verified_at=$11,version=version+1,updated_at=$7 WHERE org_id=$1 AND id=$2 AND version=$3',
       [staff.orgId,id,version,scheduledAt?'scheduled':'sending',scheduledAt,staff.id,time,counts.eligible,JSON.stringify(summary),campaign.message_kind==='template'?body:null,campaign.message_kind==='template'?time:null]);
     await audit(c,staff,scheduledAt?'scheduled':'launched',id,{version:version+1,provider:campaign.provider,accountId:campaign.account_id,messageKind:campaign.message_kind,templateName:campaign.template_name||null,recipients:counts.eligible,excluded:counts.excluded,scheduledAt},time);
@@ -547,7 +620,7 @@ export async function controlBroadcast(staff:Staff,id:string,action:'pause'|'res
   let config:SocialChannelConfig|undefined;
   if(action==='resume'){
     assertEnabled(options);
-    const initial=await loadCampaign(database,staff.orgId,id);config=channelConfig(initial.provider,options);
+    const initial=await loadCampaign(database,staff.orgId,id);config=await channelConfig(initial.provider,options,staff.orgId,initial.account_id);
     await assertChannelGates(database,staff.orgId,initial,config,'live');
     if(initial.message_kind==='template'&&await verifiedTemplateBody(config,initial,options.fetch)!==initial.template_body)throw new ApiError(409,'เทมเพลตที่อนุมัติเปลี่ยนไปจากตอนยืนยันส่ง ต้องยกเลิกและสร้างแคมเปญใหม่');
   }
@@ -595,7 +668,7 @@ export async function runBroadcastBatch(staff:Staff,id:string,input:Record<strin
   assertEnabled(options);
   const env=environment(options),initial=await loadCampaign(database,staff.orgId,id);
   if(!['sending','scheduled'].includes(initial.status))throw new ApiError(409,'แคมเปญนี้ไม่ได้อยู่ในสถานะส่ง');
-  const config=channelConfig(initial.provider,options);
+  const config=await channelConfig(initial.provider,options,staff.orgId,initial.account_id);
   await assertChannelGates(database,staff.orgId,initial,config,'live');
   if(initial.message_kind==='template'&&await verifiedTemplateBody(config,initial,options.fetch)!==initial.template_body)throw new ApiError(409,'เทมเพลตที่อนุมัติเปลี่ยนไปจากตอนยืนยันส่ง กรุณาหยุดชั่วคราว');
   const nowMs=Date.now(),time=utc(nowMs),lease=randomUUID();
@@ -627,7 +700,7 @@ export async function runBroadcastBatch(staff:Staff,id:string,input:Record<strin
         await c.query("UPDATE broadcast_recipients SET status='skipped',skip_reason=$3,updated_at=$4 WHERE org_id=$1 AND id=$2 AND status='pending'",[staff.orgId,recipient.id,reason,time]);
         skipped[reason]=(skipped[reason]||0)+1;continue;
       }
-      const staged=await stageOutbound(c,{orgId:staff.orgId,campaign,identity:found!,conversationVersion:version!,body,approvedBy:campaign.approved_by,time,metadata:{approval:'broadcast',recipientId:recipient.id}});
+      const staged=await stageOutbound(c,{orgId:staff.orgId,campaign,identity:found!,conversationVersion:version!,body:recipient.rendered_hash?String(recipient.rendered_body):body,approvedBy:campaign.approved_by,time,metadata:{approval:'broadcast',recipientId:recipient.id}});
       await c.query("UPDATE broadcast_recipients SET status='queued',outbound_command_id=$3,message_id=$4,queued_at=$5,updated_at=$5 WHERE org_id=$1 AND id=$2 AND status='pending'",[staff.orgId,recipient.id,staged.commandId,staged.messageId,time]);
       commandIds.push(staged.commandId);
     }
@@ -639,7 +712,7 @@ export async function runBroadcastBatch(staff:Staff,id:string,input:Record<strin
     // Sequential: one provider call at a time. Each call re-runs the full shared guard.
     for(const commandId of plan.commandIds){
       if((await database.query('SELECT status FROM broadcast_campaigns WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows[0]?.status!=='sending')break;
-      try{results.push(await dispatchSocialReply(staff.orgId,commandId,{config,fetch:options.fetch}));}
+      try{results.push(await dispatchSocialReply(staff.orgId,commandId,{config:options.configs?.[initial.provider as BroadcastProvider],readConfig:options.configs?.[initial.provider as BroadcastProvider]?undefined:c=>channelConfig(initial.provider,options,staff.orgId,initial.account_id,c),fetch:options.fetch}));}
       catch(error){
         if(!(error instanceof ApiError))throw error;
         results.push({commandId,status:error.status===503?'blocked':'guard_rejected'});

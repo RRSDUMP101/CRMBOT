@@ -7,11 +7,11 @@ import { ApiError, oneOf, requireAdmin, uuid, type Staff } from './auth';
  * Nothing is estimated: a metric without samples is null ("ไม่มีข้อมูล"), never zero.
  * Every query is scoped to staff.orgId. No compound SELECT (D1 limits UNION terms).
  */
-export const REPORT_CHANNELS = ['website', 'whatsapp', 'line', 'facebook', 'legacy'] as const;
+export const REPORT_CHANNELS = ['website', 'whatsapp', 'line', 'facebook', 'instagram', 'gmail', 'outlook', 'legacy'] as const;
 export const REPORT_MARKETS = ['unknown', 'domestic', 'export'] as const;
 export type ReportChannel = typeof REPORT_CHANNELS[number];
 export type ReportMarket = typeof REPORT_MARKETS[number];
-export const CHANNEL_LABELS: Record<string, string> = { website: 'เว็บไซต์', whatsapp: 'WhatsApp', line: 'LINE', facebook: 'Facebook', legacy: 'ประวัติที่นำเข้า (ไม่ระบุช่องทาง)' };
+export const CHANNEL_LABELS: Record<string, string> = { website: 'เว็บไซต์', whatsapp: 'WhatsApp', line: 'LINE', facebook: 'Facebook', instagram:'Instagram',gmail:'Gmail',outlook:'Outlook',legacy: 'ประวัติที่นำเข้า (ไม่ระบุช่องทาง)' };
 export const MARKET_LABELS: Record<ReportMarket, string> = { domestic: 'ในประเทศ', export: 'ส่งออก', unknown: 'ยังไม่ระบุตลาด' };
 export const MAX_REPORT_DAYS = 366;
 export const MAX_REPORT_CONVERSATIONS = 20000;
@@ -39,6 +39,7 @@ export type Report = {
   filters: { channel: ReportChannel | null; assignee: string | null; market: ReportMarket | null; overdueHours: number };
   viewer: { role: Staff['role']; agentBreakdown: 'all' | 'self' };
   totals: GroupMetrics; byChannel: ChannelRow[]; byAgent: AgentRow[];
+  byAuthor: {memberId:string;name:string;replies:number;notes:number;conversations:number}[];
   definitions: Record<string, string>;
 };
 
@@ -54,8 +55,9 @@ export const REPORT_DEFINITIONS: Record<string, string> = {
   outcome: 'AI ดูแลเอง = มีคำตอบ AI ที่สมบูรณ์ ไม่มีข้อความเจ้าหน้าที่ และไม่เคยส่งต่อ; เจ้าหน้าที่เข้าร่วม = มีข้อความเจ้าหน้าที่อย่างน้อยหนึ่งข้อความ; อื่น ๆ = ยังไม่มีผู้ตอบหรือรอเจ้าหน้าที่',
   backlog: 'งานค้าง ณ เวลาที่สร้างรายงาน ทุกช่วงวันที่: บทสนทนาที่รอเจ้าหน้าที่หรือเจ้าหน้าที่กำลังดูแล',
   overdue: 'รอเจ้าหน้าที่ และมีข้อความลูกค้าหรือคำขอส่งต่อที่ยังไม่มีคำตอบนานกว่า N ชั่วโมง',
-  channel: 'ช่องทางจากตัวตนโซเชียลของบทสนทนา หรือแหล่งที่มาของข้อความที่นำเข้า หากไม่มีถือเป็นเว็บไซต์',
-  agent: 'แยกตามผู้รับผิดชอบปัจจุบันของบทสนทนา ระบบไม่ได้บันทึกผู้เขียนรายข้อความ',
+  channel: 'ช่องทางจากตัวตนโซเชียลของบทสนทนา ตามด้วยบัญชีอีเมลที่เชื่อมไว้ หรือแหล่งที่มาของข้อความที่นำเข้า หากไม่มีถือเป็นเว็บไซต์',
+  agent: 'ตัวชี้วัดบทสนทนาแยกตามผู้รับผิดชอบปัจจุบัน การเปลี่ยนผู้รับผิดชอบไม่เปลี่ยนผู้เขียนจริงของข้อความ',
+  author: 'ผลงานผู้เขียนจริงนับคำตอบและบันทึกที่ระบุ author_type=human และผู้เขียนรายข้อความในช่วงวันที่ ไม่รวมระบบอัตโนมัติหรือข้อความเก่าที่ไม่ทราบผู้เขียน',
 };
 
 const canonical = (ms: number) => new Date(ms).toISOString().replace(/(\.\d{3})Z$/, (_, fraction: string) => fraction + '000Z');
@@ -107,9 +109,10 @@ export async function parseReportQuery(staff: Staff, url: URL, now = Date.now())
 // on its earliest message provenance (imports use 'legacy'), else the native website chat.
 const CHANNEL = `COALESCE(
   (SELECT si.provider FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),
+  (SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=c.org_id AND et.conversation_id=c.id),
   (SELECT p.provider FROM messages pm JOIN social_message_provenance p ON p.org_id=pm.org_id AND p.message_id=pm.id WHERE pm.org_id=c.org_id AND pm.conversation_id=c.id ORDER BY pm.created_at,pm.id LIMIT 1),
   'website')`;
-const NOT_UNDELIVERED = (alias: string) => `NOT EXISTS(SELECT 1 FROM social_message_provenance dp WHERE dp.org_id=${alias}.org_id AND dp.message_id=${alias}.id AND dp.delivery_status IN ('failed','cancelled'))`;
+const NOT_UNDELIVERED = (alias: string) => `NOT EXISTS(SELECT 1 FROM social_message_provenance dp WHERE dp.org_id=${alias}.org_id AND dp.message_id=${alias}.id AND dp.delivery_status IN ('failed','cancelled')) AND NOT EXISTS(SELECT 1 FROM external_send_commands ec WHERE ec.org_id=${alias}.org_id AND ec.message_id=${alias}.id AND ec.status!='submitted')`;
 const BASE_COLUMNS = `c.id,c.org_id,c.status,c.assignee_id,c.created_at,c.handoff_at,l.market,${CHANNEL} AS channel`;
 const BASE_JOIN = 'FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id';
 
@@ -137,8 +140,8 @@ async function cohort(executor: Executor, orgId: string, query: ReportQuery, max
         FROM base b WHERE ${filters} AND ${cursor} ORDER BY b.created_at,b.id LIMIT ${PAGE_SIZE})
       SELECT p.id,p.status,p.assignee_id,p.created_at,p.handoff_at,p.channel,p.first_customer_at,
         (SELECT MIN(r.created_at) FROM messages r WHERE r.org_id=p.org_id AND r.conversation_id=p.id AND r.role IN ('assistant','agent') AND r.status='complete' AND r.created_at>=p.first_customer_at AND ${NOT_UNDELIVERED('r')}) AS first_reply_at,
-        (SELECT MIN(r.created_at) FROM messages r WHERE r.org_id=p.org_id AND r.conversation_id=p.id AND r.role='agent' AND r.status='complete' AND r.created_at>=p.first_customer_at AND ${NOT_UNDELIVERED('r')}) AS first_agent_reply_at,
-        EXISTS(SELECT 1 FROM messages a WHERE a.org_id=p.org_id AND a.conversation_id=p.id AND a.role='agent') AS has_agent,
+        (SELECT MIN(r.created_at) FROM messages r WHERE r.org_id=p.org_id AND r.conversation_id=p.id AND r.role='agent' AND r.author_type!='automation' AND r.status='complete' AND r.created_at>=p.first_customer_at AND ${NOT_UNDELIVERED('r')}) AS first_agent_reply_at,
+        EXISTS(SELECT 1 FROM messages a WHERE a.org_id=p.org_id AND a.conversation_id=p.id AND a.role='agent' AND a.author_type!='automation') AS has_agent,
         EXISTS(SELECT 1 FROM messages a WHERE a.org_id=p.org_id AND a.conversation_id=p.id AND a.role='assistant' AND a.status='complete') AS has_ai
       FROM page p ORDER BY p.created_at,p.id`, params);
     rows.push(...page.rows);
@@ -215,6 +218,15 @@ export async function buildReport(staff: Staff, url: URL, options: { now?: numbe
   const inbound = await inboundCounts(executor, staff.orgId, query);
   const open = await backlog(executor, staff.orgId, query, now);
   const members = (await executor.query('SELECT id,name,active FROM members WHERE org_id=$1', [staff.orgId])).rows;
+  const authorParams:unknown[]=[staff.orgId,query.start,query.end];
+  const authorFilters=filterSql(query,authorParams);
+  if(staff.role!=='Admin')authorParams.push(staff.id);
+  const authored=(await executor.query(`WITH b AS (SELECT ${BASE_COLUMNS} ${BASE_JOIN} WHERE c.org_id=$1)
+    SELECT m.author_member_id,SUM(m.role='agent') AS replies,SUM(m.role='note') AS notes,COUNT(DISTINCT m.conversation_id) AS conversations
+    FROM messages m JOIN b ON b.org_id=m.org_id AND b.id=m.conversation_id
+    WHERE m.org_id=$1 AND m.created_at>=$2 AND m.created_at<$3 AND m.author_type='human' AND m.author_member_id IS NOT NULL
+    AND m.role IN ('agent','note') AND m.status='complete' AND ${NOT_UNDELIVERED('m')} AND ${authorFilters}
+    ${staff.role!=='Admin'?`AND m.author_member_id=$${authorParams.length}`:''} GROUP BY m.author_member_id`,authorParams)).rows;
 
   const totals = accumulator(), channels = new Map<string, Accumulator>(), agents = new Map<string, Accumulator>();
   const groups = (channel: string, assignee: string | null) => {
@@ -258,7 +270,7 @@ export async function buildReport(staff: Staff, url: URL, options: { now?: numbe
     version: 1, generatedAt: canonical(now), timezone: 'Asia/Bangkok',
     range: { from: query.from, to: query.to, start: query.start, end: query.end, days: query.days },
     filters: { channel: query.channel, assignee: query.assignee, market: query.market, overdueHours: query.overdueHours },
-    viewer: { role: staff.role, agentBreakdown }, totals: finish(totals), byChannel, byAgent, definitions: REPORT_DEFINITIONS,
+    viewer: { role: staff.role, agentBreakdown }, totals: finish(totals), byChannel, byAgent, byAuthor:authored.map(row=>({memberId:String(row.author_member_id),name:names.get(String(row.author_member_id))?.name||'สมาชิกที่ไม่พบ',replies:Number(row.replies),notes:Number(row.notes),conversations:Number(row.conversations)})), definitions: REPORT_DEFINITIONS,
   };
 }
 
@@ -297,6 +309,8 @@ export function reportCsv(report: Report, assigneeName?: string | null) {
     ['รวม', 'ทั้งหมด', ...csvMetrics(report.totals)],
     ...report.byChannel.map(row => ['ช่องทาง', row.label, ...csvMetrics(row)]),
     ...report.byAgent.map(row => ['ผู้รับผิดชอบ', row.name, ...csvMetrics(row)]),
+    [],['ผู้เขียนจริง','ชื่อ','คำตอบสาธารณะ','บันทึกภายใน','บทสนทนา'],
+    ...report.byAuthor.map(row=>['ผู้เขียนจริง',row.name,row.replies,row.notes,row.conversations]),
   ];
   return '﻿' + lines.map(line => line.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

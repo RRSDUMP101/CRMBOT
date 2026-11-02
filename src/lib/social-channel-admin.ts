@@ -3,7 +3,7 @@ import {ApiError,requireAdmin,type Staff} from './auth';
 import {database,transaction,type Executor,type Row} from './db';
 import {readSocialConfig,socialConfigFingerprint,socialVerificationReady,type SocialChannelConfig,type SocialProvider} from './social-channels';
 
-type Options={config?:SocialChannelConfig;fetch?:typeof fetch};
+type Options={config?:SocialChannelConfig;fetch?:typeof fetch;readConfig?:(connection?:Executor)=>Promise<SocialChannelConfig>;registeredPhone?:string};
 const now=()=>new Date().toISOString().replace(/(\.\d{3})Z$/,(_,fraction)=>fraction+'000Z');
 const expiry=(ms:number)=>new Date(ms).toISOString().replace(/(\.\d{3})Z$/,(_,fraction)=>fraction+'000Z');
 const expectedBusinessPhone='66815441815'; // Existing source's owner-selected RRS business sender.
@@ -12,6 +12,7 @@ const code=(message:string,status=409)=>new ApiError(status,message);
 function missing(config:SocialChannelConfig){
   const values:Record<string,unknown>={SOCIAL_CHANNELS_ORG_ID:config.orgId,APP_ORIGIN:config.webhookUrl};
   if(config.provider==='line')Object.assign(values,{LINE_BOT_USER_ID:config.accountId,LINE_CHANNEL_SECRET:config.secret,LINE_CHANNEL_ACCESS_TOKEN:config.accessToken});
+  else if(config.provider==='instagram')Object.assign(values,{INSTAGRAM_ACCOUNT_ID:config.accountId,INSTAGRAM_PAGE_ID:config.linkedPageId,INSTAGRAM_PAGE_ACCESS_TOKEN:config.accessToken,META_APP_ID:config.appId,META_APP_SECRET:config.secret,META_VERIFY_TOKEN:config.verifyToken,META_GRAPH_VERSION:config.apiVersion});
   else if(config.provider==='whatsapp')Object.assign(values,{WHATSAPP_PHONE_NUMBER_ID:config.accountId,WHATSAPP_WABA_ID:config.wabaId,WHATSAPP_APP_ID:config.appId,WHATSAPP_APP_SECRET:config.secret,WHATSAPP_ACCESS_TOKEN:config.accessToken,WHATSAPP_VERIFY_TOKEN:config.verifyToken,WHATSAPP_API_VERSION:config.apiVersion});
   else Object.assign(values,{META_PAGE_ID:config.accountId,META_APP_SECRET:config.secret,META_PAGE_ACCESS_TOKEN:config.accessToken,META_VERIFY_TOKEN:config.verifyToken,META_API_VERSION:config.apiVersion});
   if(config.provider==='whatsapp'&&config.whatsappAccountMode==='meta-test')values.WHATSAPP_EXPECTED_DISPLAY_PHONE=config.expectedDisplayPhone;
@@ -29,15 +30,15 @@ async function authorized(staff:Staff){requireAdmin(staff);await transaction(sta
 async function audit(c:Executor,staff:Staff,provider:SocialProvider,action:string,detail:Record<string,unknown>={}){
   await c.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),staff.orgId,staff.id,'social_channel.'+action,provider,JSON.stringify(detail)]);
 }
-async function cancelQueued(c:Executor,orgId:string,provider:SocialProvider){
-  await c.query("UPDATE social_message_provenance SET delivery_status='cancelled' WHERE org_id=$1 AND message_id IN (SELECT message_id FROM social_outbound_commands WHERE org_id=$1 AND provider=$2 AND status='queued')",[orgId,provider]);
-  await c.query("UPDATE social_outbound_commands SET status='cancelled',error_code='admin_channel_disabled',updated_at=$3 WHERE org_id=$1 AND provider=$2 AND status='queued'",[orgId,provider,now()]);
+async function cancelQueued(c:Executor,orgId:string,provider:SocialProvider,accountId?:string){
+  await c.query("UPDATE social_message_provenance SET delivery_status='cancelled' WHERE org_id=$1 AND message_id IN (SELECT message_id FROM social_outbound_commands WHERE org_id=$1 AND provider=$2 AND status='queued'"+(accountId?' AND account_id=$3':'')+')',accountId?[orgId,provider,accountId]:[orgId,provider]);
+  await c.query("UPDATE social_outbound_commands SET status='cancelled',error_code='admin_channel_disabled',updated_at=$3 WHERE org_id=$1 AND provider=$2 AND status='queued'"+(accountId?' AND account_id=$4':''),accountId?[orgId,provider,now(),accountId]:[orgId,provider,now()]);
 }
 async function control(orgId:string,config:SocialChannelConfig,c:Executor=database){return (await c.query('SELECT * FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3',[orgId,config.provider,config.accountId])).rows[0];}
 export async function socialChannelStatus(staff:Staff,provider:SocialProvider,options:Options={}){
   await authorized(staff);const config=options.config||readSocialConfig(provider),row=await control(staff.orgId,config);
   const absent=missing(config),fp=socialConfigFingerprint(config),scopeMatches=config.orgId===staff.orgId;
-  let valid=true;try{validConfig(config);}catch{valid=false;}
+  let valid=true;try{validConfig(config,options.registeredPhone);}catch{valid=false;}
   const verified=scopeMatches&&socialVerificationReady(row,config),hook=scopeMatches&&row?.webhook_fingerprint===fp&&!!row?.webhook_verified_at;
   return {provider,accountId:scopeMatches?config.accountId:'',configured:scopeMatches&&valid,missing:absent,expectedWebhookUrl:config.webhookUrl||'',owner:config.owner,inboundEnabled:config.inboundEnabled,environmentLiveEnabled:config.liveEnabled,
     sendMode:row?.send_mode||'disabled',emergencyStop:!row||!!row.emergency_stop,verified,verifiedAt:row?.verified_at||null,verificationExpiresAt:row?.verification_expires_at||null,webhookVerified:hook,lastWebhookAt:row?.webhook_verified_at||null,
@@ -62,6 +63,17 @@ async function verifyProvider(config:SocialChannelConfig,transport:typeof fetch,
     return {expires:Date.now()+86400000,detail:{accountMatched:true,callbackMatched:true}};
   }
   const base='https://graph.facebook.com/'+config.apiVersion+'/';
+  if(config.provider==='instagram'){
+    if(!/^\d{5,40}$/.test(config.linkedPageId||'')||!/^\d{5,40}$/.test(config.appId||''))throw code('account_configuration_invalid');
+    const debug=await providerJson(base+'debug_token?input_token='+encodeURIComponent(token),config.appId+'|'+config.secret,transport),data=debug.data;
+    if(data?.is_valid!==true||String(data.app_id)!==config.appId||data.profile_id!==undefined&&String(data.profile_id)!==config.linkedPageId)throw code('provider_token_app_mismatch');
+    if(!Array.isArray(data.scopes)||!['instagram_basic','instagram_manage_messages'].every(scope=>data.scopes.includes(scope)))throw code('provider_permission_missing');
+    let expires=Date.now()+86400000;
+    for(const field of ['expires_at','data_access_expires_at'])if(data[field]!==undefined&&data[field]!==0){const expiry=Number(data[field])*1000;if(!Number.isFinite(expiry)||expiry<=Date.now())throw code('provider_token_expired');expires=Math.min(expires,expiry);}
+    const account=await providerJson(base+config.accountId+'?fields=id,username',token,transport),page=await providerJson(base+config.linkedPageId+'?fields=id,instagram_business_account',token,transport);
+    if(String(account.id)!==config.accountId||String(page.id)!==config.linkedPageId||String(page.instagram_business_account?.id)!==config.accountId)throw code('provider_account_mismatch');
+    return {expires,detail:{accountMatched:true,linkedPageMatched:true,permissionsChecked:true,callbackProof:'signed_webhook_required'}};
+  }
   if(config.provider==='facebook'){
     // Matches the source's Page identity check; signed callback and a controlled
     // test delivery are required separately before this account can go live.
@@ -112,8 +124,8 @@ export async function socialChannelAction(staff:Staff,provider:SocialProvider,in
   const action=String(input.action),fp=socialConfigFingerprint(config);
   if(action==='disable'){
     await transaction(staff.orgId,async c=>{
-      await c.query("UPDATE social_channel_controls SET send_enabled=0,emergency_stop=1,send_mode='disabled',verification_id=NULL,epoch=epoch+1,updated_at=$3 WHERE org_id=$1 AND provider=$2",[staff.orgId,provider,now()]);
-      await cancelQueued(c,staff.orgId,provider);await audit(c,staff,provider,'disabled');
+      await c.query("UPDATE social_channel_controls SET send_enabled=0,emergency_stop=1,send_mode='disabled',verification_id=NULL,epoch=epoch+1,updated_at=$3 WHERE org_id=$1 AND provider=$2"+(config.registryAccountId?' AND account_id=$4':''),config.registryAccountId?[staff.orgId,provider,now(),config.accountId]:[staff.orgId,provider,now()]);
+      await cancelQueued(c,staff.orgId,provider,config.registryAccountId?config.accountId:undefined);await audit(c,staff,provider,'disabled');
     },staff);
     return socialChannelStatus(staff,provider,options);
   }
@@ -122,13 +134,14 @@ export async function socialChannelAction(staff:Staff,provider:SocialProvider,in
     const attempt=randomUUID();
     await transaction(staff.orgId,async c=>{
       await c.query("INSERT INTO social_channel_controls(org_id,provider,account_id,updated_at,verification_id,verification_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(org_id,provider,account_id) DO UPDATE SET send_enabled=0,emergency_stop=1,send_mode='disabled',epoch=epoch+1,verified_at=NULL,verification_fingerprint=NULL,verification_expires_at=NULL,verification_error_code=NULL,verification_id=excluded.verification_id,verification_by=excluded.verification_by,updated_at=excluded.updated_at",[staff.orgId,provider,config.accountId,now(),attempt,staff.id]);
-      await cancelQueued(c,staff.orgId,provider);await audit(c,staff,provider,'verification_started');
+      await cancelQueued(c,staff.orgId,provider,config.registryAccountId?config.accountId:undefined);await audit(c,staff,provider,'verification_started');
     },staff);
     try{
-      const proof=await verifyProvider(config,options.fetch||fetch);
-      if(socialConfigFingerprint(options.config||readSocialConfig(provider))!==fp)throw code('configuration_changed_during_verification');
+      const proof=await verifyProvider(config,options.fetch||fetch,options.registeredPhone);
+      if(socialConfigFingerprint(options.readConfig?await options.readConfig():options.config||readSocialConfig(provider))!==fp)throw code('configuration_changed_during_verification');
       await transaction(staff.orgId,async c=>{
         if((await control(staff.orgId,config,c))?.verification_id!==attempt)throw code('verification_cancelled');
+        if(options.readConfig&&socialConfigFingerprint(await options.readConfig(c))!==fp)throw code('configuration_changed_during_verification');
         await c.query('UPDATE social_channel_controls SET verified_at=$4,verification_fingerprint=$5,verification_expires_at=$6,verification_error_code=NULL,verification_detail=$7,verification_id=NULL WHERE org_id=$1 AND provider=$2 AND account_id=$3',[staff.orgId,provider,config.accountId,now(),fp,expiry(proof.expires),JSON.stringify(proof.detail)]);
         await audit(c,staff,provider,'verified',{accountId:config.accountId});
       },staff);
@@ -143,11 +156,12 @@ export async function socialChannelAction(staff:Staff,provider:SocialProvider,in
     }
   }else{
     if(input.confirm!==true)throw code('explicit_confirmation_required',422);
-    validConfig(config);
+    validConfig(config,options.registeredPhone);
     if(action==='enable'&&provider==='whatsapp'&&config.whatsappAccountMode==='meta-test')throw code('test_account_cannot_enable_customer_sending');
     if(config.owner!=='crm'||!config.inboundEnabled||!config.liveEnabled)throw code('environment_sender_disabled');
     if(!config.testRecipient||!(provider==='whatsapp'?/^[1-9]\d{7,14}$/:provider==='line'?/^U[a-f0-9]{32}$/:/^\d{5,40}$/).test(config.testRecipient))throw code('test_recipient_not_configured');
     await transaction(staff.orgId,async c=>{
+      if(options.readConfig){const fresh=await options.readConfig(c);if(!fresh.inboundEnabled||!fresh.liveEnabled||socialConfigFingerprint(fresh)!==fp)throw code('configuration_changed_during_verification');}
       const row=await control(staff.orgId,config,c);
       if(!socialVerificationReady(row,config)||row.webhook_fingerprint!==fp||!row.webhook_verified_at)throw code('fresh_account_and_signed_webhook_verification_required');
       if(action==='enable'&&(!row.test_passed_at||row.test_fingerprint!==fp))throw code('controlled_test_delivery_required');

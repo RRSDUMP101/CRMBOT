@@ -1,11 +1,9 @@
 /**
  * Multi-account channel registry and guided onboarding (SOCIAL_ACCOUNTS_ENABLED, default off).
  *
- * Scope of this module: registry + onboarding only. Inbound routing and outbound dispatch
- * still use the env-based readSocialConfig()/social_channel_controls path unchanged; the
- * registry only READS that path's signed-webhook and controlled-test evidence, so an
- * account can become "ready" only when the exact stored credential has been proven by the
- * existing controlled test flow. A saved token is never ready by itself.
+ * Runtime credentials are selected by social-account-runtime when its separate flag is on.
+ * Signed-webhook and controlled-test evidence always bind to the exact account credential.
+ * A saved token is never ready by itself.
  *
  * Secrets: provider tokens, LINE channel secrets, PKCE verifiers and short-lived user
  * grants are stored only as AES-256-GCM ciphertext (WebCrypto) under a versioned root key
@@ -193,7 +191,7 @@ function appOrigin(env:Env){
   return url.protocol==='https:'&&url.origin===raw&&!url.username&&!url.password?url.origin:'';
 }
 export function socialAccountCallbackUrl(provider:AccountProvider,env:Env=process.env){
-  const origin=appOrigin(env);return origin&&provider!=='instagram'?origin+'/api/channels/'+provider:'';
+  const origin=appOrigin(env);return origin&&(provider!=='instagram'||env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true')?origin+'/api/channels/'+provider:'';
 }
 function metaApp(env:Env){
   const appId=env.META_APP_ID||'',appSecret=env.META_APP_SECRET||'',version=env.META_GRAPH_VERSION||'';
@@ -370,6 +368,7 @@ async function storeConnection(c:Executor,staff:Staff,data:Connect){
   const time=utc(Date.now()),inbound=data.provider==='instagram'?'unsupported':'pending',outbound=data.provider==='instagram'?'unsupported':'pending';
   const values=[data.parentRef,data.displayName,data.masked,data.identity,inbound,outbound,data.token.ciphertext,data.token.iv,data.secret?.ciphertext??null,data.secret?.iv??null,data.token.keyVersion,data.fingerprint,JSON.stringify(data.scopes),data.expires===null?null:utc(data.expires),time,staff.id,data.grantId];
   if(existing){
+    await (await import('./social-account-runtime')).disableRegisteredAccount(c,staff.orgId,data.provider,data.accountId);
     await c.query(`UPDATE social_accounts SET parent_ref=$4,display_name=$5,masked_identity=$6,display_identity=$7,state='webhook_pending',auth_readiness='pending',inbound_readiness=$8,outbound_readiness=$9,
       token_ciphertext=$10,token_iv=$11,secret_ciphertext=$12,secret_iv=$13,key_version=$14,token_fingerprint=$15,scopes=$16,expires_at=$17,connected_at=$18,connected_by=$19,grant_id=$20,
       last_verified_at=NULL,verification_expires_at=NULL,verification_evidence='{}',last_error_code=NULL,revision=revision+1,updated_at=$18 WHERE org_id=$1 AND id=$2 AND revision=$3`,[staff.orgId,existing.id,existing.revision,...values]);
@@ -385,7 +384,7 @@ async function storeConnection(c:Executor,staff:Staff,data:Connect){
 // ---------------------------------------------------------------- Views (never include credentials)
 export type SocialAccountView={id:string;provider:AccountProvider;displayName:string;maskedIdentity:string;state:SocialAccountState;
   readiness:{auth:string;inbound:string;outbound:string};expiresAt:string|null;lastVerifiedAt:string|null;verificationFresh:boolean;connectedAt:string|null;updatedAt:string;
-  step:number;callbackUrl:string;problem:{code:string;message:string;next:string}|null;revision:number};
+  step:number;callbackUrl:string;problem:{code:string;message:string;next:string}|null;revision:number;runtime:{available:boolean;inboundEnabled:boolean;liveEnabled:boolean;testRecipient:string}};
 function wizardStep(row:Row,fresh:boolean){
   if(['disconnected','expired','missing_permission','awaiting_provider_review'].includes(row.state))return 3;
   if(row.state==='ready'||row.state==='paused')return 10;
@@ -397,11 +396,11 @@ function wizardStep(row:Row,fresh:boolean){
 }
 function accountView(row:Row,env:Env):SocialAccountView{
   const fresh=!!row.verification_expires_at&&Date.parse(row.verification_expires_at)>Date.now();
-  const code=row.last_error_code||stateProblems[row.state as SocialAccountState]||(row.provider==='instagram'&&row.state==='webhook_pending'&&row.auth_readiness==='ready'?'inbound_unsupported':'');
+  const code=row.last_error_code||stateProblems[row.state as SocialAccountState]||(row.provider==='instagram'&&env.SOCIAL_ACCOUNT_RUNTIME_ENABLED!=='true'&&row.state==='webhook_pending'&&row.auth_readiness==='ready'?'inbound_unsupported':'');
   return {id:row.id,provider:row.provider,displayName:row.display_name,maskedIdentity:row.masked_identity,state:row.state,
     readiness:{auth:row.auth_readiness,inbound:row.inbound_readiness,outbound:row.outbound_readiness},expiresAt:row.expires_at||null,lastVerifiedAt:row.last_verified_at||null,verificationFresh:fresh,
     connectedAt:row.connected_at||null,updatedAt:row.updated_at,step:wizardStep(row,fresh),callbackUrl:socialAccountCallbackUrl(row.provider,env),
-    problem:code?{code,...describeSocialAccountError(code)}:null,revision:Number(row.revision)};
+    problem:code?{code,...describeSocialAccountError(code)}:null,revision:Number(row.revision),runtime:{available:env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true',inboundEnabled:!!row.runtime_inbound_enabled,liveEnabled:!!row.runtime_live_enabled,testRecipient:row.runtime_test_recipient||''}};
 }
 function attemptView(row:Row,connected:Set<string>){
   const assets=row.status==='awaiting_selection'?parseJsonArray(row.assets).map((asset:Asset)=>({key:asset.key,name:asset.name,maskedIdentity:asset.masked,alreadyConnected:connected.has(row.provider+'\0'+asset.id)})):[];
@@ -586,29 +585,33 @@ export async function saveLineAccount(staff:Staff,input:Record<string,unknown>,o
  * additionally requires that the existing sender uses this exact stored credential.
  */
 async function runtimeEvidence(row:Row,env:Env,secret:string){
-  if(row.provider==='instagram')return {supported:false,envMatches:false,inbound:false,credentialMatches:false,test:false};
-  const config=readSocialConfig(row.provider as SocialProvider,env);
+  if(row.provider==='instagram'&&env.SOCIAL_ACCOUNT_RUNTIME_ENABLED!=='true')return {supported:false,envMatches:false,inbound:false,credentialMatches:false,test:false,liveReady:false};
+  const runtime=env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true';
+  const config=runtime?await (await import('./social-account-runtime')).resolveSocialConfig(row.org_id,row.provider,row.account_id,{env}):readSocialConfig(row.provider as SocialProvider,env);
   const envMatches=config.orgId===row.org_id&&config.accountId===row.account_id&&(row.provider!=='whatsapp'||config.wabaId===row.parent_ref)&&(row.provider!=='line'||secretEqual(config.secret,secret));
-  const control=(await database.query('SELECT webhook_fingerprint,webhook_verified_at,test_passed_at,test_fingerprint FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3',[row.org_id,row.provider,row.account_id])).rows[0];
+  const control=(await database.query('SELECT webhook_fingerprint,webhook_verified_at,test_passed_at,test_fingerprint,send_enabled,emergency_stop,send_mode FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3',[row.org_id,row.provider,row.account_id])).rows[0];
   const fingerprint=socialConfigFingerprint(config),since=Date.parse(row.connected_at||'');
-  const inbound=envMatches&&!!control?.webhook_verified_at&&control.webhook_fingerprint===fingerprint&&Date.parse(control.webhook_verified_at)>=since;
+  const inbound=envMatches&&(!runtime||config.inboundEnabled)&&!!control?.webhook_verified_at&&control.webhook_fingerprint===fingerprint&&Date.parse(control.webhook_verified_at)>=since;
   const credentialMatches=envMatches&&!!config.accessToken&&socialTokenFingerprint(config.accessToken)===row.token_fingerprint;
   const test=inbound&&credentialMatches&&!!control?.test_passed_at&&control.test_fingerprint===fingerprint&&Date.parse(control.test_passed_at)>=since;
-  return {supported:true,envMatches,inbound,credentialMatches,test};
+  const liveReady=!runtime||config.liveEnabled&&!!control?.send_enabled&&!control.emergency_stop&&control.send_mode==='live';
+  return {supported:true,envMatches,inbound,credentialMatches,test,liveReady};
 }
-function registryConfig(row:Row,token:string,secret:string,env:Env):SocialChannelConfig{
+export function registryConfig(row:Row,token:string,secret:string,env:Env):SocialChannelConfig{
   const base={provider:row.provider as SocialProvider,orgId:row.org_id,accountId:row.account_id,accessToken:token,webhookUrl:socialAccountCallbackUrl(row.provider,env),owner:'crm',inboundEnabled:true,liveEnabled:false};
   if(row.provider==='line')return {...base,secret};
+  if(row.provider==='instagram')return {...base,linkedPageId:row.parent_ref,secret:env.META_APP_SECRET||'',appId:env.META_APP_ID||'',verifyToken:env.INSTAGRAM_VERIFY_TOKEN||env.META_VERIFY_TOKEN,apiVersion:env.META_GRAPH_VERSION};
   if(row.provider==='facebook')return {...base,secret:env.META_APP_SECRET||'',appId:env.META_APP_ID||'',verifyToken:env.META_VERIFY_TOKEN,apiVersion:env.META_GRAPH_VERSION};
   return {...base,wabaId:row.parent_ref,appId:env.META_APP_ID||'',secret:env.META_APP_SECRET||'',verifyToken:env.WHATSAPP_VERIFY_TOKEN||env.META_VERIFY_TOKEN,apiVersion:env.META_GRAPH_VERSION,whatsappAccountMode:'business'};
 }
-async function credentials(row:Row,env:Env){
+export async function readStoredSocialCredentials(row:Row,env:Env){
   if(!row.token_ciphertext)throw fail('token_unreadable',503);
   const ring=socialTokenKeyRing(env);
   const token=await openSocialSecret(sealedToken(row),'account-token',tokenSubject(row),env,ring);
   const secret=row.secret_ciphertext?await openSocialSecret(sealedSecret(row),'account-secret',tokenSubject(row),env,ring):'';
   return {token,secret};
 }
+const credentials=readStoredSocialCredentials;
 
 type Patch={state?:SocialAccountState;auth_readiness?:string;inbound_readiness?:string;outbound_readiness?:string;scopes?:string;expires_at?:string|null;last_verified_at?:string|null;verification_expires_at?:string|null;verification_evidence?:string;last_error_code?:string|null};
 const patchColumns=['state','auth_readiness','inbound_readiness','outbound_readiness','scopes','expires_at','last_verified_at','verification_expires_at','verification_evidence','last_error_code'] as const;
@@ -626,6 +629,7 @@ async function commitPatch(staff:Staff,row:Row,patch:Patch,action:string,detail:
     if(state!==current.state){assertTransition(current.state,state);next.state=state;}
     const keys=patchColumns.filter(key=>key in next),time=utc(Date.now());
     await c.query(`UPDATE social_accounts SET ${keys.map((key,index)=>`${key}=$${index+4}`).join(',')}${keys.length?',':''}revision=revision+1,updated_at=$3 WHERE org_id=$1 AND id=$2`,[staff.orgId,row.id,time,...keys.map(key=>next[key])]);
+    if(['paused','disconnected','expired','degraded','missing_permission','awaiting_provider_review'].includes(state))await (await import('./social-account-runtime')).disableRegisteredAccount(c,staff.orgId,current.provider,current.account_id);
     await audit(c,staff,action,row.id,{provider:row.provider,account:row.masked_identity,...detail});
   },staff);
 }
@@ -646,12 +650,12 @@ export async function socialAccountAction(staff:Staff,accountId:string,input:Rec
   await settleExpiry(staff);
   const row=await accountRow(database,staff.orgId,uuid(accountId));if(!row)throw fail('account_not_found',404);
   const view=async()=>accountView(await accountRow(database,staff.orgId,row.id),env);
-  const unsupported=row.provider==='instagram'?'unsupported':'pending';
+  const unsupported=row.provider==='instagram'&&env.SOCIAL_ACCOUNT_RUNTIME_ENABLED!=='true'?'unsupported':'pending';
 
   if(action==='disconnect')return disconnect(staff,row,input,env,transport);
   if(action==='pause'){
     if(!canTransition(row.state,'paused'))throw fail('invalid_state_transition');
-    await commitPatch(staff,row,{state:'paused',outbound_readiness:row.provider==='instagram'?'unsupported':'blocked'},'paused');return view();
+    await commitPatch(staff,row,{state:'paused',outbound_readiness:unsupported==='unsupported'?'unsupported':'blocked'},'paused');return view();
   }
   if(action==='resume'){
     // Resuming never restores 'ready': inbound and controlled-test evidence are re-checked.
@@ -713,6 +717,7 @@ export async function socialAccountAction(staff:Staff,accountId:string,input:Rec
   if(!evidence.inbound)throw fail('waiting_for_signed_webhook');
   if(!evidence.credentialMatches)throw fail('registry_dispatch_pending');
   if(!evidence.test)throw fail('controlled_test_required');
+  if(!evidence.liveReady)throw fail('environment_sender_disabled');
   await commitPatch(staff,row,{state:'ready',inbound_readiness:'ready',outbound_readiness:'ready',last_error_code:null},'activated');
   return view();
 }
@@ -744,7 +749,7 @@ async function verifyInstagram(row:Row,token:string,env:Env,transport:typeof fet
   if(String(account.id)!==row.account_id)throw fail('provider_account_mismatch');
   const page=await providerCall(graphUrl(app.version,row.parent_ref,{fields:'id,instagram_business_account'}),{bearer:token},transport);
   if(String(page.id)!==row.parent_ref||String(page.instagram_business_account?.id)!==row.account_id)throw fail('provider_account_mismatch');
-  return {expires:Date.now()+86_400_000,detail:{accountMatched:true,linkedPageMatched:true,inbound:'unsupported'}};
+  return {expires:Date.now()+86_400_000,detail:{accountMatched:true,linkedPageMatched:true,inbound:env.SOCIAL_ACCOUNT_RUNTIME_ENABLED==='true'?'signed_webhook_required':'unsupported'}};
 }
 
 /**
@@ -776,6 +781,7 @@ async function disconnect(staff:Staff,row:Row,input:Record<string,unknown>,env:E
     assertTransition(current.state,'disconnected');
     await c.query(`UPDATE social_accounts SET state='disconnected',auth_readiness='pending',inbound_readiness=CASE WHEN provider='instagram' THEN 'unsupported' ELSE 'pending' END,outbound_readiness=CASE WHEN provider='instagram' THEN 'unsupported' ELSE 'blocked' END,
       token_ciphertext=NULL,token_iv=NULL,secret_ciphertext=NULL,secret_iv=NULL,token_fingerprint=NULL,last_verified_at=NULL,verification_expires_at=NULL,verification_evidence='{}',last_error_code=NULL,revision=revision+1,updated_at=$3 WHERE org_id=$1 AND id=$2`,[staff.orgId,row.id,utc(Date.now())]);
+    await (await import('./social-account-runtime')).disableRegisteredAccount(c,staff.orgId,current.provider,current.account_id);
     await audit(c,staff,'disconnected',row.id,{provider:row.provider,account:row.masked_identity,providerResult:result});
   },staff);
   return {...accountView(await accountRow(database,staff.orgId,row.id),env),providerResult:result};

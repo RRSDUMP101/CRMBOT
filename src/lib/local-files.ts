@@ -1,4 +1,4 @@
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,unlink} from 'node:fs/promises';
 import path from 'node:path';
 import type {PrivateBucket} from './files';
 export function localBucket():PrivateBucket {
@@ -7,5 +7,6 @@ export function localBucket():PrivateBucket {
   return {
     async put(key,value){await mkdir(directory,{recursive:true});await writeFile(target(key),value,{mode:0o600,flag:'wx'});},
     async get(key){try{const bytes=await readFile(target(key));return {body:new Response(bytes).body!};}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return null;throw e;}},
+    async delete(key){try{await unlink(target(key));}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}},
   };
 }

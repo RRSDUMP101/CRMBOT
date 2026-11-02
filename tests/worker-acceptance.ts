@@ -35,6 +35,15 @@ async function main(){try {
   if(!assets.length)throw new Error('No static asset URLs in login page');
   for(const asset of assets){const response=await mf.dispatchFetch(new URL(asset,origin));if(response.status!==200)throw new Error(`Broken asset ${asset}`);}
   console.log(`Worker health, login HTML and ${assets.length} static assets passed.`);
+  // Browser module workers reject octet-stream under nosniff, even when bytes are correct.
+  for(const path of ['/pdf.worker.min.mjs','/sw.js']){
+    const response=await mf.dispatchFetch(origin+path);
+    if(response.status!==200||!response.headers.get('content-type')?.includes('javascript'))throw new Error(`Browser worker MIME invalid: ${path}`);
+    const bytes=Buffer.from(await response.arrayBuffer()),source=await readFile('public'+path);
+    if(!bytes.equals(source))throw new Error(`Browser worker bytes changed in packaging: ${path}`);
+  }
+  const manifest=await mf.dispatchFetch(origin+'/manifest.webmanifest');
+  if(manifest.status!==200||(await manifest.json() as {start_url?:string}).start_url!=='/')throw new Error('PWA manifest unavailable');
   await run('tests/api.test.ts');await run('tests/helpdesk.test.ts');await run('tests/files-api.test.ts');
 } finally {await mf.dispose();}}
 main().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,4 +1,4 @@
-import {signBridgeRequest} from '../src/lib/bridge-protocol';
+import {signBridgeRequest,bridgeKeyConfig} from '../src/lib/bridge-protocol';
 type Env=Record<string,unknown>;
 type Statement={bind(...values:unknown[]):{first<T>():Promise<T|null>}};
 type Database={prepare(sql:string):Statement};
@@ -14,7 +14,7 @@ export function saleSyncConfig(env:Env){
   if(typeof secret!=='string'||secret.length<32||typeof orgId!=='string'||!orgId||typeof target!=='string')return null;
   let url:URL;try{url=new URL(target);}catch{return null;}
   if(url.protocol!=='https:'||url.search||url.hash||url.username||url.password||url.pathname!=='/api/rrs/crm/sync'||url.href!==target)return null;
-  return {secret,orgId,url:url.href};
+  return {secret,orgId,url:url.href,...bridgeKeyConfig(env)};
 }
 export async function notifySale(env:Env,reason:'wake'|'reconcile',fetcher:typeof fetch=fetch){
   const config=saleSyncConfig(env);if(!config)return {status:'disabled'} as const;
@@ -24,7 +24,7 @@ export async function notifySale(env:Env,reason:'wake'|'reconcile',fetcher:typeo
     headSequence=Number(row?.head??0);if(!Number.isSafeInteger(headSequence)||headSequence<=notified)return {status:'unchanged'} as const;
   }
   const body=JSON.stringify(headSequence===undefined?{version:1,reason}:{version:1,reason,headSequence});
-  const response=await fetcher(config.url,{method:'POST',headers:await signBridgeRequest(config.url,{secret:config.secret,orgId:config.orgId,method:'POST',body}),body,redirect:'manual',signal:AbortSignal.timeout(25000)});
+  const response=await fetcher(config.url,{method:'POST',headers:await signBridgeRequest(config.url,{...config,method:'POST',body}),body,redirect:'manual',signal:AbortSignal.timeout(25000)});
   await response.body?.cancel();
   // A failed wake is not remembered, so the next commit or the cron tries again.
   if(response.ok&&headSequence!==undefined)notified=Math.max(notified,headSequence);

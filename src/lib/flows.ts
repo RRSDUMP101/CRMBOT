@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { camel, database, transaction, withDatabase, type D1Binding, type Executor, type Row } from './db';
+import { camel, database, transaction, withDatabase, type D1Binding, type D1Statement, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
 import { readSocialConfig, type FlowInboundSignal, type SocialChannelConfig, type SocialProvider } from './social-channels';
 
@@ -38,6 +38,7 @@ export type FlowCondition =
   | { type: 'consent'; state: 'recorded' | 'not_recorded' };
 export type FlowTrigger =
   | { type: 'inbound_message' }
+  | { type: 'sale_context_changed' }
   | { type: 'new_conversation' }
   | { type: 'keyword'; keywords: string[]; match: 'contains' | 'exact' | 'starts_with' }
   | { type: 'label_added'; label: string }
@@ -62,7 +63,7 @@ const ref = z.string().regex(UUID, 'รหัสไม่ถูกต้อง')
 const label = z.string().trim().min(1).max(40);
 const stageEnum = z.enum(flowStages);
 const conditionSchema = z.discriminatedUnion('type', [
-  z.strictObject({ type: z.literal('provider'), providers: z.array(z.enum(['whatsapp', 'line', 'facebook', 'web'])).min(1).max(4), accountId: z.string().trim().min(1).max(200).optional() }),
+  z.strictObject({ type: z.literal('provider'), providers: z.array(z.enum(['whatsapp', 'line', 'facebook', 'instagram', 'web'])).min(1).max(5), accountId: z.string().trim().min(1).max(200).optional() }),
   z.strictObject({ type: z.literal('market'), markets: z.array(z.enum(['unknown', 'domestic', 'export'])).min(1).max(3) }),
   z.strictObject({ type: z.literal('language'), languages: z.array(z.enum(['th', 'en', 'other'])).min(1).max(3) }),
   z.strictObject({ type: z.literal('business_hours'), inside: z.boolean(), days: z.array(z.number().int().min(0).max(6)).min(1).max(7), start: hhmm, end: hhmm }),
@@ -72,6 +73,7 @@ const conditionSchema = z.discriminatedUnion('type', [
 ]);
 const triggerSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('inbound_message') }),
+  z.strictObject({ type: z.literal('sale_context_changed') }),
   z.strictObject({ type: z.literal('new_conversation') }),
   z.strictObject({ type: z.literal('keyword'), keywords: z.array(z.string().trim().min(1).max(80)).min(1).max(20), match: z.enum(['contains', 'exact', 'starts_with']) }),
   z.strictObject({ type: z.literal('label_added'), label }),
@@ -297,7 +299,7 @@ function sendBlocker(env: Env, subject: Subject, greeting: boolean, greetingSent
 }
 async function channelBlocker(c: Executor, ctx: Ctx, subject: Subject): Promise<string | null> {
   const identity = subject.identity!;
-  const config = ctx.dispatch.config ?? readSocialConfig(identity.provider as SocialProvider, ctx.env as Record<string, string | undefined>);
+  const config = ctx.dispatch.config ?? await (await import('./social-account-runtime')).resolveSocialConfig(identity.org_id,identity.provider as SocialProvider,identity.account_id,{env:ctx.env as Record<string,string|undefined>,connection:c});
   if (config.owner !== 'crm' || !config.inboundEnabled || !config.liveEnabled || config.provider !== identity.provider || config.accountId !== identity.account_id) return 'channel_not_live';
   const controls = (await c.query('SELECT send_enabled,emergency_stop FROM social_channel_controls WHERE org_id=$1 AND provider=$2 AND account_id=$3', [identity.org_id, identity.provider, identity.account_id])).rows[0];
   if (!controls || !Number(controls.send_enabled) || Number(controls.emergency_stop)) return 'channel_stopped';
@@ -326,13 +328,13 @@ export async function flowOutboundGuard(c: Executor, command: Row): Promise<bool
 // ---------------------------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------------------------
-type StartInput = { orgId: string; flow: Version; conversationId: string; triggerKind: string; triggerEventId: string; triggerKey: string; text?: string; chain?: string; depth?: number };
+type StartInput = { orgId: string; flow: Version; conversationId: string; triggerKind: string; triggerEventId: string; triggerKey: string; text?: string; chain?: string; depth?: number; pinned?: boolean };
 async function startExecution(ctx: Ctx, input: StartInput): Promise<{ id?: string; skipped?: string }> {
   const { orgId, flow } = input, now = ctx.now(), at = stamp(now);
   return transaction(orgId, async c => {
     if (await globallyPaused(c, orgId)) return { skipped: 'global_pause' };
     const current = (await c.query('SELECT status,current_version FROM flows WHERE org_id=$1 AND id=$2', [orgId, flow.id])).rows[0];
-    if (current?.status !== 'published' || Number(current.current_version) !== flow.version) return { skipped: 'flow_not_published' };
+    if (current?.status !== 'published' || (!input.pinned && Number(current.current_version) !== flow.version)) return { skipped: 'flow_not_published' };
     if ((await c.query('SELECT 1 FROM flow_executions WHERE org_id=$1 AND flow_id=$2 AND trigger_key=$3 LIMIT 1', [orgId, flow.id, input.triggerKey])).rows.length) return { skipped: 'duplicate_trigger' };
     const subject = await loadSubject(c, orgId, input.conversationId);
     if (!subject) return { skipped: 'subject_missing' };
@@ -398,7 +400,7 @@ async function performAction(c: Executor, ctx: Ctx, run: Running, execution: Row
       const sentToday = Number((await c.query('SELECT count(*) AS n FROM flow_outbound_commands WHERE org_id=$1 AND created_at>=$2', [orgId, stamp(bangkokDayStart(now))])).rows[0].n);
       if (sentToday >= dailyLimit(ctx.env)) return { outcome: 'blocked', detail: { reason: 'daily_limit' } };
       const messageId = randomUUID(), text = step.text!;
-      await c.query("INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,'agent',$4)", [messageId, orgId, conversation.id, text]);
+      await c.query("INSERT INTO messages(id,org_id,conversation_id,role,content,author_type) VALUES($1,$2,$3,'agent',$4,'automation')", [messageId, orgId, conversation.id, text]);
       const { enqueueSocialReply } = await import('./social-channels');
       const intent = await enqueueSocialReply(c, orgId, conversation.id, messageId, text, { approvedBy: run.flow.publishedBy, metadata: { flow: { flowId: run.flow.id, version: run.flow.version, executionId: run.executionId, stepId: step.id, greeting: step.greeting } } });
       if (!intent.commandId) return { outcome: 'blocked', detail: { reason: 'non_social_channel' } };
@@ -417,6 +419,7 @@ async function performAction(c: Executor, ctx: Ctx, run: Running, execution: Row
     case 'close_conversation': {
       if (conversation.status === 'human_active') return { outcome: 'skipped', detail: { reason: 'human_takeover' } };
       if (conversation.status === 'resolved') return { outcome: 'unchanged', detail: {} };
+      await (await import('./operators')).validateRequiredFields(c,orgId,conversation.id);
       await c.query("UPDATE conversations SET status='resolved',version=version+1,generating_client_id=NULL,generation_started_at=NULL,updated_at=$3 WHERE org_id=$1 AND id=$2", [orgId, conversation.id, at]);
       // Closing cancels every other pending automation for this conversation.
       await cancelConversationExecutions(c, orgId, conversation.id, 'active', 'conversation_closed', at, run.executionId);
@@ -522,6 +525,8 @@ async function advanceExecution(ctx: Ctx, orgId: string, executionId: string): P
       return 'failed';
     }
     if (result.halt) return 'halted';
+    // Flow assignment takes precedence; the router acts only on a still-unassigned human queue.
+    if(result.done||result.waiting)await (await import('./operators')).routeWaitingConversation(orgId,execution.conversation_id);
     // Dispatch right after the commit, before later steps can change the conversation.
     if (result.commandId) await dispatchFlowSend(ctx, orgId, result.commandId);
     if (result.waiting) return 'waiting';
@@ -531,9 +536,52 @@ async function advanceExecution(ctx: Ctx, orgId: string, executionId: string): P
 }
 
 export type WebFlowInboundSignal = Omit<FlowInboundSignal, 'provider'> & { provider: 'web' };
+type SaleFlowSignal = Omit<WebFlowInboundSignal, 'kind'> & { kind: 'sale_context' };
+type IngressSignal = FlowInboundSignal | WebFlowInboundSignal | SaleFlowSignal;
+type IngressTarget = { id: string; version: number };
+/** Append to the same guarded D1 batch that applies a validated Sale event. */
+export function saleFlowIngressStatement(db: D1Binding, event: {orgId:string;eventId:string;leadId:string;occurredAt:string}, guard: {sql:string;bindings:unknown[]}): D1Statement {
+  // guard.sql is an internal cursor-CAS predicate, never user input.
+  return db.prepare(`INSERT OR IGNORE INTO flow_ingress(org_id,event_id,conversation_id,signal,targets,created_at,retry_at)
+    SELECT c.org_id,?||':'||c.id,c.id,
+      json_object('orgId',c.org_id,'provider','web','accountId','','eventId',?||':'||c.id,'kind','sale_context','conversationId',c.id,'leadId',c.lead_id,'fresh',json('false'),'optOut',json('false')),
+      COALESCE((SELECT json_group_array(json_object('id',f.id,'version',f.current_version)) FROM flows f WHERE f.org_id=c.org_id AND f.status='published' AND f.current_version IS NOT NULL),'[]'),?,?
+    FROM conversations c WHERE c.org_id=? AND c.lead_id=? AND ${guard.sql}`)
+    .bind('sale:'+event.eventId,'sale:'+event.eventId,event.occurredAt,event.occurredAt,event.orgId,event.leadId,...guard.bindings);
+}
+/** Stage this inside the same org transaction as the canonical inbound message. */
+export async function enqueueFlowIngress(c: Executor, signal: IngressSignal, env: Env = process.env) {
+  if (!flowsEnabled(env)) return;
+  const targets = (await c.query("SELECT id,current_version FROM flows WHERE org_id=$1 AND status='published' AND current_version IS NOT NULL ORDER BY created_at,id LIMIT $2", [signal.orgId, FLOW_LIMITS.flowsPerOrg])).rows.map(row => ({ id: row.id, version: Number(row.current_version) }));
+  const at = stamp(Date.now());
+  await c.query("INSERT OR IGNORE INTO flow_ingress(org_id,event_id,conversation_id,signal,targets,created_at,retry_at) VALUES($1,$2,$3,$4,$5,$6,$6)", [signal.orgId, signal.eventId, signal.conversationId, JSON.stringify(signal), JSON.stringify(targets), at]);
+}
+/** Bounded replay, safe across competing workers and a crash after starting executions. */
+export async function drainFlowIngress(orgId: string, options: FlowEngineOptions = {}, eventId?: string) {
+  const ctx = context(options);
+  if (!flowsEnabled(ctx.env)) return { status: 'disabled' as const, processed: 0, errors: 0 };
+  const args: unknown[] = [orgId, stamp(ctx.now()), FLOW_LIMITS.eventsPerRun];
+  const exact = eventId ? ' AND event_id=$4' : ''; if (eventId) args.push(eventId);
+  const pending = (await database.query("SELECT * FROM flow_ingress WHERE org_id=$1 AND status='pending' AND retry_at<=$2" + exact + ' ORDER BY created_at,event_id LIMIT $3', args)).rows;
+  let processed = 0, errors = 0;
+  for (const row of pending) {
+    try {
+      await processInboundSignal(JSON.parse(row.signal), ctx, JSON.parse(row.targets));
+      await transaction(orgId, c => c.query("UPDATE flow_ingress SET status='processed',processed_at=$3,error_code='' WHERE org_id=$1 AND event_id=$2 AND status='pending'", [orgId, row.event_id, stamp(ctx.now())]));
+      processed++;
+    } catch {
+      errors++;
+      await transaction(orgId, c => c.query("UPDATE flow_ingress SET attempts=attempts+1,status=CASE WHEN attempts>=9 THEN 'failed' ELSE 'pending' END,error_code='ingress_processing_failed',retry_at=$3 WHERE org_id=$1 AND event_id=$2 AND status='pending'", [orgId, row.event_id, stamp(ctx.now() + Math.min(3600_000, 1000 * 2 ** Math.min(12, Number(row.attempts))))]));
+    }
+  }
+  return { status: errors ? 'error' as const : 'ok' as const, processed, errors };
+}
 /** Inbound hook, called only after the social or visitor message transaction has committed. */
 export async function onInboundSignal(signal: FlowInboundSignal | WebFlowInboundSignal, options: FlowEngineOptions = {}) {
   const ctx = context(options);
+  return processInboundSignal(signal, ctx);
+}
+async function processInboundSignal(signal: IngressSignal, ctx: Ctx, targets?: IngressTarget[]) {
   if (!flowsEnabled(ctx.env)) return { status: 'disabled' as const, started: 0, cancelled: 0 };
   const { orgId, conversationId } = signal, at = stamp(ctx.now());
   const reason = signal.optOut ? 'opted_out' : signal.kind === 'message' ? 'customer_replied' : '';
@@ -543,13 +591,15 @@ export async function onInboundSignal(signal: FlowInboundSignal | WebFlowInbound
   });
   if (signal.optOut || await globallyPaused(database, orgId)) return { status: 'ok' as const, started: 0, cancelled };
   const started: string[] = [];
-  for (const flow of await publishedFlows(database, orgId)) {
+  const flows = targets ? await Promise.all(targets.map(target => loadVersion(database, orgId, target.id, target.version))) : await publishedFlows(database, orgId);
+  for (const flow of flows) {
     const trigger = flow.definition.trigger;
     let key = '';
     if (signal.kind === 'message' && signal.messageId && (trigger.type === 'inbound_message' || (trigger.type === 'keyword' && keywordMatches(trigger, signal.text || '')))) key = 'message:' + signal.messageId;
     if (trigger.type === 'new_conversation' && signal.fresh && (signal.kind === 'message' || signal.kind === 'follow')) key = 'conversation:' + conversationId;
+    if (trigger.type === 'sale_context_changed' && signal.kind === 'sale_context') key = 'sale:' + signal.eventId;
     if (!key) continue;
-    const result = await startExecution(ctx, { orgId, flow, conversationId, triggerKind: trigger.type, triggerEventId: signal.eventId, triggerKey: key, text: signal.text });
+    const result = await startExecution(ctx, { orgId, flow, conversationId, triggerKind: trigger.type, triggerEventId: signal.eventId, triggerKey: key, text: signal.text, pinned: !!targets });
     if (result.id) started.push(result.id);
   }
   for (const id of started) await advanceExecution(ctx, orgId, id);
@@ -615,12 +665,15 @@ export async function runFlows(db: D1Binding, env: Env = process.env, options: O
       // Oldest due work first, so a busy organization cannot starve the others.
       for (const row of (await database.query("SELECT org_id,MIN(wake_at) AS due FROM flow_executions WHERE status IN ('running','waiting') AND wake_at<=$1 GROUP BY org_id ORDER BY due LIMIT $2", [at, limit])).rows) orgIds.add(row.org_id);
       for (const row of (await database.query("SELECT org_id,MIN(created_at) AS due FROM flow_events WHERE status='pending' GROUP BY org_id ORDER BY due LIMIT $1", [limit])).rows) orgIds.add(row.org_id);
+      for (const row of (await database.query("SELECT org_id,MIN(created_at) AS due FROM flow_ingress WHERE status='pending' AND retry_at<=$1 GROUP BY org_id ORDER BY due LIMIT $2", [at, limit])).rows) orgIds.add(row.org_id);
       for (const row of (await database.query("SELECT DISTINCT f.org_id FROM flows f JOIN flow_versions v ON v.org_id=f.org_id AND v.flow_id=f.id AND v.version=f.current_version WHERE f.status='published' AND json_extract(v.definition,'$.trigger.type')='schedule' ORDER BY f.org_id LIMIT $1", [limit])).rows) orgIds.add(row.org_id);
     }
     for (const orgId of [...orgIds].slice(0, limit)) {
       totals.orgs++;
       try {
         const paused = await globallyPaused(database, orgId);
+        const ingress = await drainFlowIngress(orgId, { ...options, env });
+        totals.events += ingress.processed; totals.errors += ingress.errors;
         // During an emergency pause, label/stage changes are discarded rather than replayed later.
         totals.events += await processLeadEvents(ctx, orgId, paused);
         if (paused) continue;
@@ -657,7 +710,7 @@ async function assertMembers(c: Executor, orgId: string, definition: FlowDefinit
   const rows = (await c.query(`SELECT id FROM members WHERE org_id=$1 AND active=1 AND id IN (${[...ids].map((_, i) => '$' + (i + 2)).join(',')})`, [orgId, ...ids])).rows;
   if (rows.length !== ids.size) throw new ApiError(400, 'ไม่พบสมาชิกทีมที่เลือก หรือบัญชีถูกปิดใช้งาน');
 }
-const triggerLabels: Record<FlowTrigger['type'], string> = { inbound_message: 'เมื่อมีข้อความเข้าจากลูกค้า', new_conversation: 'เมื่อเริ่มบทสนทนาใหม่', keyword: 'เมื่อข้อความมีคำสำคัญ', label_added: 'เมื่อเพิ่มแท็กให้ลูกค้า', stage_changed: 'เมื่อสถานะลูกค้าเปลี่ยน', schedule: 'ตามเวลาที่กำหนด' };
+const triggerLabels: Record<FlowTrigger['type'], string> = { inbound_message: 'เมื่อมีข้อความเข้าจากลูกค้า', sale_context_changed: 'เมื่อข้อมูลฝ่ายขายเปลี่ยน', new_conversation: 'เมื่อเริ่มบทสนทนาใหม่', keyword: 'เมื่อข้อความมีคำสำคัญ', label_added: 'เมื่อเพิ่มแท็กให้ลูกค้า', stage_changed: 'เมื่อสถานะลูกค้าเปลี่ยน', schedule: 'ตามเวลาที่กำหนด' };
 export async function simulateFlow(staff: Staff, flowId: string, body: Record<string, unknown>) {
   fields(body, ['conversationId', 'source', 'text']);
   const conversationId = uuid(body.conversationId, 'บทสนทนา'), source = body.source === undefined ? 'draft' : oneOf(body.source, ['draft', 'published'], 'แหล่งข้อกำหนด');
@@ -770,7 +823,12 @@ export async function listFlows(staff: Staff) {
   ]);
   const stats: Record<string, Record<string, number>> = {};
   for (const row of counts.rows) (stats[row.flow_id] ??= {})[row.status] = Number(row.n);
-  return { enabled: flowsEnabled(), sendEnabled: flowSendsEnabled(), globalPaused: Number(control.rows[0]?.paused || 0) === 1, canEdit: staff.role === 'Admin', limits: { stepsPerRun: FLOW_LIMITS.stepsPerRun, totalSteps: FLOW_LIMITS.totalSteps, perFlowSubjectHour: FLOW_LIMITS.perFlowSubjectHour }, flows: rows.rows.map(row => ({ ...flowView(row), executions: stats[row.id] || {} })) };
+  const ingress=(await database.query("SELECT event_id,status,attempts,error_code,created_at,retry_at FROM flow_ingress WHERE org_id=$1 AND status!='processed' ORDER BY created_at LIMIT 50",[staff.orgId])).rows;
+  return { enabled: flowsEnabled(), sendEnabled: flowSendsEnabled(), globalPaused: Number(control.rows[0]?.paused || 0) === 1, canEdit: staff.role === 'Admin', ingress:ingress.map(camel), limits: { stepsPerRun: FLOW_LIMITS.stepsPerRun, totalSteps: FLOW_LIMITS.totalSteps, perFlowSubjectHour: FLOW_LIMITS.perFlowSubjectHour }, flows: rows.rows.map(row => ({ ...flowView(row), executions: stats[row.id] || {} })) };
+}
+export async function retryFlowIngress(staff:Staff,body:Record<string,unknown>){
+ requireAdmin(staff);fields(body,['eventId','confirm']);const eventId=str(body.eventId,'เหตุการณ์',400,true);if(body.confirm!==true)throw new ApiError(400,'ยืนยันลองประมวลผลอีกครั้ง');
+ await transaction(staff.orgId,async c=>{const row=(await c.query('SELECT status FROM flow_ingress WHERE org_id=$1 AND event_id=$2',[staff.orgId,eventId])).rows[0];if(!row||row.status==='processed')throw new ApiError(409,'เหตุการณ์นี้ประมวลผลแล้วหรือไม่พบ');await c.query("UPDATE flow_ingress SET status='pending',attempts=0,error_code='',retry_at=$3 WHERE org_id=$1 AND event_id=$2",[staff.orgId,eventId,stamp(Date.now())]);await audit(c,staff,'flow.ingress_retried',eventId,{});},staff);return listFlows(staff);
 }
 export async function flowDetail(staff: Staff, flowId: string) {
   const flow = await scopedFlow(database, staff.orgId, flowId);
@@ -872,6 +930,7 @@ export async function flowsApi(staff: Staff, method: string, path: string[], bod
   if (method === 'GET' && path.length === 0) return listFlows(staff);
   if (method === 'GET' && path.length === 1) return flowDetail(staff, id);
   if (method !== 'POST' || !body) throw new ApiError(404, 'ไม่พบ API ที่ร้องขอ');
+  if(path.length===2&&id==='ingress'&&action==='retry')return retryFlowIngress(staff,body);
   if (path.length === 0) return createFlow(staff, body);
   if (path.length === 1 && id === 'control') return setFlowsGlobalPause(staff, body);
   if (path.length === 2 && action === 'draft') return saveFlowDraft(staff, id, body);

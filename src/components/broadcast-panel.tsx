@@ -6,12 +6,12 @@ import {Badge,Button,Card,Empty,Field,Input,Select,Textarea} from './ui';
 
 type Provider='whatsapp'|'line';
 type ChannelGate={configured:boolean;accountId:string;environmentLive:boolean;verified:boolean;emergencyStop:boolean;sendMode:string;live:boolean;testReady:boolean;testRecipient:string|null};
-type Gates={enabled:boolean;dailyLimit:number;maxRecipients:number;batchLimit:number;channels:Record<Provider,ChannelGate>};
+type Gates={enabled:boolean;runnerEnabled?:boolean;mediaEnabled?:boolean;dailyLimit:number;maxRecipients:number;batchLimit:number;channels:Record<Provider,ChannelGate>;accounts?:Array<ChannelGate&{provider:Provider;displayName:string}>};
 type Segment={tags?:string[];markets?:string[];stages?:string[];firstContactFrom?:string;firstContactTo?:string;lastContactFrom?:string;lastContactTo?:string;importId?:string};
 type Summary={id:string;name:string;provider:Provider;status:string;messageKind:string;scheduledAt:string|null;launchedAt:string|null;launchedCount:number|null;completedAt:string|null;version:number;updatedAt:string;recipients:Record<string,number>};
-type Campaign={id:string;name:string;provider:Provider;accountId:string;status:string;messageKind:'text'|'template';messageText:string;template:{name:string;language:string;params:string[]}|null;templateBody:string|null;segment:Segment;scheduledAt:string|null;launchedAt:string|null;launchedCount:number|null;completedAt:string|null;cancelledAt:string|null;version:number;updatedAt:string};
+type Campaign={id:string;name:string;provider:Provider;accountId:string;status:string;messageKind:'text'|'template';messageText:string;template:{name:string;language:string;params:string[]}|null;templateBody:string|null;asset?:{id:string;name:string;mime:string;size:number}|null;segment:Segment;scheduledAt:string|null;launchedAt:string|null;launchedCount:number|null;completedAt:string|null;cancelledAt:string|null;version:number;updatedAt:string};
 type Detail={campaign:Campaign;stats:{recipients:Record<string,number>;skipReasons:Record<string,number>;delivery:Record<string,number>};gates:Gates;canManage:boolean;testSends:{campaignVersion:number;recipient:string;createdAt:string;status:string;errorCode:string}[];imports:{importId:string;createdAt:string;total:number;valid:number;matched:number;eligible:number}[];testPassedForVersion:boolean};
-type Preview={campaignId:string;version:number;matched:number;eligible:number;excluded:Record<string,number>;maxRecipients:number;overLimit:boolean;computedAt:string;samples:{recipient:string;market:string;stage:string}[];excludedSamples:{recipient:string;market:string;stage:string;reason:string}[]};
+type Preview={campaignId:string;version:number;matched:number;eligible:number;excluded:Record<string,number>;maxRecipients:number;overLimit:boolean;computedAt:string;audienceHash:string|null;samples:{recipient:string;market:string;stage:string;message:string}[];excludedSamples:{recipient:string;market:string;stage:string;reason:string}[]};
 type ImportResult={importId:string;totalRows:number;valid:number;invalid:number;duplicates:number;invalidReasons:Record<string,number>;matched:number;matchedEligible:number;unmatched:number;excluded:Record<string,number>;recipientsCreated:number;samples:{row:number;recipient:string;status:string;error:string;match:string;reason:string}[]};
 
 const providerNames:Record<Provider,string>={whatsapp:'WhatsApp',line:'LINE OA'};
@@ -19,6 +19,7 @@ const statusNames:Record<string,string>={draft:'ฉบับร่าง',schedu
 const statusTone:Record<string,string>={draft:'neutral',scheduled:'blue',sending:'green',paused:'amber',completed:'purple',cancelled:'neutral'};
 const reasonNames:Record<string,string>={no_consent:'ไม่มีหลักฐานความยินยอม WhatsApp',not_followed:'ไม่มีหลักฐานว่าเป็นเพื่อน LINE',opted_out:'ลูกค้าปฏิเสธการติดต่อหรือบล็อก',suppressed:'อยู่ในรายชื่อระงับการส่ง',outside_24h_window:'เกิน 24 ชม. หลังข้อความล่าสุดของลูกค้า (ส่งได้เฉพาะเทมเพลตที่อนุมัติ)',invalid_recipient:'รูปแบบผู้รับไม่ถูกต้อง',identity_link_changed:'ข้อมูลตัวตนลูกค้าเปลี่ยน ต้องตรวจสอบ',replied:'ลูกค้าตอบกลับหลังเริ่มส่ง',cancelled_before_send:'ยกเลิกก่อนส่ง',guard_rejected:'ไม่ผ่านการตรวจก่อนส่ง',campaign_cancelled:'ยกเลิกแคมเปญ'};
 const recipientNames:Record<string,string>={pending:'รอส่ง',queued:'อยู่ในคิว',submitted:'ส่งถึงผู้ให้บริการแล้ว',failed:'ส่งไม่สำเร็จ',unknown:'ไม่ทราบผล (ไม่ส่งซ้ำอัตโนมัติ)',skipped:'ข้าม'};
+Object.assign(reasonNames,{personalization_missing:'ไม่มีข้อมูลที่ใช้แทนตัวแปร หรือข้อมูลยาวเกินกำหนด',personalization_invalid:'ข้อความหลังแทนตัวแปรยาวเกินกำหนดหรือไม่ถูกต้อง'});
 const importErrors:Record<string,string>={missing_value:'ไม่มีค่า',invalid_phone:'เบอร์ไม่ถูกต้อง',phone_requires_country_code:'ต้องมีรหัสประเทศ เช่น +66',invalid_line_id:'LINE user ID ไม่ถูกต้อง',duplicate:'ซ้ำในไฟล์'};
 const markets:Record<string,string>={export:'ส่งออก',domestic:'ในประเทศ',unknown:'ไม่ระบุ'};
 const label=(names:Record<string,string>,key:string)=>names[key]||key;
@@ -29,11 +30,12 @@ const newId=()=>globalThis.crypto.randomUUID();
 export function BroadcastPanel({isAdmin}:{isAdmin:boolean}){
   const [list,setList]=useState<{campaigns:Summary[];gates:Gates;canManage:boolean}|null>(null),[selected,setSelected]=useState<string|null>(null);
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[name,setName]=useState(''),[provider,setProvider]=useState<Provider>('whatsapp');
+  const [accountId,setAccountId]=useState('');
   const load=useCallback(async()=>{setError('');try{setList(await api('/api/admin/broadcasts'));}catch(e){setError((e as Error).message);}},[]);
   useEffect(()=>{void load();},[load]);
   async function create(){
     setBusy(true);setError('');
-    try{const created=await api<Detail>('/api/admin/broadcasts',{name,provider,messageText:''});setName('');await load();setSelected(created.campaign.id);}
+    try{const created=await api<Detail>('/api/admin/broadcasts',{name,provider,accountId,messageText:''});setName('');await load();setSelected(created.campaign.id);}
     catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
   return <div className="form-stack" style={{padding:0}}>
@@ -41,8 +43,9 @@ export function BroadcastPanel({isAdmin}:{isAdmin:boolean}){
     {list&&<GateWarnings gates={list.gates}/>}
     {isAdmin&&<Card><div className="card-heading"><div><h2>สร้างแคมเปญบรอดแคสต์</h2><p>ส่งได้เฉพาะลูกค้าที่มีหลักฐานยินยอม (WhatsApp) หรือเป็นเพื่อนอยู่ (LINE) ไม่สร้างรายชื่อหรือความยินยอมใหม่</p></div><Megaphone size={20}/></div>
       <div className="form-grid" style={{padding:'0 24px 20px'}}><Field label="ชื่อแคมเปญ"><Input value={name} maxLength={120} onChange={e=>setName(e.target.value)} placeholder="เช่น แจ้งสินค้าใหม่ ตุลาคม"/></Field>
-        <Field label="ช่องทาง"><Select value={provider} onChange={e=>setProvider(e.target.value as Provider)}><option value="whatsapp">WhatsApp</option><option value="line">LINE OA</option></Select></Field>
-        <div className="button-row"><Button disabled={busy||!name.trim()} onClick={()=>void create()}><Plus size={15}/>สร้างฉบับร่าง</Button></div></div></Card>}
+        <Field label="ช่องทาง"><Select value={provider} onChange={e=>{setProvider(e.target.value as Provider);setAccountId('');}}><option value="whatsapp">WhatsApp</option><option value="line">LINE OA</option></Select></Field>
+        <Field label="บัญชีที่จะส่ง"><Select value={accountId} onChange={e=>setAccountId(e.target.value)}><option value="">เลือกบัญชี</option>{list?.gates.accounts?.filter(a=>a.provider===provider).map(a=><option key={a.accountId} value={a.accountId}>{a.displayName}</option>)}</Select></Field>
+        <div className="button-row"><Button disabled={busy||!name.trim()||!accountId} onClick={()=>void create()}><Plus size={15}/>สร้างฉบับร่าง</Button></div></div></Card>}
     {!isAdmin&&<p className="helper-text">ผู้ดูแลระบบเป็นผู้สร้างและอนุมัติการส่งบรอดแคสต์ คุณดูรายการและสถานะได้อย่างเดียว</p>}
     <Card><div className="card-heading"><div><h2>แคมเปญ</h2><p>ล่าสุด 100 รายการ</p></div><Button variant="ghost" size="sm" onClick={()=>void load()}><RefreshCw size={14}/>รีเฟรช</Button></div>
       {!list?<p className="helper-text" style={{padding:'0 24px'}}>กำลังโหลด…</p>:!list.campaigns.length?<Empty title="ยังไม่มีแคมเปญ"/>:
@@ -68,7 +71,7 @@ function GateWarnings({gates}:{gates:Gates}){
   }
   return <div className="alert" role="status" style={{flexDirection:'column',alignItems:'flex-start',background:warnings.length?'#fff6e4':'#eaf6ef',border:'1px solid #f0e2c2'}}>
     {warnings.length?<><strong><AlertTriangle size={14}/> การส่งบรอดแคสต์ยังถูกจำกัด</strong><ul style={{margin:0,paddingLeft:18}}>{warnings.map(w=><li key={w}>{w}</li>)}</ul></>:<strong>พร้อมส่งตามเงื่อนไข · โควตา {gates.dailyLimit} ข้อความต่อวัน · สูงสุด {gates.maxRecipients} รายต่อแคมเปญ</strong>}
-    <small>ทุกข้อความผ่านการตรวจเดียวกับการตอบลูกค้า: ความยินยอม การปฏิเสธการติดต่อ หยุดฉุกเฉิน และไม่ส่งซ้ำเมื่อไม่ทราบผล ระบบไม่มีตัวตั้งเวลาอัตโนมัติ ผู้ดูแลต้องกด “ส่งชุดถัดไป”</small>
+    <small>ทุกข้อความตรวจความยินยอม การปฏิเสธการติดต่อ และสถานะหยุดฉุกเฉิน ระบบไม่ส่งซ้ำเมื่อไม่ทราบผล {gates.runnerEnabled?'ตัวตั้งเวลาอัตโนมัติเปิดอยู่ และทำงานเฉพาะแคมเปญที่อนุมัติแล้ว':'ตัวตั้งเวลาอัตโนมัติยังปิดอยู่ ผู้ดูแลส่งชุดถัดไปได้ด้วยตนเอง'}</small>
   </div>;
 }
 
@@ -102,10 +105,17 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
     return api<Detail>('/api/admin/broadcasts/'+id,{expectedVersion:c.version,name:f.name,messageKind:c.provider==='line'?'text':f.kind,messageText:f.text,...(template?{template}:{}),segment:{...segment(),...(extra.importId!==undefined?{importId:extra.importId||undefined}:{})}});
   },()=>'บันทึกฉบับร่างแล้ว กรุณาดูตัวอย่างและทดสอบส่งใหม่');
   const toggle=(key:'markets'|'stages',value:string)=>setForm(f=>({...f,[key]:f[key].includes(value)?f[key].filter(v=>v!==value):[...f[key],value]}));
+  const uploadAsset=(file:File)=>act(async()=>{
+    setPreview(null);
+    const response=await fetch(`/api/admin/broadcasts/${id}/asset`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':file.type,'x-file-name':encodeURIComponent(file.name),'x-campaign-version':String(c.version)},body:file});
+    const result=await response.json();if(!response.ok)throw new Error(result.error||'อัปโหลดไม่สำเร็จ');return result;
+  },()=> 'แนบไฟล์แล้ว กรุณาดูตัวอย่างและทดสอบส่งฉบับนี้ใหม่');
   return <Card className="settings-card" style={{maxWidth:'none'}}>
     <div className="card-heading"><div><h2>{c.name}</h2><p>{providerNames[c.provider]} · บัญชี {c.accountId} · ฉบับที่ {c.version}</p></div><Badge tone={statusTone[c.status]}>{label(statusNames,c.status)}</Badge></div>
     <div className="form-stack">
       {error&&<p role="alert" className="error-text">{error}</p>}{notice&&<p role="status">{notice}</p>}
+      {c.asset&&<section aria-label="ไฟล์แนบแคมเปญ"><h3>ไฟล์แนบ</h3><a href={`/api/admin/broadcasts/${id}/assets/${c.asset.id}`} target="_blank" rel="noreferrer">{c.asset.name}</a> · {Math.ceil(c.asset.size/1024)} KB
+        {manage&&draft&&<Button variant="ghost" disabled={busy} onClick={()=>void act(()=>{setPreview(null);return api(`/api/admin/broadcasts/${id}/remove-asset`,{expectedVersion:c.version});},()=> 'นำไฟล์แนบออกแล้ว กรุณาทดสอบฉบับใหม่')}>นำไฟล์ออก</Button>}</section>}
       {c.status!=='draft'&&<section aria-label="สถานะการส่ง"><h3>สถานะการส่ง</h3>
         <p className="helper-text">ยืนยันส่ง {c.launchedCount??0} ราย{c.launchedAt?' · '+date(c.launchedAt):''}{c.scheduledAt?' · กำหนดส่ง '+date(c.scheduledAt):''}{c.completedAt?' · ส่งครบ '+date(c.completedAt):''}</p>
         <ul>{counts(detail.stats.recipients,recipientNames)}</ul>
@@ -118,6 +128,11 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
         {form.kind==='template'&&c.provider==='whatsapp'?<div className="form-grid"><Field label="ชื่อเทมเพลต"><Input value={form.templateName} disabled={busy} onChange={e=>setForm({...form,templateName:e.target.value})} placeholder="เช่น promo_october"/></Field><Field label="ภาษา"><Input value={form.templateLanguage} disabled={busy} onChange={e=>setForm({...form,templateLanguage:e.target.value})} placeholder="th หรือ en_US"/></Field>
           <Field label="ค่าตัวแปร (บรรทัดละ 1 ค่า ตามลำดับ {{1}}, {{2}})"><Textarea rows={3} value={form.templateParams} disabled={busy} onChange={e=>setForm({...form,templateParams:e.target.value})}/></Field></div>
           :<Field label={`ข้อความ (ไม่เกิน ${c.provider==='whatsapp'?4096:2000} ตัวอักษร)`}><Textarea rows={4} value={form.text} maxLength={c.provider==='whatsapp'?4096:2000} disabled={busy} onChange={e=>setForm({...form,text:e.target.value})}/></Field>}
+        <p className="helper-text">ใช้ {'{{name}}'} (ชื่อเต็ม), {'{{first_name}}'} (ชื่อแรก), {'{{market}}'} (ตลาด) หรือ {'{{stage}}'} (สถานะลูกค้า) ในข้อความหรือค่าตัวแปรเทมเพลตได้ ระบบข้ามผู้รับที่ข้อมูลไม่ครบ และตรึงข้อความที่เห็นในตัวอย่างเมื่ออนุมัติ</p>
+        {form.kind==='text'&&<Field label="แนบรูปภาพหรือเอกสาร" hint={c.provider==='line'?'LINE: PNG/JPEG ไม่เกิน 1 MB ส่งข้อความและรูปในคำขอเดียว':'WhatsApp: PNG/JPEG ไม่เกิน 5 MB หรือ PDF ไม่เกิน 10 MB พร้อมข้อความไม่เกิน 1,024 ตัวอักษร ใช้ได้ในช่วง 24 ชม.'}>
+          <Input type="file" accept={c.provider==='line'?'image/png,image/jpeg':'image/png,image/jpeg,application/pdf'} disabled={busy||!detail.gates.mediaEnabled||!!c.asset} onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void uploadAsset(file);}}/>
+          {!detail.gates.mediaEnabled&&<small>การแนบสื่อยังปิดอยู่</small>}<small>บันทึกข้อความก่อนแนบไฟล์ ไฟล์เก็บเป็นส่วนตัวและผูกกับฉบับที่ทดสอบส่ง</small>
+        </Field>}
         <h3>กลุ่มเป้าหมาย</h3>
         <Field label="แท็กลูกค้า (คั่นด้วยจุลภาค ตรงกับแท็กใดก็ได้)"><Input value={form.tags} disabled={busy} onChange={e=>setForm({...form,tags:e.target.value})}/></Field>
         <div className="form-grid"><fieldset><legend>ตลาด</legend>{Object.entries(markets).map(([k,v])=><label key={k} style={{marginRight:12}}><input type="checkbox" checked={form.markets.includes(k)} disabled={busy} onChange={()=>toggle('markets',k)}/> {v}</label>)}</fieldset>
@@ -133,6 +148,7 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
           {previewCurrent.overLimit&&<p className="error-text">เกินขีดจำกัด {previewCurrent.maxRecipients} รายต่อแคมเปญ กรุณาจำกัดกลุ่มเป้าหมาย</p>}
           {Object.keys(previewCurrent.excluded).length>0&&<><strong>ไม่รวมในการส่ง</strong><ul>{counts(previewCurrent.excluded,reasonNames)}</ul></>}
           {previewCurrent.samples.length>0&&<p className="helper-text">ตัวอย่างผู้รับ (ปิดบังหมายเลข): {previewCurrent.samples.map(s=>`${s.recipient} (${label(markets,s.market)}, ${label(stageNames,s.stage)})`).join(' · ')}</p>}
+          {previewCurrent.samples.length>0&&<details open><summary>ข้อความจริงหลังแทนตัวแปร (สูงสุด 10 ราย)</summary>{previewCurrent.samples.map(s=><div key={s.recipient} style={{padding:'8px 0'}}><strong>{s.recipient}</strong><p style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{s.message}</p></div>)}</details>}
           {previewCurrent.excludedSamples.length>0&&<p className="helper-text">ตัวอย่างที่ไม่รวม: {previewCurrent.excludedSamples.map(s=>`${s.recipient} — ${label(reasonNames,s.reason)}`).join(' · ')}</p>}
         </div>}
       </section>}
@@ -155,9 +171,9 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
       </section>}
       {manage&&draft&&<section aria-label="ยืนยันส่ง"><h3>ยืนยันส่ง</h3>
         {!previewCurrent?<p className="helper-text">ดูตัวอย่างกลุ่มผู้รับของฉบับนี้ก่อน ระบบจะใช้จำนวนนี้ตรวจซ้ำตอนยืนยัน</p>:<>
-          <Field label="ตั้งเวลาส่ง (ไม่บังคับ, เวลาไทย)" hint="ระบบไม่ส่งอัตโนมัติ เมื่อถึงเวลาต้องกด “ส่งชุดถัดไป”"><Input type="datetime-local" value={scheduleAt} disabled={busy} onChange={e=>setScheduleAt(e.target.value)}/></Field>
+          <Field label="ตั้งเวลาส่ง (ไม่บังคับ, เวลาไทย)" hint={detail.gates.runnerEnabled?'เมื่อถึงเวลา ระบบส่งแคมเปญที่อนุมัติแล้วเป็นชุดและตรวจเงื่อนไขทุกครั้ง':'ตัวตั้งเวลาอัตโนมัติยังปิดอยู่ เมื่อถึงเวลาต้องกด “ส่งชุดถัดไป”'}><Input type="datetime-local" value={scheduleAt} disabled={busy} onChange={e=>setScheduleAt(e.target.value)}/></Field>
           <label className="field"><span><input type="checkbox" checked={confirmLaunch} disabled={busy||!previewCurrent.eligible} onChange={e=>setConfirmLaunch(e.target.checked)}/> ฉันตรวจข้อความ ผลทดสอบส่ง และกลุ่มผู้รับแล้ว ยืนยันส่งถึง {previewCurrent.eligible} ราย</span></label>
-          <Button disabled={busy||!confirmLaunch||!previewCurrent.eligible||!detail.gates.enabled||!gate?.live||!detail.testPassedForVersion||previewCurrent.overLimit} onClick={()=>void act(()=>api<Detail>(`/api/admin/broadcasts/${id}/launch`,{confirm:true,expectedVersion:c.version,expectedRecipients:previewCurrent.eligible,...(scheduleAt?{scheduledAt:isoLocal(scheduleAt)}:{})}),()=>scheduleAt?'ตั้งเวลาแล้ว':'ยืนยันส่งแล้ว กด “ส่งชุดถัดไป” เพื่อเริ่มส่ง')}>ยืนยันส่งถึง {previewCurrent.eligible} ราย</Button>
+          <Button disabled={busy||!confirmLaunch||!previewCurrent.eligible||!previewCurrent.audienceHash||!detail.gates.enabled||!gate?.live||!detail.testPassedForVersion||previewCurrent.overLimit} onClick={()=>void act(()=>api<Detail>(`/api/admin/broadcasts/${id}/launch`,{confirm:true,expectedVersion:c.version,expectedRecipients:previewCurrent.eligible,expectedAudienceHash:previewCurrent.audienceHash,...(scheduleAt?{scheduledAt:isoLocal(scheduleAt)}:{})}),()=>scheduleAt?'ตั้งเวลาแล้ว':detail.gates.runnerEnabled?'ยืนยันส่งแล้ว ระบบจะเริ่มส่งตามรอบ':'ยืนยันส่งแล้ว กด “ส่งชุดถัดไป” เพื่อเริ่มส่ง')}>ยืนยันส่งถึง {previewCurrent.eligible} ราย</Button>
           {(!detail.gates.enabled||!gate?.live)&&<p className="helper-text">ยังยืนยันส่งไม่ได้: บรอดแคสต์หรือช่องทางยังไม่เปิดส่งจริง</p>}</>}
       </section>}
       {manage&&['sending','scheduled','paused'].includes(c.status)&&<section aria-label="ควบคุมการส่ง"><h3>ควบคุมการส่ง</h3>

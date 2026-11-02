@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
-import { database, closeDatabase } from '../src/lib/db';
+import { database, closeDatabase, getDatabase } from '../src/lib/db';
 import type { Staff } from '../src/lib/auth';
-import { createVisitor, messageStream } from '../src/lib/service';
-import { createFlow, publishFlow, onInboundSignal, type FlowDefinition, type FlowStep } from '../src/lib/flows';
+import { createVisitor, messageStream, saveContact } from '../src/lib/service';
+import {saveWidgetConfig} from '../src/lib/helpdesk';
+import { createFlow, publishFlow, onInboundSignal, runFlows, saveFlowDraft, type FlowDefinition, type FlowStep } from '../src/lib/flows';
 
 const keys = ['DEMO_MODE', 'RRS_WORKERS', 'D1_LOCAL_DIR', 'AI_PROVIDER', 'PUBLIC_ORG_SLUG', 'FLOWS_ENABLED', 'FLOWS_SEND_ENABLED'] as const;
 const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
@@ -32,6 +33,12 @@ async function fixture() {
   return { org, admin, visitor };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+test('widget prechat gate requires explicit consent before a message can be recorded',async()=>{
+ const f=await fixture();await saveWidgetConfig(f.admin,{config:{enabled:true,title:'RRS',greeting:'Hello',accentColor:'#0f766e',position:'right',allowedOrigins:[],language:'en',prechatRequired:true,icebreakers:['Hello']}});
+ await assert.rejects(send(f,'Before consent'),/ยินยอม/);assert.equal((await database.query('SELECT id FROM messages WHERE org_id=$1',[f.org])).rows.length,0);
+ await assert.rejects(saveContact(f.visitor,{name:'Fixture',email:'fixture@example.invalid',consent:false}),/ยินยอม/);
+ await saveContact(f.visitor,{name:'Fixture',email:'fixture@example.invalid',consent:true});await send(f,'After consent');assert.equal((await database.query("SELECT id FROM messages WHERE org_id=$1 AND role='user'",[f.org])).rows.length,1);
+});
 async function published(f: Fixture, steps: FlowStep[], trigger: FlowDefinition['trigger'] = { type: 'inbound_message' }, provider: 'web' | 'line' = 'web') {
   const definition: FlowDefinition = { version: 1, trigger, conditions: [{ type: 'provider', providers: [provider] }], steps };
   const created = await createFlow(f.admin, { name: 'Synthetic widget flow', definition });
@@ -123,4 +130,38 @@ test('flow handoff invalidates the AI generation lease before any answer is prod
   assert.equal((await database.query("SELECT count(*) AS n FROM messages WHERE org_id=$1 AND role='assistant'", [f.org])).rows[0].n, 0);
   assert.equal((await database.query("SELECT status FROM messages WHERE org_id=$1 AND role='user'", [f.org])).rows[0].status, 'interrupted');
   assert.equal(networkCalls, 0);
+});
+
+test('durable ingress recovers after hook failure without a browser and keeps the captured flow version', async () => {
+  const f = await fixture();
+  const flow = await published(f, [{ id: 'task', type: 'create_task', title: 'Pinned original task', dueInMinutes: 10, assignTo: 'none' }]);
+  process.env.FLOWS_ENABLED = 'true';
+  await database.query("CREATE TRIGGER synthetic_flow_start_fail BEFORE INSERT ON flow_executions BEGIN SELECT RAISE(ABORT,'synthetic_ingress_failure'); END");
+  try { await send(f, 'durable'); } finally { await database.query('DROP TRIGGER synthetic_flow_start_fail'); }
+  const receipt = (await database.query('SELECT * FROM flow_ingress WHERE org_id=$1', [f.org])).rows[0];
+  assert.equal(receipt.status, 'pending'); assert.equal(receipt.attempts, 1);
+  await saveFlowDraft(f.admin, flow, { expectedRevision: 1, name: 'Updated flow', definition: { version: 1, trigger: { type: 'inbound_message' }, conditions: [{ type: 'provider', providers: ['web'] }], steps: [{ id: 'task', type: 'create_task', title: 'Must not retroactively run', dueInMinutes: 10, assignTo: 'none' }] } });
+  await publishFlow(f.admin, flow, { expectedRevision: 2, confirm: true });
+  const db = await getDatabase();
+  await runFlows(db, process.env, { orgId: f.org, now: () => Date.now() + 5000 });
+  const tasks = (await database.query('SELECT title FROM tasks WHERE org_id=$1', [f.org])).rows;
+  assert.deepEqual(tasks, [{ title: 'Pinned original task' }]);
+  assert.equal((await database.query('SELECT status FROM flow_ingress WHERE org_id=$1', [f.org])).rows[0].status, 'processed');
+  await runFlows(db, process.env, { orgId: f.org, now: () => Date.now() + 6000 });
+  assert.equal((await database.query('SELECT count(*) AS n FROM tasks WHERE org_id=$1', [f.org])).rows[0].n, 1);
+});
+
+test('ingress and canonical message commit atomically, and replay after receipt failure does not duplicate effects', async () => {
+  const f = await fixture();
+  await published(f, [{ id: 'task', type: 'create_task', title: 'Exactly once task', dueInMinutes: 10, assignTo: 'none' }]);
+  process.env.FLOWS_ENABLED = 'true';
+  await database.query("CREATE TRIGGER synthetic_ingress_fail BEFORE INSERT ON flow_ingress BEGIN SELECT RAISE(ABORT,'synthetic_atomic_failure'); END");
+  try { await assert.rejects(send(f, 'no partial message'), /synthetic_atomic_failure/); } finally { await database.query('DROP TRIGGER synthetic_ingress_fail'); }
+  assert.equal((await database.query("SELECT count(*) AS n FROM messages WHERE org_id=$1 AND role='user'", [f.org])).rows[0].n, 0);
+  await database.query("CREATE TRIGGER synthetic_receipt_fail BEFORE UPDATE OF status ON flow_ingress WHEN NEW.status='processed' BEGIN SELECT RAISE(ABORT,'synthetic_receipt_failure'); END");
+  try { await send(f, 'commit before receipt failure'); } finally { await database.query('DROP TRIGGER synthetic_receipt_fail'); }
+  assert.equal((await database.query('SELECT count(*) AS n FROM tasks WHERE org_id=$1', [f.org])).rows[0].n, 1);
+  await runFlows(await getDatabase(), process.env, { orgId: f.org, now: () => Date.now() + 5000 });
+  assert.equal((await database.query('SELECT count(*) AS n FROM tasks WHERE org_id=$1', [f.org])).rows[0].n, 1);
+  assert.equal((await database.query('SELECT status FROM flow_ingress WHERE org_id=$1', [f.org])).rows[0].status, 'processed');
 });

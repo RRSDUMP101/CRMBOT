@@ -16,6 +16,29 @@ const NOW = Date.parse('2026-03-02T17:30:00Z');
 const RANGE = 'from=2026-03-01&to=2026-03-02';
 const MALICIOUS_NAME = '=HYPERLINK("https://evil.invalid","x"),\nแอบแฝง';
 const SECRET_TEXT = 'Synthetic confidential customer text';
+test('authorship remains with actual sender after reassignment and excludes automation/unknown author',async()=>{
+ const org=await organization('author'),writer=await member(org,'Actual author','Admin'),owner=await member(org,'New owner','Agent');
+ const c=await conversation(org,{created:'2026-03-01T00:00:00.000000Z',status:'human_active',assignee:owner.staff.id});
+ const id=typeof c==='string'?c:(c as any).id;
+ for(const [type,author]of [['human',writer.staff.id],['automation',writer.staff.id],['unknown',null]] as const)await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content,author_type,author_member_id,created_at) VALUES($1,$2,$3,'agent','Synthetic reply',$4,$5,'2026-03-01T01:00:00.000000Z')",[randomUUID(),org,id,type,author]);
+ const report=await buildReport(writer.staff,new URL('https://example.invalid/reports?'+RANGE),{now:NOW});assert.equal(report.byAuthor.length,1);assert.equal(report.byAuthor[0].memberId,writer.staff.id);assert.equal(report.byAuthor[0].replies,1);assert.equal(report.byAgent[0].agentId,owner.staff.id);
+ const self=await buildReport(owner.staff,new URL('https://example.invalid/reports?'+RANGE),{now:NOW});assert.equal(self.byAuthor.length,0);
+});
+
+test('Instagram filtered golden report and CSV preserve channel and actual author after reassignment',async()=>{
+ const org=await organization('Instagram golden'),writer=await member(org,'IG writer','Admin'),owner=await member(org,'IG new owner','Agent');
+ const id=await conversation(org,{created:'2026-03-01T06:00:00.000000Z',status:'human_active',assignee:owner.staff.id,provider:'instagram'});
+ await message(org,id,'user','2026-03-01T06:00:00.000000Z',{provider:'instagram'});
+ const reply=await message(org,id,'agent','2026-03-01T06:02:00.000000Z',{provider:'instagram',delivery:'submitted'});
+ const note=await message(org,id,'note','2026-03-01T06:03:00.000000Z');
+ await database.query("UPDATE messages SET author_type='human',author_member_id=$2 WHERE id IN ($1,$3)",[reply,writer.staff.id,note]);
+ const other=await conversation(org,{created:'2026-03-01T06:00:00.000000Z',status:'bot_active',provider:'facebook'});await message(org,other,'user','2026-03-01T06:00:00.000000Z',{provider:'facebook'});
+ const result=await report(writer.staff,'channel=instagram');assert.equal(result.filters.channel,'instagram');assert.equal(result.totals.newConversations,1);assert.equal(result.totals.inboundMessages,1);assert.deepEqual(result.totals.firstResponse,stat(1,120000,120000,120000));assert.deepEqual(result.totals.humanFirstResponse,stat(1,120000,120000,120000));
+ assert.equal(result.byChannel.length,1);assert.equal(result.byChannel[0].label,'Instagram');assert.equal(result.byAgent[0].agentId,owner.staff.id);assert.deepEqual(result.byAuthor,[{memberId:writer.staff.id,name:'IG writer',replies:1,notes:1,conversations:1}]);
+ assert.match(result.definitions.agent,/ผู้รับผิดชอบปัจจุบัน/);assert.match(result.definitions.author,/author_type=human/);assert.ok(!result.definitions.agent.includes('ระบบไม่ได้บันทึกผู้เขียน'));
+ const csv=await exportReport(writer.staff,reportUrl('channel=instagram&format=csv'),{now:NOW});assert.match(csv.body,/ช่องทาง: Instagram/);assert.match(csv.body,/ช่องทาง,Instagram,1,1,1,120,120,120/);assert.match(csv.body,/ผู้เขียนจริง,IG writer,1,1,1/);assert.ok(!csv.body.includes('Facebook'));
+ const hidden=await report(A.admin.staff,'channel=instagram');assert.equal(hidden.totals.newConversations,0);assert.equal(hidden.byAuthor.length,0);
+});
 
 type Member = { staff: Staff; token: string };
 let A: { org: string; admin: Member; agent1: Member; agent2: Member; c: Record<string, string> };
@@ -39,7 +62,7 @@ async function member(org: string, name: string, role: 'Admin' | 'Agent'): Promi
   await database.query("INSERT INTO staff_sessions(token_hash,org_id,member_id,expires_at) VALUES($1,$2,$3,'2099-01-01T00:00:00.000000Z')", [hashToken(token), org, id]);
   return { staff: { id, orgId: org, name, email, role }, token };
 }
-type ConversationOptions = { created: string; status: string; assignee?: string; market?: string; handoff?: string; provider?: 'whatsapp' | 'line' | 'facebook' };
+type ConversationOptions = { created: string; status: string; assignee?: string; market?: string; handoff?: string; provider?: 'whatsapp' | 'line' | 'facebook' | 'instagram' };
 async function conversation(org: string, o: ConversationOptions) {
   const lead = randomUUID(), id = randomUUID();
   await database.query('INSERT INTO leads(id,org_id,name,email,market,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$6)', [lead, org, 'Synthetic customer ' + id.slice(0, 6), 'customer-' + id.slice(0, 6) + '@example.invalid', o.market ?? 'unknown', o.created]);

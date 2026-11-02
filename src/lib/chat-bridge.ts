@@ -1,15 +1,18 @@
 import { database, transaction, type Executor, type Row } from './db';
-import { BridgeError } from './bridge-protocol';
+import { BridgeError,bridgeKeyConfig } from './bridge-protocol';
+import {bridgeNonceClaimer} from './bridge-nonces';
+import {bridgeRecordHash} from './bridge-envelope';
 
 export type BridgeEntity = 'lead'|'conversation'|'message'|'socialIdentity'|'messageProvenance'|'attachment';
 /** Raw snake_case columns. JSON database columns stay JSON strings, including tags/facts/sources. */
 export type BridgeEvent = {
   version: 1; eventId: string; orgId: string; sequence: number;
   entity: BridgeEntity; operation: 'upsert'; record: Row; occurredAt: string;
+  envelopeVersion?:2;sourceSystem?:'crm';aggregateType?:BridgeEntity;aggregateId?:string;aggregateVersion?:number;correlationId?:string;causationId?:string|null;payloadHash?:string;
 };
 export type BridgePage = {
   version: 1; orgId: string; events: BridgeEvent[]; after: number; nextCursor: number;
-  headSequence: number; hasMore: boolean; bootstrapComplete: boolean;
+  headSequence: number; hasMore: boolean; bootstrapComplete: boolean;envelopeVersion?:2;
 };
 
 export function bridgeConfig() {
@@ -17,7 +20,7 @@ export function bridgeConfig() {
   const orgId = process.env.CRM_BRIDGE_ORG_ID || '';
   const secret = process.env.CRM_BRIDGE_SECRET || '';
   if (!orgId || secret.length < 32) throw new BridgeError(503, 'Chat bridge is not configured');
-  return { orgId, secret };
+  return { orgId, secret,...bridgeKeyConfig(process.env),claimNonce:bridgeNonceClaimer(orgId) };
 }
 
 export function bridgeInteger(value: unknown, label: string, maximum = Number.MAX_SAFE_INTEGER, minimum = 0) {
@@ -46,23 +49,29 @@ async function metadata(orgId: string, executor: Executor = database) {
 }
 
 /** Append-only log makes a bounded head a stable page even while newer writes commit. */
-export async function readBridgeEvents(orgId: string, after = 0, limit = 100): Promise<BridgePage> {
+export async function readBridgeEvents(orgId: string, after = 0, limit = 100,envelopeVersion:1|2=1): Promise<BridgePage> {
   after = bridgeInteger(after, 'cursor'); limit = bridgeInteger(limit, 'limit', 100, 1);
   const meta = await metadata(orgId);
   if (after > meta.headSequence) throw new BridgeError(409, 'Cursor is ahead of this log; verify deployment and database before recovery');
   const rows = (await database.query(`SELECT sequence,event_id,entity,record_json,occurred_at
     FROM crm_bridge_events WHERE org_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence LIMIT $4`,
   [orgId, after, meta.headSequence, limit])).rows;
-  const events = rows.map((row, index): BridgeEvent => {
+  const metadataRows=envelopeVersion===2?(await database.query('SELECT * FROM crm_bridge_event_envelopes WHERE org_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence LIMIT $4',[orgId,after,meta.headSequence,limit])).rows:[];
+  const envelopes=new Map(metadataRows.map(row=>[Number(row.sequence),row]));
+  const events = await Promise.all(rows.map(async(row, index):Promise<BridgeEvent> => {
     if (Number(row.sequence) !== after + index + 1) throw new BridgeError(409, 'Bridge log has a gap; snapshot recovery is required');
     const record = JSON.parse(row.record_json);
     if (record.org_id !== orgId) throw new BridgeError(500, 'Bridge event scope mismatch');
-    return { version: 1, eventId: row.event_id, orgId, sequence: Number(row.sequence), entity: row.entity,
+    const base:BridgeEvent={ version: 1, eventId: row.event_id, orgId, sequence: Number(row.sequence), entity: row.entity,
       operation: 'upsert', record, occurredAt: row.occurred_at };
-  });
+    if(envelopeVersion===1)return base;
+    const envelope=envelopes.get(Number(row.sequence));
+    if(!envelope||envelope.event_id!==row.event_id||envelope.aggregate_type!==row.entity||envelope.aggregate_id!==record.id||!Number.isSafeInteger(envelope.aggregate_version)||envelope.aggregate_version<1)throw new BridgeError(409,'Event envelope metadata is unavailable');
+    return {...base,envelopeVersion:2,sourceSystem:'crm',aggregateType:row.entity,aggregateId:record.id,aggregateVersion:envelope.aggregate_version,correlationId:envelope.correlation_id,causationId:envelope.causation_id,payloadHash:await bridgeRecordHash(record)};
+  }));
   if (!events.length && after < meta.headSequence) throw new BridgeError(409, 'Bridge history is unavailable; snapshot recovery is required');
   const nextCursor = events.at(-1)?.sequence ?? after;
-  return { version: 1, orgId, events, after, nextCursor, ...meta, hasMore: nextCursor < meta.headSequence };
+  return { version: 1, orgId, events, after, nextCursor, ...meta, hasMore: nextCursor < meta.headSequence,...(envelopeVersion===2?{envelopeVersion:2 as const}:{}) };
 }
 
 /** Operator-only explicit bootstrap. A bounded call can be repeated until complete. */

@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {ApiError,STAFF_COOKIE,assertOrigin,cookieValue,hashToken,rateLimit,readJson,requireAdmin,staffSession} from '@/lib/auth';
 import {completeSocialOAuth,describeSocialAccountError,rotateSocialTokenKeys,saveLineAccount,selectSocialAsset,socialAccountAction,socialAccountDetail,socialAccountsEnabled,socialAccountsOverview,startSocialOAuth} from '@/lib/social-accounts';
+import {socialRuntimeAction,socialRuntimeStatus} from '@/lib/social-account-runtime';
 
 export const dynamic='force-dynamic';
 export const maxDuration=120;
@@ -47,6 +48,7 @@ async function handle(request:Request,context:Context){
       }
       if(!route)return Response.json(await socialAccountsOverview(staff,sessionKey),{headers});
       if(path.length===1&&UUID.test(path[0]))return Response.json(await socialAccountDetail(staff,path[0]),{headers});
+      if(path.length===2&&UUID.test(path[0])&&path[1]==='runtime')return Response.json(await socialRuntimeStatus(staff,path[0]),{headers});
       throw new ApiError(404,'not_found');
     }
     if(method!=='POST')throw new ApiError(404,'not_found');
@@ -57,6 +59,7 @@ async function handle(request:Request,context:Context){
     if(route==='select'){await rateLimit(`social-accounts-provider:${staff.orgId}:${staff.id}`,12,60);return Response.json(await selectSocialAsset(staff,sessionKey,body),{headers});}
     if(route==='line')return Response.json(await saveLineAccount(staff,body),{headers});
     if(route==='rotate-keys')return Response.json(await rotateSocialTokenKeys(staff),{headers});
+    if(path.length===2&&UUID.test(path[0])&&path[1]==='runtime')return Response.json(await socialRuntimeAction(staff,path[0],body),{headers});
     if(path.length===1&&UUID.test(path[0])){
       if(['validate','verify','disconnect'].includes(String(body.action)))await rateLimit(`social-accounts-provider:${staff.orgId}:${staff.id}`,12,60);
       return Response.json(await socialAccountAction(staff,path[0],body),{headers});
