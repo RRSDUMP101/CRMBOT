@@ -1,4 +1,5 @@
 "use client";
+import { FeatureHeading } from "./specialist-workspace";
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {api,date} from './data';
 import {Badge,Button,Card} from './ui';
@@ -9,7 +10,7 @@ type Status={provider:Provider;accountId:string;configured:boolean;missing:strin
 const labels:Record<Provider,string>={whatsapp:'WhatsApp',line:'LINE OA',facebook:'Facebook'};
 export function SocialChannelSettings({isAdmin}:{isAdmin:boolean}){
   if(!isAdmin)return <p className="helper-text">ผู้ดูแลระบบตรวจสอบและจัดการการเชื่อมต่อ WhatsApp, LINE OA และ Facebook ได้</p>;
-  return <section aria-label="ช่องทางข้อความลูกค้า"><h2>ช่องทางข้อความลูกค้า</h2><p className="helper-text">ตรวจบัญชีและการรับข้อความก่อนเปิดให้ทีมตอบ การตรวจบัญชีไม่ส่งข้อความถึงลูกค้า</p><div className="knowledge-grid">{(['whatsapp','line','facebook'] as Provider[]).map(provider=><Channel key={provider} provider={provider}/>)}</div><SocialAccountsWizard/></section>;
+  return <section className="rrs-specialist" aria-label="ช่องทางข้อความลูกค้า"><FeatureHeading eyebrow="MESSAGING CHANNELS" title="บัญชีและช่องทางข้อความ" description="ตรวจสถานะบัญชี การรับข้อความ และการส่งของแต่ละช่องทาง"/><p className="helper-text">ตรวจบัญชีและการรับข้อความก่อนเปิดให้ทีมตอบ การตรวจบัญชีไม่ส่งข้อความถึงลูกค้า</p><div className="knowledge-grid">{(['whatsapp','line','facebook'] as Provider[]).map(provider=><Channel key={provider} provider={provider}/>)}</div><SocialAccountsWizard/></section>;
 }
 function Channel({provider}:{provider:Provider}){
   const [status,setStatus]=useState<Status|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[review,setReview]=useState(false);

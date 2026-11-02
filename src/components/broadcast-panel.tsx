@@ -1,4 +1,5 @@
 "use client";
+import { FeatureHeading, FeatureSteps } from "./specialist-workspace";
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {AlertTriangle,Megaphone,Plus,RefreshCw} from 'lucide-react';
 import {api,date,isoLocal,stageNames} from './data';
@@ -38,7 +39,7 @@ export function BroadcastPanel({isAdmin}:{isAdmin:boolean}){
     try{const created=await api<Detail>('/api/admin/broadcasts',{name,provider,accountId,messageText:''});setName('');await load();setSelected(created.campaign.id);}
     catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
-  return <div className="form-stack" style={{padding:0}}>
+  return <div className="rrs-specialist"><FeatureHeading eyebrow="CAMPAIGNS" title="แคมเปญข้อความ" description="เตรียมผู้รับและเนื้อหา ตรวจความยินยอม แล้วอนุมัติการส่งแต่ละฉบับ"/><FeatureSteps steps={["กลุ่มเป้าหมาย","เนื้อหา","ตรวจสอบและทดสอบ","อนุมัติและกำหนดเวลา"]}/>
     {error&&<div className="alert alert-error" role="alert">{error}</div>}
     {list&&<GateWarnings gates={list.gates}/>}
     {isAdmin&&<Card><div className="card-heading"><div><h2>สร้างแคมเปญบรอดแคสต์</h2><p>ส่งได้เฉพาะลูกค้าที่มีหลักฐานยินยอม (WhatsApp) หรือเป็นเพื่อนอยู่ (LINE) ไม่สร้างรายชื่อหรือความยินยอมใหม่</p></div><Megaphone size={20}/></div>
@@ -61,7 +62,7 @@ export function BroadcastPanel({isAdmin}:{isAdmin:boolean}){
 
 function GateWarnings({gates}:{gates:Gates}){
   const warnings:string[]=[];
-  if(!gates.enabled)warnings.push('บรอดแคสต์ปิดอยู่ (BROADCAST_ENABLED ไม่ได้เปิด) — สร้างร่าง ดูตัวอย่างกลุ่มผู้รับ และนำเข้ารายชื่อแบบทดลองได้ แต่ทดสอบส่งหรือส่งจริงไม่ได้');
+  if(!gates.enabled)warnings.push('ระบบบรอดแคสต์ยังปิดอยู่ — สร้างร่าง ดูตัวอย่างกลุ่มผู้รับ และนำเข้ารายชื่อแบบทดลองได้ แต่ทดสอบส่งหรือส่งจริงไม่ได้');
   for(const provider of ['whatsapp','line'] as Provider[]){
     const g=gates.channels[provider];
     if(!g?.configured)warnings.push(`${providerNames[provider]}: ยังไม่ได้ตั้งค่าบัญชีช่องทางสำหรับองค์กรนี้`);
