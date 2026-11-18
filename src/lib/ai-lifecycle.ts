@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {applicability,scopeMatches,type Applicability} from './sales-knowledge';
 import { ApiError, fields, requireAdmin, str, uuid, type Staff } from './auth';
 import { database, transaction, type Executor, type Row } from './db';
 import { selectKnowledge, generateReply, providerName, type KnowledgeLite } from './bot';
@@ -13,7 +14,7 @@ export async function boundedBytes(body:ReadableStream<Uint8Array>|null,max=MAX_
   const bytes=new Uint8Array(size);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}return bytes;
 }
 export async function crawlSource(staff:Staff,input:Record<string,unknown>,fetcher:(url:URL,init:RequestInit)=>Promise<Response>=fetchPublicKnowledge){
-  requireAdmin(staff);fields(input,['url','title','scopes','expiresAt']);
+  requireAdmin(staff);fields(input,['url','title','scopes','expiresAt','applicability']);
   const url=knowledgeUrl(str(input.url,'URL',2000,true));
   // The optional transport is a trusted test seam, never request input. Routes
   // always use the public-network Worker transport, including in local Node.
@@ -22,7 +23,7 @@ export async function crawlSource(staff:Staff,input:Record<string,unknown>,fetch
   const type=response.headers.get('content-type')||'';if(!/^(text\/html|text\/plain)/i.test(type)){await response.body?.cancel();throw new ApiError(415,'รองรับหน้าHTMLหรือข้อความเท่านั้น');}
   const bytes=await boundedBytes(response.body,1_000_000);let content=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
   if(type.startsWith('text/html'))content=content.replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/\s+/g,' ').trim();
-  return saveSource(staff,{title:input.title,content,scopes:input.scopes,expiresAt:input.expiresAt,sourceType:'website',sourceUrl:url.href});
+  return saveSource(staff,{title:input.title,content,scopes:input.scopes,expiresAt:input.expiresAt,sourceType:'website',sourceUrl:url.href,applicability:input.applicability});
 }
 /** Text upload path is explicit; binary extraction adapters validate their own archive limits. */
 export async function uploadSource(staff:Staff,request:Request){
@@ -32,7 +33,7 @@ export async function uploadSource(staff:Staff,request:Request){
   const bytes=await boundedBytes(request.body);if(!bytes.length)throw new ApiError(400,'ไฟล์ว่าง');
   const content=ext==='txt'||ext==='csv'?new TextDecoder('utf-8',{fatal:true}).decode(bytes):await (await import('./knowledge-extract')).extractKnowledge(bytes,ext);
   let allowed:unknown;try{allowed=JSON.parse(request.headers.get('x-source-scopes')||'[]');}catch{throw new ApiError(400,'ช่องทางไม่ถูกต้อง');}
-  return saveSource(staff,{title:decodeURIComponent(request.headers.get('x-source-title')||filename),content,scopes:allowed,sourceType:ext});
+  return saveSource(staff,{title:decodeURIComponent(request.headers.get('x-source-title')||filename),content,scopes:allowed,sourceType:ext,applicability:request.headers.has('x-knowledge-applicability')?JSON.parse(decodeURIComponent(request.headers.get('x-knowledge-applicability')!)):{}});
 }
 function scope(value:unknown) {
   const s=str(value,'ช่องทาง',220,true);
@@ -52,22 +53,31 @@ async function assertScopes(c:Executor,orgId:string,values:string[]){
   }
 }
 async function audit(c:Executor,staff:Staff,action:string,id:string){await c.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id) VALUES($1,$2,$3,$4,$5)',[randomUUID(),staff.orgId,staff.id,action,id]);}
-export async function scopedKnowledge(orgId:string,key:string,c:Executor=database):Promise<KnowledgeLite[]>{
-  const rows=(await c.query("SELECT id,title,content,tags,version,source_url FROM knowledge WHERE org_id=$1 AND status='published' AND processing_status='ready' AND reviewed_version=version AND (expires_at IS NULL OR expires_at>$2) AND EXISTS(SELECT 1 FROM json_each(scope_json) WHERE value='*' OR value=$3)",[orgId,at(),key])).rows;
-  return rows.map(row=>({id:row.id,title:row.title,content:row.content,tags:parse(row.tags)||[],version:Number(row.version),sourceUrl:row.source_url||undefined}));
+type ScopedSource=KnowledgeLite & {applicability:Applicability};
+async function approvedSources(orgId:string,key:string,c:Executor):Promise<ScopedSource[]>{
+  const rows=await c.query(`SELECT k.id,k.title,k.content,k.tags,k.version,k.source_url,s.applicability FROM knowledge k
+    LEFT JOIN sales_knowledge_scope s ON s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version
+    WHERE k.org_id=$1 AND k.status='published' AND k.processing_status='ready' AND k.reviewed_version=k.version
+    AND (k.expires_at IS NULL OR k.expires_at>$2) AND EXISTS(SELECT 1 FROM json_each(k.scope_json) WHERE value='*' OR value=$3)`,[orgId,at(),key]);
+  return rows.rows.map(row=>({id:row.id,title:row.title,content:row.content,tags:parse(row.tags)||[],version:Number(row.version),
+    sourceUrl:row.source_url||undefined,applicability:parse(row.applicability)||{}}));
+}
+export async function scopedKnowledge(orgId:string,key:string,c:Executor=database,context:Applicability={}):Promise<KnowledgeLite[]>{
+  const all=await approvedSources(orgId,key,c);
+  return all.filter(s=>scopeMatches(s.applicability,context)).map(({applicability:_,...source})=>source);
 }
 const fingerprint=(sources:KnowledgeLite[])=>createHash('sha256').update(JSON.stringify([providerName(),process.env.OPENAI_MODEL||'',sources.map(x=>[x.id,x.version]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))])).digest('hex');
 export async function aiOverview(staff:Staff){
   const [sources,profiles,evaluations,accounts]=await Promise.all([
-    database.query('SELECT id,title,content,version,status,processing_status,scope_json,source_type,source_url,expires_at,reviewed_version,updated_at FROM knowledge WHERE org_id=$1 ORDER BY updated_at DESC',[staff.orgId]),
+    database.query('SELECT k.*, (SELECT s.applicability FROM sales_knowledge_scope s WHERE s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version) AS applicability FROM knowledge k WHERE k.org_id=$1 ORDER BY updated_at DESC',[staff.orgId]),
     database.query('SELECT * FROM ai_profiles WHERE org_id=$1 ORDER BY scope',[staff.orgId]),
     database.query('SELECT id,scope,revision,passed,handoff,error_code,created_at FROM ai_evaluations WHERE org_id=$1 ORDER BY created_at DESC LIMIT 50',[staff.orgId]),
     database.query('SELECT provider,account_id,display_name FROM social_accounts WHERE org_id=$1 ORDER BY provider,display_name',[staff.orgId]),
   ]);
-  return {canManage:staff.role==='Admin',enabled:process.env.AI_LIFECYCLE_ENABLED==='true',socialPolicyBridgeEnabled:process.env.CRM_AI_POLICY_BRIDGE_ENABLED==='true',provider:providerName(),formats:['txt','csv','pdf','docx','xlsx'],maxFileBytes:MAX_FILE,maxCharacters:MAX_TEXT,sources:sources.rows.map(x=>({...x,scopes:parse(x.scope_json)})),profiles:profiles.rows.map(x=>({...x,scenarios:parse(x.scenarios)})),evaluations:evaluations.rows,scopes:[{key:'web',label:'Website / Widget'},...accounts.rows.map(x=>({key:x.provider+':'+x.account_id,label:x.display_name||x.provider}))]};
+  return {canManage:staff.role==='Admin',enabled:process.env.AI_LIFECYCLE_ENABLED==='true',socialPolicyBridgeEnabled:process.env.CRM_AI_POLICY_BRIDGE_ENABLED==='true',provider:providerName(),formats:['txt','csv','pdf','docx','xlsx'],maxFileBytes:MAX_FILE,maxCharacters:MAX_TEXT,sources:sources.rows.filter(x=>staff.role==='Admin'||!parse(x.applicability)?.conversationId).map(x=>({...x,scopes:parse(x.scope_json),applicability:parse(x.applicability)||{}})),profiles:profiles.rows.map(x=>({...x,scenarios:parse(x.scenarios)})),evaluations:evaluations.rows,scopes:[{key:'web',label:'Website / Widget'},...accounts.rows.map(x=>({key:x.provider+':'+x.account_id,label:x.display_name||x.provider}))]};
 }
 export async function saveSource(staff:Staff,input:Record<string,unknown>){
-  requireAdmin(staff);fields(input,['id','expectedVersion','title','content','scopes','expiresAt','sourceType','sourceUrl']);
+  requireAdmin(staff);fields(input,['id','expectedVersion','title','content','scopes','expiresAt','sourceType','sourceUrl','applicability','evidenceMessageId']);
   const id=input.id?uuid(input.id):randomUUID(),title=str(input.title,'หัวข้อ',200,true),content=str(input.content,'เนื้อหา',MAX_TEXT,true),allowed=scopes(input.scopes);
   if(input.expiresAt&&!Number.isFinite(Date.parse(String(input.expiresAt))))throw new ApiError(400,'วันหมดอายุไม่ถูกต้อง');
   const expires=input.expiresAt?new Date(String(input.expiresAt)).toISOString():null;
@@ -76,9 +86,17 @@ export async function saveSource(staff:Staff,input:Record<string,unknown>){
   if(!['manual','txt','csv','pdf','docx','xlsx','website'].includes(sourceType))throw new ApiError(400,'ประเภทแหล่งข้อมูลไม่ถูกต้อง');
   await transaction(staff.orgId,async c=>{
     await assertScopes(c,staff.orgId,allowed);
-    const old=(await c.query('SELECT version FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows[0];
+    const old=(await c.query('SELECT k.version,(SELECT s.applicability FROM sales_knowledge_scope s WHERE s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version) AS applicability,(SELECT s.evidence_message_id FROM sales_knowledge_scope s WHERE s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version) AS evidence FROM knowledge k WHERE k.org_id=$1 AND k.id=$2',[staff.orgId,id])).rows[0];
     if(input.id&&(!old||old.version!==input.expectedVersion))throw new ApiError(409,'แหล่งข้อมูลเปลี่ยนแล้ว กรุณาโหลดใหม่');
     const version=Number(old?.version||0)+1,stamp=at();
+    const applies=applicability(input.applicability===undefined?parse(old?.applicability)||{}:input.applicability);
+    const evidence=input.evidenceMessageId?uuid(input.evidenceMessageId):old?.evidence||null;
+    if(applies.conversationId&&!(await c.query('SELECT id FROM conversations WHERE org_id=$1 AND id=$2',[staff.orgId,applies.conversationId])).rows.length)throw new ApiError(400,'ไม่พบบทสนทนาในองค์กร');
+    if(evidence){
+      const msg=(await c.query("SELECT conversation_id FROM messages WHERE org_id=$1 AND id=$2 AND role='agent' AND author_member_id IS NOT NULL AND source_owner_only=0 AND status='complete'",[staff.orgId,evidence])).rows[0];
+      if(!msg||applies.conversationId&&applies.conversationId!==msg.conversation_id)throw new ApiError(409,'ตรวจต้นทางคำตอบของพนักงาน');
+    }
+    await c.query('INSERT INTO sales_knowledge_scope(org_id,source_id,version,applicability,evidence_message_id) VALUES($1,$2,$3,$4,$5)',[staff.orgId,id,version,JSON.stringify(applies),evidence]);
     if(old)await c.query("UPDATE knowledge SET title=$3,content=$4,scope_json=$5,source_type=$6,source_url=$7,expires_at=$8,version=$9,status='draft',processing_status='ready',reviewed_version=NULL,reviewed_by=NULL,reviewed_at=NULL,error=NULL,updated_at=$10 WHERE org_id=$1 AND id=$2",[staff.orgId,id,title,content,JSON.stringify(allowed),sourceType,url,expires,version,stamp]);
     else await c.query("INSERT INTO knowledge(id,org_id,title,content,scope_json,source_type,source_url,expires_at,version,status,processing_status,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft','ready',$10)",[id,staff.orgId,title,content,JSON.stringify(allowed),sourceType,url,expires,version,stamp]);
     await c.query('INSERT INTO knowledge_versions(org_id,source_id,version,title,content,scope_json,source_url,source_type,expires_at,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[staff.orgId,id,version,title,content,JSON.stringify(allowed),url,sourceType,expires,staff.id,stamp]);
@@ -97,13 +115,25 @@ export async function reviewSource(staff:Staff,input:Record<string,unknown>){
     await audit(c,staff,'ai.source.'+input.action,id);
   },staff);return aiOverview(staff);
 }
+export async function restoreKnowledge(staff:Staff,input:Record<string,unknown>){
+ requireAdmin(staff);fields(input,['id','expectedVersion','version']);
+ const id=uuid(input.id);
+ if(!Number.isSafeInteger(input.version)||Number(input.version)<1||Number(input.version)>=Number(input.expectedVersion))throw new ApiError(400,'กรุณาเลือกรุ่นก่อนหน้า');
+ const row=(await database.query(`SELECT v.*,s.applicability,s.evidence_message_id FROM knowledge_versions v
+ LEFT JOIN sales_knowledge_scope s ON s.org_id=v.org_id AND s.source_id=v.source_id AND s.version=v.version
+ WHERE v.org_id=$1 AND v.source_id=$2 AND v.version=$3`,[staff.orgId,id,input.version])).rows[0];
+ if(!row)throw new ApiError(404,'ไม่พบประวัติรุ่น');
+ return saveSource(staff,{id,expectedVersion:input.expectedVersion,title:row.title,content:row.content,scopes:parse(row.scope_json),
+  sourceType:row.source_type,sourceUrl:row.source_url,expiresAt:row.expires_at,applicability:parse(row.applicability)||{},evidenceMessageId:row.evidence_message_id});
+}
 export async function deleteSource(staff:Staff,input:Record<string,unknown>){
  requireAdmin(staff);fields(input,['id','expectedVersion','confirm']);const id=uuid(input.id);if(input.confirm!==true)throw new ApiError(400,'ยืนยันลบแหล่งข้อมูลและประวัติรุ่น');
  await transaction(staff.orgId,async c=>{
-  const source=(await c.query('SELECT version FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows[0];if(!source||source.version!==input.expectedVersion)throw new ApiError(409,'แหล่งข้อมูลเปลี่ยนแล้ว');
+  const source=(await c.query('SELECT k.version,(SELECT s.applicability FROM sales_knowledge_scope s WHERE s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version) AS applicability,(SELECT s.evidence_message_id FROM sales_knowledge_scope s WHERE s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version) AS evidence FROM knowledge k WHERE k.org_id=$1 AND k.id=$2',[staff.orgId,id])).rows[0];if(!source||source.version!==input.expectedVersion)throw new ApiError(409,'แหล่งข้อมูลเปลี่ยนแล้ว');
   await c.query("UPDATE ai_profiles SET status='draft',active_evaluation_id=NULL,source_fingerprint='' WHERE org_id=$1 AND active_evaluation_id IN (SELECT e.id FROM ai_evaluations e,json_each(e.citations) item WHERE e.org_id=$1 AND json_extract(item.value,'$.id')=$2)",[staff.orgId,id]);
   await c.query("DELETE FROM ai_evaluations WHERE org_id=$1 AND EXISTS(SELECT 1 FROM json_each(citations) WHERE json_extract(value,'$.id')=$2)",[staff.orgId,id]);
   await c.query("UPDATE messages SET sources=(SELECT json_group_array(json(CASE WHEN json_extract(value,'$.id')=$2 THEN json_remove(value,'$.content') ELSE value END)) FROM json_each(messages.sources)) WHERE org_id=$1 AND EXISTS(SELECT 1 FROM json_each(sources) WHERE json_extract(value,'$.id')=$2)",[staff.orgId,id]);
+  await c.query('DELETE FROM sales_knowledge_scope WHERE org_id=$1 AND source_id=$2',[staff.orgId,id]);
   await c.query('DELETE FROM knowledge_versions WHERE org_id=$1 AND source_id=$2',[staff.orgId,id]);await c.query('DELETE FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,id]);await audit(c,staff,'ai.source.deleted',id);
  },staff);return aiOverview(staff);
 }
@@ -122,28 +152,29 @@ export async function saveAiProfile(staff:Staff,input:Record<string,unknown>){
   requireAdmin(staff);fields(input,['scope','expectedRevision','personality','scenarios']);const key=scope(input.scope),personality=str(input.personality,'บุคลิก',1500,true),rules=scenarios(input.scenarios||[]);
   await transaction(staff.orgId,async c=>{await assertScopes(c,staff.orgId,[key]);const old=(await c.query('SELECT revision FROM ai_profiles WHERE org_id=$1 AND scope=$2',[staff.orgId,key])).rows[0];if(old&&old.revision!==input.expectedRevision)throw new ApiError(409,'บุคลิกถูกแก้แล้ว กรุณาโหลดใหม่');await c.query("INSERT INTO ai_profiles(org_id,scope,personality,scenarios,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(org_id,scope) DO UPDATE SET personality=excluded.personality,scenarios=excluded.scenarios,revision=ai_profiles.revision+1,status='draft',active_evaluation_id=NULL,source_fingerprint='',updated_by=excluded.updated_by,updated_at=excluded.updated_at",[staff.orgId,key,personality,JSON.stringify(rules),staff.id,at()]);await audit(c,staff,'ai.profile.draft',key);},staff);return aiOverview(staff);
 }
-export async function aiRuntimeContext(orgId:string,key:string,text:string,c:Executor=database){
+export async function aiRuntimeContext(orgId:string,key:string,text:string,c:Executor=database,context:Applicability={}){
   const profile=(await c.query('SELECT * FROM ai_profiles WHERE org_id=$1 AND scope=$2',[orgId,key])).rows[0];
-  const sources=await scopedKnowledge(orgId,key,c),hash=fingerprint(sources);
+  const all=await approvedSources(orgId,key,c),hash=fingerprint(all);
+  const sources=all.filter(s=>scopeMatches(s.applicability,context)).map(({applicability:_,...source})=>source);
   const rule=profile&&scenarios(parse(profile.scenarios)).find(x=>x.keywords.some(k=>text.toLowerCase().includes(k.toLowerCase())));
   const active=profile?.status==='active'&&profile.source_fingerprint===hash;
   return {active:!!active,handoff:!!rule||!active||!sources.length,personality:String(profile?.personality||''),sources,fingerprint:hash,reason:rule?'scenario_handoff':!active?'not_activated':!sources.length?'no_approved_sources':''};
 }
 export async function evaluateAi(staff:Staff,input:Record<string,unknown>){
-  requireAdmin(staff);fields(input,['scope','prompt','expectedHandoff']);const key=scope(input.scope),prompt=str(input.prompt,'คำถามทดสอบ',2000,true);
+  requireAdmin(staff);fields(input,['scope','prompt','expectedHandoff','applicability']);const key=scope(input.scope),prompt=str(input.prompt,'คำถามทดสอบ',2000,true);
   if(typeof input.expectedHandoff!=='boolean')throw new ApiError(400,'ระบุผลส่งต่อที่คาดหวัง');
   const profile=(await database.query('SELECT * FROM ai_profiles WHERE org_id=$1 AND scope=$2',[staff.orgId,key])).rows[0];if(!profile)throw new ApiError(409,'บันทึกบุคลิกก่อนทดสอบ');
-  const all=await scopedKnowledge(staff.orgId,key),hash=fingerprint(all),selected=selectKnowledge(prompt,all),rule=scenarios(parse(profile.scenarios)).find(x=>x.keywords.some(k=>prompt.toLowerCase().includes(k.toLowerCase())));
+  const all=await approvedSources(staff.orgId,key,database),hash=fingerprint(all),selected=selectKnowledge(prompt,all.filter(s=>scopeMatches(s.applicability,applicability(input.applicability)))),rule=scenarios(parse(profile.scenarios)).find(x=>x.keywords.some(k=>prompt.toLowerCase().includes(k.toLowerCase())));
   const handoff=!!rule||!selected.length;let answer='',error='';
   if(handoff)answer='ส่งต่อเจ้าหน้าที่เพื่อยืนยันข้อมูล';
   else if(providerName()==='disabled')error='ai_provider_disabled';
   else try{for await(const chunk of generateReply({history:[{role:'user',content:prompt}],facts:{},knowledge:selected,settings:{botName:'RRS',personality:profile.personality,businessHours:'',handoffRule:'ส่งต่อให้ผู้มีสิทธิ์อนุมัติราคา ส่วนลด การชำระเงิน และวันส่งมอบ',aiEnabled:true},signal:AbortSignal.timeout(15000)})){if(chunk.text)answer+=chunk.text;if(answer.length>10000)throw new Error('too_long');}}catch{error='evaluation_failed';}
   const passed=!error&&!!answer&&handoff===input.expectedHandoff,id=randomUUID(),citations=selected.map(x=>({id:x.id,version:x.version,title:x.title}));
-  await transaction(staff.orgId,async c=>{const fresh=(await c.query('SELECT revision FROM ai_profiles WHERE org_id=$1 AND scope=$2',[staff.orgId,key])).rows[0];if(fresh?.revision!==profile.revision||fingerprint(await scopedKnowledge(staff.orgId,key,c))!==hash)throw new ApiError(409,'ข้อมูลเปลี่ยนระหว่างทดสอบ กรุณาทดสอบอีกครั้ง');await c.query('INSERT INTO ai_evaluations(id,org_id,scope,revision,source_fingerprint,prompt,answer,citations,handoff,passed,error_code,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',[id,staff.orgId,key,profile.revision,hash,prompt,answer,JSON.stringify(citations),handoff,passed,error,staff.id,at()]);await audit(c,staff,'ai.evaluation',id);},staff);
+  await transaction(staff.orgId,async c=>{const fresh=(await c.query('SELECT revision FROM ai_profiles WHERE org_id=$1 AND scope=$2',[staff.orgId,key])).rows[0];if(fresh?.revision!==profile.revision||fingerprint(await approvedSources(staff.orgId,key,c))!==hash)throw new ApiError(409,'ข้อมูลเปลี่ยนระหว่างทดสอบ กรุณาทดสอบอีกครั้ง');await c.query('INSERT INTO ai_evaluations(id,org_id,scope,revision,source_fingerprint,prompt,answer,citations,handoff,passed,error_code,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',[id,staff.orgId,key,profile.revision,hash,prompt,answer,JSON.stringify(citations),handoff,passed,error,staff.id,at()]);await audit(c,staff,'ai.evaluation',id);},staff);
   return {id,answer,citations,handoff,passed,error,mode:'sandbox',provider:providerName()};
 }
 export async function activateAi(staff:Staff,input:Record<string,unknown>){
   requireAdmin(staff);fields(input,['scope','evaluationId','expectedRevision','action','confirm']);const key=scope(input.scope);if(input.confirm!==true||!['activate','pause'].includes(String(input.action)))throw new ApiError(400,'ยืนยันสถานะ AI');
-  await transaction(staff.orgId,async c=>{const profile=(await c.query('SELECT * FROM ai_profiles WHERE org_id=$1 AND scope=$2',[staff.orgId,key])).rows[0];if(!profile||profile.revision!==input.expectedRevision)throw new ApiError(409,'บุคลิกเปลี่ยนแล้ว');let hash='';if(input.action==='activate'){const evaluation=(await c.query('SELECT * FROM ai_evaluations WHERE org_id=$1 AND id=$2 AND scope=$3',[staff.orgId,uuid(input.evaluationId),key])).rows[0];hash=fingerprint(await scopedKnowledge(staff.orgId,key,c));if(!evaluation?.passed||evaluation.revision!==profile.revision||evaluation.source_fingerprint!==hash||Date.now()-Date.parse(evaluation.created_at)>24*3600_000)throw new ApiError(409,'ต้องทดสอบฉบับปัจจุบันให้ผ่านภายใน24ชั่วโมง');}await c.query('UPDATE ai_profiles SET status=$3,source_fingerprint=$4,active_evaluation_id=$5,updated_by=$6,updated_at=$7 WHERE org_id=$1 AND scope=$2',[staff.orgId,key,input.action==='activate'?'active':'paused',hash,input.action==='activate'?input.evaluationId:null,staff.id,at()]);await audit(c,staff,'ai.profile.'+input.action,key);},staff);return aiOverview(staff);
+  await transaction(staff.orgId,async c=>{const profile=(await c.query('SELECT * FROM ai_profiles WHERE org_id=$1 AND scope=$2',[staff.orgId,key])).rows[0];if(!profile||profile.revision!==input.expectedRevision)throw new ApiError(409,'บุคลิกเปลี่ยนแล้ว');let hash='';if(input.action==='activate'){const evaluation=(await c.query('SELECT * FROM ai_evaluations WHERE org_id=$1 AND id=$2 AND scope=$3',[staff.orgId,uuid(input.evaluationId),key])).rows[0];hash=fingerprint(await approvedSources(staff.orgId,key,c));if(!evaluation?.passed||evaluation.revision!==profile.revision||evaluation.source_fingerprint!==hash||Date.now()-Date.parse(evaluation.created_at)>24*3600_000)throw new ApiError(409,'ต้องทดสอบฉบับปัจจุบันให้ผ่านภายใน24ชั่วโมง');}await c.query('UPDATE ai_profiles SET status=$3,source_fingerprint=$4,active_evaluation_id=$5,updated_by=$6,updated_at=$7 WHERE org_id=$1 AND scope=$2',[staff.orgId,key,input.action==='activate'?'active':'paused',hash,input.action==='activate'?input.evaluationId:null,staff.id,at()]);await audit(c,staff,'ai.profile.'+input.action,key);},staff);return aiOverview(staff);
 }
 

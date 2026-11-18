@@ -18,6 +18,11 @@ async function bucket():Promise<PrivateBucket> {
   return (await import('./local-files')).localBucket();
 }
 export const getPrivateBucket = bucket;
+export function matchesDocumentSignature(content:Buffer,type:string) {
+  if(type==='application/pdf')return content.subarray(0,5).toString()==='%PDF-';
+  if(type==='image/png')return content.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+  return type==='image/jpeg' && content[0]===255 && content[1]===216 && content[2]===255;
+}
 async function scopedLead(staff:Staff,id:string) {
   uuid(id);
   if(!(await database.query('SELECT id FROM leads WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows.length)throw new ApiError(404,'ไม่พบลูกค้า');
@@ -42,7 +47,7 @@ export async function uploadFile(staff:Staff,leadId:string,request:Request) {
   while(true){const next=await reader.read();if(next.done)break;size+=next.value.length;if(size>max){await reader.cancel();throw new ApiError(413,'ไฟล์ต้องมีขนาดไม่เกิน 10 MB');}chunks.push(next.value);}
   if(!size)throw new ApiError(400,'ไฟล์ว่าง');
   const bytes=Buffer.concat(chunks,size);
-  const valid=type==='application/pdf'?bytes.subarray(0,5).toString()==='%PDF-':type==='image/png'?bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])):bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
+  const valid=matchesDocumentSignature(bytes,type);
   if(!valid)throw new ApiError(400,'ชนิดไฟล์ไม่ตรงกับเนื้อหา');
   const id=randomUUID();const key=`${staff.orgId}/${id}`;
   const configured=Number(process.env.FILE_STORAGE_LIMIT_BYTES||1073741824);

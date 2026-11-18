@@ -36,6 +36,10 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
   const [templateOpen, setTemplateOpen] = useState(false); const [templates, setTemplates] = useState<ReplyTemplate[]>([]); const [templateSearch, setTemplateSearch] = useState(""); const [templateLoading, setTemplateLoading] = useState(false); const [templateError, setTemplateError] = useState("");
   const selectedRef = useRef(""); const queryVersion = useRef(0); const listRequest = useRef(0); const loadedPages = useRef(1); const readMessages = useRef(new Set<string>()); const history = useRef<HTMLDivElement>(null);
   selectedRef.current = selected;
+  useEffect(()=>{
+    const requested=new URLSearchParams(window.location.search).get('conversation');
+    if(requested && /^[a-f0-9-]{36}$/i.test(requested))setSelected(requested);
+  },[]);
   const profileRef = useRef<HTMLElement>(null); const templateRef = useRef<HTMLDivElement>(null);
   useFocusScope(profileOpen, profileRef, () => setProfileOpen(false), true, "#customer-profile-trigger");
   useFocusScope(templateOpen, templateRef, () => setTemplateOpen(false), false, "#reply-template-trigger");

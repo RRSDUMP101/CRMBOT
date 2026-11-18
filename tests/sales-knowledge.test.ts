@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {before,after,test} from 'node:test';
+import {database,closeDatabase,transaction} from '../src/lib/db';
+import type {Staff} from '../src/lib/auth';
+import {saveSource,reviewSource,restoreKnowledge,scopedKnowledge} from '../src/lib/ai-lifecycle';
+import {caseFacts,caseContext,recordCustomerFacts,reviewCaseFact} from '../src/lib/sales-knowledge';
+import {acceptLearningProposal,learningEvidence} from '../src/lib/sales-learning';
+
+const org=randomUUID(),person=randomUUID(),thread=randomUUID(),other=randomUUID(),message=randomUUID(),staffAnswer=randomUUID(),lead=randomUUID();
+const actor:Staff={id:person,orgId:org,name:'Fixture',email:'admin@example.invalid',role:'Admin'};
+before(async()=>{
+ Object.assign(process.env,{DEMO_MODE:'true',RRS_WORKERS:'false',D1_LOCAL_DIR:'.data/sales-knowledge-'+randomUUID(),RRS_SALES_KNOWLEDGE_ENABLED:'true'});
+ await database.query('INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)',[org,org,'Fixture']);
+ await database.query("INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,'Fixture',$3,'unused','Admin')",[person,org,actor.email]);
+ await database.query("INSERT INTO leads(id,org_id,name) VALUES($1,$2,'Fixture')",[lead,org]);
+ for(const id of [thread,other])await database.query('INSERT INTO conversations(id,org_id,lead_id) VALUES($1,$2,$3)',[id,org,lead]);
+ await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status) VALUES($1,$2,$3,'user','Hilux 2022','complete')",[message,org,thread]);
+ await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,author_member_id,author_type) VALUES($1,$2,$3,'agent','Check this model','complete',$4,'human')",[staffAnswer,org,thread,person]);
+});
+after(()=>closeDatabase());
+test('learning accepts only reviewed staff excerpts and deduplicates a private draft after lost ACK',async()=>{
+ const now=new Date().toISOString(),scope='whatsapp:12345678';
+ await database.query("INSERT INTO social_identities(id,org_id,provider,account_id,remote_id,lead_id,conversation_id,created_at,updated_at) VALUES($1,$2,'whatsapp','12345678','customer-test',$3,$4,$5,$5)",[randomUUID(),org,lead,thread,now]);
+ const proof={conversationId:thread,messageId:staffAnswer,excerpt:'Check this model'};
+ await assert.rejects(()=>learningEvidence(org,{...proof,messageId:message}),/requires_review/);
+ const source=await learningEvidence(org,proof);assert.equal(source.scope,scope);
+ const request={...proof,commandId:randomUUID(),runId:randomUUID(),sourceHash:source.sourceHash,sourceVersion:source.sourceVersion,summary:'ตรวจรุ่นรถในเคสนี้'};
+ await assert.rejects(()=>acceptLearningProposal(org,{...request,summary:'อีเมล example@example.invalid'}),/redaction/);
+ await acceptLearningProposal(org,request);await acceptLearningProposal(org,request);
+ await assert.rejects(()=>acceptLearningProposal(org,{...request,summary:'ข้อความอื่น'}),/changed/);
+ const k=(await database.query('SELECT status FROM knowledge WHERE org_id=$1 AND id=$2',[org,request.commandId])).rows[0];
+ assert.equal(k.status,'draft');assert.equal((await scopedKnowledge(org,scope,database,{conversationId:thread})).length,0);
+});
+test('exact applicability, immutable correction, evidence, rollout and previous-version recovery',async()=>{
+ await transaction(org,async c=>recordCustomerFacts(c,org,thread,message,'Hilux 2022'));
+ await transaction(org,async c=>recordCustomerFacts(c,org,thread,message,'Hilux 2022'));
+ const facts=await caseFacts(database,org,thread);
+ assert.equal(facts.find(f=>f.fact_key==='vehicle')?.revision,1);
+ assert.equal((await caseContext(database,org,thread)).vehicle,undefined);
+ await reviewCaseFact(actor,{conversationId:thread,messageId:message,key:'vehicle',value:'Hilux',state:'confirmed',expectedRevision:1});
+ await assert.rejects(()=>reviewCaseFact(actor,{conversationId:thread,messageId:message,key:'vehicle',value:'Other',state:'confirmed',expectedRevision:1}),/ฉบับใหม่/);
+ const input={title:'Installation evidence',content:'Staff-reviewed test fixture',scopes:['web'],evidenceMessageId:staffAnswer,applicability:{vehicle:'Hilux',conversationId:thread}};
+ await assert.rejects(()=>saveSource(actor,{...input,evidenceMessageId:message}),/ต้นทาง/);
+ const saved=await saveSource(actor,input),publish=(version:number)=>reviewSource(actor,{id:saved.id,expectedVersion:version,action:'approve',confirm:true});
+ const select=(context={})=>scopedKnowledge(org,'web',database,context);
+ assert.equal((await select(await caseContext(database,org,thread))).length,0);
+ await publish(1);assert.equal((await select()).length,0);
+ assert.equal((await select({conversationId:other,vehicle:'Hilux'})).length,0);
+ assert.equal((await select(await caseContext(database,org,thread))).length,1);
+ await saveSource(actor,{id:saved.id,expectedVersion:1,...input,content:'Changed'});
+ await restoreKnowledge(actor,{id:saved.id,expectedVersion:2,version:1});
+ assert.equal((await select(await caseContext(database,org,thread))).length,0);
+ await publish(3);assert.equal((await select(await caseContext(database,org,thread)))[0].content,input.content);
+ await reviewCaseFact(actor,{conversationId:thread,messageId:message,key:'vehicle',state:'unknown',expectedRevision:2});
+ assert.equal((await select(await caseContext(database,org,thread))).length,0);
+});

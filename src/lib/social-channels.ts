@@ -1,6 +1,8 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { database, transaction, type Executor, type Row } from './db';
 import { ApiError } from './errors';
+import {assertTriageEligible, decideWhatsApp, persistWhatsAppDecision} from './whatsapp-triage';
+import {recordCustomerFacts} from './sales-knowledge';
 
 export type SocialProvider = 'whatsapp' | 'line' | 'facebook' | 'instagram';
 export type SocialChannelConfig = {
@@ -275,11 +277,17 @@ async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Even
   }
   const conversation=identity.fresh ? {customer_message_seq:0} : (await c.query('SELECT customer_message_seq FROM conversations WHERE org_id=$1 AND id=$2',[config.orgId,identity.conversation_id])).rows[0];
   const messageId=randomUUID(), seq=event.echo ? null : Number(conversation.customer_message_seq)+1;
+  const triage=config.provider==='whatsapp'&&!event.echo
+    ? await decideWhatsApp(c,config.orgId,identity,event.text!,event.messageType!,event.attachments||[]) : undefined;
+  const metadata={...event.metadata};
+  // The provider cannot supply our workflow policy, even if a future payload adds an identically named field.
+  delete metadata.rrsSales;
+  if(triage)metadata.rrsSales=triage.contract;
   await c.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,customer_seq,created_at) VALUES($1,$2,$3,$4,$5,'complete',$6,$7)",[messageId,config.orgId,identity.conversation_id,event.echo ? 'agent' : 'user',event.text!,seq,event.at]);
-  await c.query('INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_message_id,provider_type,direction,delivery_status,provider_timestamp,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[config.orgId,messageId,config.provider,config.accountId,event.remote,event.mid!,event.messageType!,event.echo ? 'out' : 'in',event.echo ? 'sent' : 'received',event.at,JSON.stringify(event.metadata || {})]);
+  await c.query('INSERT INTO social_message_provenance(org_id,message_id,provider,account_id,remote_id,provider_message_id,provider_type,direction,delivery_status,provider_timestamp,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[config.orgId,messageId,config.provider,config.accountId,event.remote,event.mid!,event.messageType!,event.echo ? 'out' : 'in',event.echo ? 'sent' : 'received',event.at,JSON.stringify(metadata)]);
   for(const attachment of event.attachments || []) {
-    const attachmentId=randomUUID(),archive=config.provider==='whatsapp'&&!event.echo;
-    await c.query('INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[attachmentId,config.orgId,messageId,config.provider,config.accountId,attachment.type,attachment.ref,JSON.stringify({...attachment.metadata,...archive?{archiveState:'queued'}:{}})]);
+    const attachmentId=randomUUID(),archive=config.provider==='whatsapp'&&!event.echo&&!triage?.unsafe;
+    await c.query('INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[attachmentId,config.orgId,messageId,config.provider,config.accountId,attachment.type,attachment.ref,JSON.stringify({...attachment.metadata,...archive?{archiveState:'queued'}:triage?.unsafe?{archiveState:'quarantined',unsafeInbound:true}:{}})]);
     if(archive)await (await import('./media-archive-queue')).enqueueInboundMediaArchive(c,config,attachmentId);
   }
   const optOut=/^(stop|unsubscribe|หยุดติดต่อ|หยุด|ยกเลิกการติดต่อ)(?:$|\s|[.!])/i.test(event.text!.trim());
@@ -290,7 +298,12 @@ async function ingestEvent(c: Executor, config: SocialChannelConfig, event: Even
   }
   await c.query(`UPDATE conversations SET customer_message_seq=customer_message_seq+$3,first_customer_at=CASE WHEN $3=1 THEN COALESCE(first_customer_at,$4) ELSE first_customer_at END,updated_at=$5 WHERE org_id=$1 AND id=$2`,[config.orgId,identity.conversation_id,event.echo ? 0 : 1,event.at,time]);
   await cancelGeneration(c,config.orgId,identity.conversation_id,event.echo ? 'External employee reply' : 'New customer message',false);
-  if(sink && !event.echo) sink.value={orgId:config.orgId,provider:config.provider,accountId:config.accountId,eventId:event.id,kind:'message',conversationId:identity.conversation_id,leadId:identity.lead_id,messageId,text:event.text!,fresh:!!identity.fresh,optOut};
+  const workflowEventId=triage?'wa:'+config.accountId+':'+event.id:event.id;
+  if(triage) {
+    await persistWhatsAppDecision(c,config.orgId,identity,messageId,workflowEventId,triage);
+    if(triage.eligible && triage.category==='legitimate')await recordCustomerFacts(c,config.orgId,identity.conversation_id,messageId,event.text!);
+  }
+  if(sink && !event.echo && (!triage||triage.eligible||optOut)) sink.value={orgId:config.orgId,provider:config.provider,accountId:config.accountId,eventId:workflowEventId,kind:'message',conversationId:identity.conversation_id,leadId:identity.lead_id,messageId,text:event.text!,fresh:!!identity.fresh,optOut};
   return true;
 }
 async function cancelGeneration(c: Executor,orgId: string,conversationId: string,reason: string,forceWaiting: boolean) {
@@ -356,6 +369,7 @@ export async function enqueueSocialReply(c: Executor,orgId: string,conversationI
   if(automation) {if(!conversation || !['bot_active','waiting_human'].includes(conversation.status) || !automation.approvedBy) throw new ApiError(409,'Automation cannot send after human takeover or closure');}
   else if(!conversation || conversation.status !== 'human_active' || !conversation.assignee_id) throw new ApiError(409,'Claim this conversation before sending');
   if(identity.opt_out) throw new ApiError(409,'Customer has opted out');
+  if(automation && identity.provider==='whatsapp')await assertTriageEligible(c,orgId,conversationId);
   const maximum=identity.provider === 'whatsapp' ? 4096 : 2000;
   if(!text.trim() || text.length > maximum) throw new ApiError(400,`Channel replies require 1–${maximum} characters`);
   if(identity.provider==='instagram'&&Buffer.byteLength(text,'utf8')>1000)throw new ApiError(400,'Instagram replies are limited to 1000 UTF-8 bytes');
@@ -406,6 +420,7 @@ export async function outboundGuard(c: Executor,command: Row,config:SocialChanne
   const conversation=(await c.query('SELECT * FROM conversations WHERE org_id=$1 AND id=$2',[command.org_id,command.conversation_id])).rows[0];
   // Broadcast intents carry their own Admin approval. A Flow intent is never sendable once a human has taken over, the conversation closed, or new input arrived.
   if(!broadcast && await (await import('./flows')).flowOutboundGuard(c,command)) {
+    if(command.provider==='whatsapp')await assertTriageEligible(c,command.org_id,command.conversation_id);
     if(!conversation || conversation.version !== command.conversation_version || !['bot_active','waiting_human'].includes(conversation.status)) throw new ApiError(409,'Automation stopped after human takeover, closure or new input');
   } else if(!conversation || conversation.version !== command.conversation_version || !broadcast && (conversation.status !== 'human_active' || conversation.assignee_id !== command.approved_by)) throw new ApiError(409,'Human approval is stale after takeover or new input');
   if(reviewed&&conversation.customer_message_seq!==reviewed.expectedCustomerSeq)throw new ApiError(409,'Reviewed Sale customer generation changed');
@@ -414,6 +429,7 @@ export async function outboundGuard(c: Executor,command: Row,config:SocialChanne
   if(!member?.active) throw new ApiError(409,'Approving staff member is inactive');
   const aiApproval=(await c.query('SELECT actor_id FROM crm_approved_ai_commands WHERE org_id=$1 AND outbound_command_id=$2',[command.org_id,command.id])).rows[0];
   if(aiApproval){
+    if(command.provider==='whatsapp')await assertTriageEligible(c,command.org_id,command.conversation_id);
     let allowed:unknown;try{allowed=JSON.parse(process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS||'[]');}catch{throw new ApiError(409,'AI approving Admin configuration changed');}
     if(member.role!=='Admin'||aiApproval.actor_id!==command.approved_by||!Array.isArray(allowed)||!allowed.includes(command.approved_by))throw new ApiError(409,'AI approving Admin changed');
   }

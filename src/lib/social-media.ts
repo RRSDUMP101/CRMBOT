@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { database, transaction, type Row, type Executor } from './db';
 import { ApiError, uuid } from './auth';
-import { getPrivateBucket } from './files';
+import { getPrivateBucket, matchesDocumentSignature } from './files';
 import { socialProvider } from './social-channels';
 import {resolveSocialConfig} from './social-account-runtime';
 import {signBridgeRequest,bridgeKeyConfig} from './bridge-protocol';
@@ -62,6 +62,8 @@ async function providerMedia(row:Row,transport:typeof fetch,allowOwnerOnly:boole
     response=await get(metaLocation(metadata.url));
     const content=await bytes(response,size),type=(response.headers.get('content-type')||'').split(';')[0].trim().toLowerCase(),hash=createHash('sha256').update(content);
     const actual=hash.digest();if(content.length!==size||![actual.toString('hex'),actual.toString('base64')].includes(expected)||type!==mime)throw new ApiError(415,'WhatsApp media integrity mismatch');
+    if(['application/pdf','image/jpeg','image/png'].includes(mime)&&!matchesDocumentSignature(content,mime))throw new ApiError(415,'WhatsApp document signature mismatch');
+    if(mime==='image/webp' && (content.subarray(0,4).toString()!=='RIFF'||content.subarray(8,12).toString()!=='WEBP'))throw new ApiError(415,'WhatsApp sticker signature mismatch');
     return {bytes:content,type:mime,ownerOnly:false};
   }else{
     // Facebook signed CDN URLs need no bearer credential. Never follow redirects or arbitrary URLs.
@@ -83,6 +85,7 @@ async function scoped(orgId:string,id:string,c:Executor=database){
 export type ArchiveBytes={bytes:Uint8Array;type:string;ownerOnly?:boolean};
 function permitted(row:Row,allowOwnerOnly:boolean){
   const metadata=typeof row.metadata==='string'?JSON.parse(row.metadata):row.metadata||{};
+  if(metadata.unsafeInbound===true)throw new ApiError(415,'ไฟล์นี้ถูกพักเพื่อตรวจสอบความปลอดภัย');
   if((row.source_owner_only||metadata.sourceOwnerOnly||metadata.sourceScopeUnknown)&&!allowOwnerOnly)throw new ApiError(403,'Original file permissions require an administrator');
   return metadata;
 }

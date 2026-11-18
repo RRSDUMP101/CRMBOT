@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {assertTriageEligible} from './whatsapp-triage';
 import {ApiError,fields,uuid,type Staff} from './auth';
 import {database,transaction,type Row} from './db';
 import {bridgePayloadHash} from './bridge-protocol';
@@ -51,6 +52,7 @@ export async function acceptApprovedAi(raw:unknown,options:{fetch?:typeof fetch;
     const conversation=(await c.query('SELECT * FROM conversations WHERE org_id=$1 AND id=$2',[config.orgId,payload.conversationId])).rows[0];
     const identity=(await c.query("SELECT * FROM social_identities WHERE org_id=$1 AND conversation_id=$2 AND provider='whatsapp'",[config.orgId,payload.conversationId])).rows[0];
     if(!conversation||!identity)throw new ApiError(404,'Approved AI conversation not found');
+    await assertTriageEligible(c,config.orgId,payload.conversationId);
     if(conversation.version!==payload.expectedVersion||conversation.status!=='human_active'||conversation.assignee_id!==staff.id||identity.account_id!==payload.accountId||identity.remote_id!==payload.remoteId||identity.opt_out||identity.lead_id!==conversation.lead_id)throw new ApiError(409,'Approved AI recipient, assignment or generation changed');
     await assertBridgeAiPolicy(config.orgId,payload.conversationId,payload.expectedVersion,payload.source.aiPolicy,c);
     const lead=(await c.query('SELECT contact_consent_at,contact_consent_version FROM leads WHERE org_id=$1 AND id=$2',[config.orgId,identity.lead_id])).rows[0];

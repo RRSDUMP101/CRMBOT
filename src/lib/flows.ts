@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { camel, database, transaction, withDatabase, type D1Binding, type D1Statement, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
 import { readSocialConfig, type FlowInboundSignal, type SocialChannelConfig, type SocialProvider } from './social-channels';
+import {triageBlocked} from './whatsapp-triage';
 
 /**
  * Flow Builder ("ระบบอัตโนมัติ"): durable, versioned automation. Default OFF (FLOWS_ENABLED=true).
@@ -339,6 +340,7 @@ async function startExecution(ctx: Ctx, input: StartInput): Promise<{ id?: strin
     const subject = await loadSubject(c, orgId, input.conversationId);
     if (!subject) return { skipped: 'subject_missing' };
     if (subject.identity?.opt_out) return { skipped: 'opted_out' };
+    if (subject.identity?.provider==='whatsapp' && await triageBlocked(c,orgId,input.conversationId)) return {skipped:'whatsapp_triage_hold'};
     const hourAgo = stamp(now - 3600_000);
     const perFlow = Number((await c.query('SELECT count(*) AS n FROM flow_executions WHERE org_id=$1 AND conversation_id=$2 AND flow_id=$3 AND started_at>$4', [orgId, input.conversationId, flow.id, hourAgo])).rows[0].n);
     const perSubject = Number((await c.query('SELECT count(*) AS n FROM flow_executions WHERE org_id=$1 AND conversation_id=$2 AND started_at>$3', [orgId, input.conversationId, hourAgo])).rows[0].n);
@@ -448,6 +450,10 @@ async function runInstruction(c: Executor, ctx: Ctx, run: Running, pc: number): 
   }
   const subject = await loadSubject(c, orgId, execution.conversation_id);
   if (!subject) throw new ApiError(404, 'subject_missing');
+  if(subject.identity?.provider==='whatsapp' && await triageBlocked(c,orgId,execution.conversation_id)){
+    await cancelExecutionRow(c,execution,'whatsapp_triage_hold',at);
+    return {halt:true};
+  }
   const instr = program[pc];
   let next = pc + 1, result: StepResult;
   if (instr.op === 'jump') { next = instr.target; result = { outcome: 'jump' }; }
