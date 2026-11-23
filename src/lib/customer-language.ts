@@ -1,7 +1,7 @@
 import {detect} from 'tinyld/light';
 
 const shortEnglish = /^(?:hi|hello|yes|no|thanks|thank you|you are welcome|you're welcome|okay|ok|good morning|good afternoon|good evening|kind regards|best regards)$/i;
-const technicalWords = new Set('a an the is are has have be can will this that for of to at from in on and or per unit units kit kits hydraulic dump body truck model region cost price quote approved payload weight tonnes tons kg load capacity product delivery date confirmed sales stock available destination required reviewed vehicle two one three four five six seven eight nine ten'.split(' '));
+const technicalWords = new Set('a an the is are has have be can will this that for of to at from in on and or per unit units kit kits hydraulic hydraulic-cylinder steel aluminum aluminium stainless tipper dump body truck model region cost price quote approved payload weight tonnes tons kg load capacity product delivery date confirmed sales stock available destination required reviewed vehicle two one three four five six seven eight nine ten'.split(' '));
 
 // Evaluate each sentence before streaming or dispatch. A known short phrase or
 // a line of English technical terms can be too short for statistical detection.
