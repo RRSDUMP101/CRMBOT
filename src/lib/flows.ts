@@ -4,6 +4,7 @@ import { camel, database, transaction, withDatabase, type D1Binding, type D1Stat
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
 import { readSocialConfig, type FlowInboundSignal, type SocialChannelConfig, type SocialProvider } from './social-channels';
 import {triageBlocked} from './whatsapp-triage';
+import {scopedQualification} from './whatsapp-qualification';
 
 /**
  * Flow Builder ("ระบบอัตโนมัติ"): durable, versioned automation. Default OFF (FLOWS_ENABLED=true).
@@ -289,8 +290,8 @@ export const sendBlockReasons: Record<string, string> = {
   channel_not_live: 'ช่องทางยังไม่เปิดส่งจริง', channel_stopped: 'ช่องทางถูกหยุดส่งหรือยังไม่เปิดส่ง', consent_missing: 'ยังไม่มีหลักฐานความยินยอม WhatsApp',
   daily_limit: 'ถึงขีดจำกัดข้อความอัตโนมัติต่อวัน', approver_inactive: 'ผู้เผยแพร่ไม่ใช่ผู้ดูแลระบบที่ใช้งานอยู่', template_missing: 'ไม่พบข้อความสำเร็จรูป',
 };
-function sendBlocker(env: Env, subject: Subject, greeting: boolean, greetingSent: boolean): string | null {
-  if (!flowSendsEnabled(env)) return 'sending_disabled';
+function sendBlocker(env: Env, subject: Subject, greeting: boolean, greetingSent: boolean, scoped = false): string | null {
+  if (!flowSendsEnabled(env) && !scoped) return 'sending_disabled';
   if (greeting && greetingSent) return 'greeting_already_sent';
   if (!subject.identity) return 'non_social_channel';
   if (subject.identity.opt_out) return 'opted_out';
@@ -314,13 +315,18 @@ const bangkokDayStart = (now: number) => { const local = now + 7 * 3600_000; ret
 export async function flowOutboundGuard(c: Executor, command: Row): Promise<boolean> {
   const link = (await c.query('SELECT * FROM flow_outbound_commands WHERE org_id=$1 AND outbound_command_id=$2', [command.org_id, command.id])).rows[0];
   if (!link) return false;
-  if (!flowSendsEnabled(process.env)) throw new ApiError(503, 'Flow sending is disabled');
   if (link.approved_by !== command.approved_by) throw new ApiError(409, 'Flow approval linkage changed');
   if (await globallyPaused(c, command.org_id)) throw new ApiError(503, 'Flows are paused');
-  const flow = (await c.query('SELECT status FROM flows WHERE org_id=$1 AND id=$2', [command.org_id, link.flow_id])).rows[0];
+  const flow = (await c.query('SELECT status,current_version FROM flows WHERE org_id=$1 AND id=$2', [command.org_id, link.flow_id])).rows[0];
   if (flow?.status !== 'published') throw new ApiError(409, 'Flow is paused or unpublished');
-  const execution = (await c.query('SELECT status FROM flow_executions WHERE org_id=$1 AND id=$2', [command.org_id, link.execution_id])).rows[0];
+  const execution = (await c.query('SELECT status,trigger_kind,trigger_event_id FROM flow_executions WHERE org_id=$1 AND id=$2', [command.org_id, link.execution_id])).rows[0];
   if (!execution || ['cancelled', 'failed'].includes(execution.status)) throw new ApiError(409, 'Flow execution stopped');
+  if (!flowSendsEnabled(process.env)) {
+    const subject=await loadSubject(c,command.org_id,command.conversation_id);
+    if (!subject || Number(flow.current_version)!==Number(link.version)
+      || !qualificationFor(process.env,subject,link.flow_id,Number(link.version),link.step_id,execution.trigger_kind,command.body)
+      || !await currentInbound(c,subject,execution.trigger_event_id)) throw new ApiError(503,'Flow sending is disabled');
+  }
   const approver = (await c.query('SELECT role,active FROM members WHERE org_id=$1 AND id=$2', [command.org_id, link.approved_by])).rows[0];
   if (!approver?.active || approver.role !== 'Admin') throw new ApiError(409, 'Flow approver is no longer an active Admin');
   return true;
@@ -356,6 +362,18 @@ async function startExecution(ctx: Ctx, input: StartInput): Promise<{ id?: strin
 
 type StepResult = { outcome: string; detail?: Row; stop?: boolean; wait?: { until: number; cancelOnReply: boolean; customerSeq: number }; commandId?: string };
 type Running = { orgId: string; executionId: string; token: string; flow: Version; program: Instr[] };
+function qualificationFor(env:Env,s:Subject,flowId:string,version:number,stepId:string,trigger:string,text:string){
+  return scopedQualification(env,{orgId:s.conversation.org_id,accountId:s.identity?.account_id,provider:s.identity?.provider,
+    flowId,version,stepId,trigger,text,status:s.conversation.status,assigned:Boolean(s.conversation.assignee_id)});
+}
+async function currentInbound(c:Executor,s:Subject,eventId:string){
+  const row=(await c.query(`SELECT m.id FROM flow_ingress i JOIN messages m ON m.org_id=i.org_id AND m.conversation_id=i.conversation_id
+    AND m.id=json_extract(i.signal,'$.messageId') WHERE i.org_id=$1 AND i.conversation_id=$2 AND i.event_id=$3
+    AND json_extract(i.signal,'$.provider')='whatsapp' AND json_extract(i.signal,'$.accountId')=$4
+    AND json_extract(i.signal,'$.kind')='message' AND m.role='user' AND m.customer_seq=$5`,
+    [s.conversation.org_id,s.conversation.id,eventId,s.identity?.account_id,s.conversation.customer_message_seq])).rows[0];
+  return Boolean(row);
+}
 async function performAction(c: Executor, ctx: Ctx, run: Running, execution: Row, subject: Subject, step: ActionStep): Promise<StepResult> {
   const { orgId } = run, now = ctx.now(), at = stamp(now), { lead, conversation } = subject;
   const origin: Origin = { flowId: run.flow.id, executionId: run.executionId, chain: [execution.flow_chain, run.flow.id].filter(Boolean).join(','), depth: Number(execution.chain_depth) + 1 };
@@ -395,7 +413,9 @@ async function performAction(c: Executor, ctx: Ctx, run: Running, execution: Row
       return { outcome: 'waiting', detail: { minutes: step.minutes, cancelOnReply: step.cancelOnReply }, wait: { until: now + step.minutes * 60_000, cancelOnReply: step.cancelOnReply, customerSeq: Number(conversation.customer_message_seq || 0) } };
     case 'send_message': {
       const greetingSent = step.greeting && (await c.query('SELECT 1 FROM flow_greetings WHERE org_id=$1 AND conversation_id=$2', [orgId, conversation.id])).rows.length > 0;
-      const blocked = sendBlocker(ctx.env, subject, step.greeting, greetingSent) ?? await channelBlocker(c, ctx, subject);
+      const scoped = !flowSendsEnabled(ctx.env) && qualificationFor(ctx.env,subject,run.flow.id,run.flow.version,step.id,execution.trigger_kind,step.text || '')
+        && await currentInbound(c,subject,execution.trigger_event_id);
+      const blocked = sendBlocker(ctx.env, subject, step.greeting, greetingSent,scoped) ?? await channelBlocker(c, ctx, subject);
       if (blocked) return { outcome: blocked === 'greeting_already_sent' ? 'skipped' : 'blocked', detail: { reason: blocked } };
       const approver = (await c.query('SELECT role,active FROM members WHERE org_id=$1 AND id=$2', [orgId, run.flow.publishedBy])).rows[0];
       if (!approver?.active || approver.role !== 'Admin') return { outcome: 'blocked', detail: { reason: 'approver_inactive' } };
@@ -774,7 +794,8 @@ export async function simulateFlow(staff: Staff, flowId: string, body: Record<st
       elapsed += step.minutes * 60_000; plan.outcome = 'wait';
       plan.detail = `รอ ${step.minutes} นาที แล้วทำต่อ${step.cancelOnReply ? ' (ยกเลิกหากลูกค้าตอบกลับ)' : ''}`;
     } else if (step.type === 'send_message') {
-      let reason = !step.text ? 'template_missing' : sendBlocker(env, view(), step.greeting, state.greetingSent);
+      const scoped=source==='published'&&!!version&&qualificationFor(env,view(),flowId,version,step.id,trigger.type,step.text||'');
+      let reason = !step.text ? 'template_missing' : sendBlocker(env, view(), step.greeting, state.greetingSent,scoped);
       if (!reason && (!controls || !Number(controls.send_enabled) || Number(controls.emergency_stop))) reason = 'channel_stopped';
       if (!reason && subject.identity?.provider === 'whatsapp' && !(subject.lead.contact_consent_at && subject.lead.contact_consent_version)) reason = 'consent_missing';
       if (!reason && approver && (members.get(approver)?.role !== 'Admin' || !members.get(approver)?.active)) reason = 'approver_inactive';

@@ -9,6 +9,19 @@ import { adminAction, conversationAction } from '../src/lib/service';
 import { ingestSocialWebhook, dispatchSocialReply, socialConfigFingerprint, type SocialChannelConfig, type FlowInboundSignal } from '../src/lib/social-channels';
 import { cancelFlowExecution, createFlow, flowDetail, latestSlot, listFlows, onInboundSignal, publishFlow, runFlows, saveFlowDraft, setFlowPaused, setFlowsGlobalPause, simulateFlow, validateDefinition, type FlowDefinition, type FlowStep } from '../src/lib/flows';
 import { GET, POST } from '../src/app/api/[...path]/route';
+import {qualificationQuestions,scopedQualification} from '../src/lib/whatsapp-qualification';
+
+test('only a reviewed question from the opted-in WhatsApp account and published version qualifies',()=>{
+  const rule={orgId:'org-a',accountId:'wa-a',flowId:'inquiry',version:1,stepId:'ask'};
+  const env={FLOWS_ENABLED:'true',RRS_PHASE1_WA_QUALIFICATION_RULES:JSON.stringify([rule])};
+  const scope={...rule,provider:'whatsapp',trigger:'inbound_message',text:qualificationQuestions[0],status:'bot_active',assigned:false};
+  assert.equal(scopedQualification(env,scope),true);
+  for(const change of [{orgId:'org-b'},{accountId:'wa-b'},{flowId:'other'},{stepId:'other'},{version:2},{provider:'line'},
+    {trigger:'schedule'},{assigned:true},{status:'human_active'},{status:'waiting_human'},{text:'Unapproved quotation or price'}]){
+    assert.equal(scopedQualification(env,{...scope,...change}),false);
+  }
+  assert.equal(scopedQualification({...env,RRS_PHASE1_WA_QUALIFICATION_RULES:'[]'},scope),false);
+});
 
 const APP = 'https://crm.example.invalid';
 const keys = ['DEMO_MODE', 'RRS_WORKERS', 'D1_LOCAL_DIR', 'APP_ORIGIN', 'SESSION_SECRET', 'AI_PROVIDER', 'FLOWS_ENABLED', 'FLOWS_SEND_ENABLED'] as const;
