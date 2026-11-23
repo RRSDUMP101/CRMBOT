@@ -4,6 +4,7 @@ import {ApiError,fields,uuid,type Staff} from './auth';
 import {database,transaction,type Row} from './db';
 import {bridgePayloadHash} from './bridge-protocol';
 import {approvedAiConfig,verifyApprovedAiSource} from './approved-ai-proof';
+import {isEnglishCustomerReply} from './customer-language';
 import {enqueueSocialReply,dispatchSocialReply} from './social-channels';
 import {bridgeConfig} from './chat-bridge';
 import {assertBridgeAiPolicy,parseAiPolicyProof,type AiPolicyProof} from './ai-policy-bridge';
@@ -44,6 +45,7 @@ export async function acceptApprovedAi(raw:unknown,options:{fetch?:typeof fetch;
   const config=approvedAiConfig(),payload=await parseApprovedAiEnvelope(raw),staff=await actor(payload.actorId,config.orgId),serialized=JSON.stringify(payload),hash=await bridgePayloadHash(serialized);
   const existing=(await database.query('SELECT * FROM crm_approved_ai_commands WHERE org_id=$1 AND command_id=$2',[config.orgId,payload.commandId])).rows[0];
   if(existing&&existing.payload_hash!==hash)throw new ApiError(409,'Approved AI command ID conflict');
+  if(!existing && !isEnglishCustomerReply(payload.text))throw new ApiError(422,'Customer-facing AI replies must be in English');
   if(!existing)await verifyApprovedAiSource({org_id:config.orgId,command_id:payload.commandId,payload_hash:hash},options.fetch);
   const outbound=await transaction(config.orgId,async c=>{
     const prior=(await c.query('SELECT * FROM crm_approved_ai_commands WHERE org_id=$1 AND command_id=$2',[config.orgId,payload.commandId])).rows[0];

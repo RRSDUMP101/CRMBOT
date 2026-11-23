@@ -1,4 +1,5 @@
 import {bridgeKeyConfig,signBridgeRequest} from './bridge-protocol';
+import {isEnglishCustomerReply} from './customer-language';
 import type {BotInput} from './bot';
 export type TurnScope={orgId:string;conversationId:string|null;requestId:string;purpose:'customer'|'evaluation'};
 export type TurnSummary={summaryTh:string;missing:string[]};
@@ -21,6 +22,7 @@ export async function customerTurn(input:BotInput,scope:TurnScope,transport:type
   try{for(;;){const p=await reader.read();if(p.done)break;size+=p.value.length;if(size>32000){await reader.cancel();throw new CustomerTurnHandoff('invalid_response');}raw+=dec.decode(p.value,{stream:true});}raw+=dec.decode();}finally{reader.releaseLock();}
   const x=JSON.parse(raw);
   if(x.status!=='reply'||typeof x.text!=='string'||!x.text.trim()||x.text.length>6000)throw new CustomerTurnHandoff(typeof x.reason==='string'&&/^[a-z0-9_-]{1,80}$/i.test(x.reason)?x.reason:'review_required');
+  if(!isEnglishCustomerReply(x.text))throw new CustomerTurnHandoff('language_review');
   const summary:TurnSummary|undefined=typeof x.summaryTh==='string'&&x.summaryTh.length<=2400&&/[ก-๙]/u.test(x.summaryTh)?{summaryTh:x.summaryTh,missing:Array.isArray(x.missing)?x.missing.filter((v:unknown)=>typeof v==='string'&&v.length<=160).slice(0,12):[]}:undefined;
   return {text:x.text as string,summary};
 }

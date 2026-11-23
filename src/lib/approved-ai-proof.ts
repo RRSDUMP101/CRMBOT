@@ -1,3 +1,4 @@
+import {isEnglishCustomerReply} from './customer-language';
 import {randomUUID} from 'node:crypto';
 import {ApiError} from './auth';
 import {database,type Row} from './db';
@@ -25,6 +26,11 @@ export async function verifyApprovedAiSource(row:Row,transport:typeof fetch=fetc
 /** Called outside the mutation planner on every attempt, including the generic recovery runner. */
 export async function validateApprovedAiDispatch(orgId:string,outboundCommandId:string,transport:typeof fetch=fetch){
   const row=(await database.query('SELECT * FROM crm_approved_ai_commands WHERE org_id=$1 AND outbound_command_id=$2',[orgId,outboundCommandId])).rows[0];
-  if(row){await (await import('./ai-policy-bridge')).validateBridgeAiPolicyDispatch(row);await verifyApprovedAiSource(row,transport);}
+  if(row){
+    const payload=typeof row.payload_json==='string'?JSON.parse(row.payload_json):row.payload_json;
+    if(typeof payload?.text!=='string'||!isEnglishCustomerReply(payload.text))throw new ApiError(409,'Customer-facing AI replies must be in English');
+    await (await import('./ai-policy-bridge')).validateBridgeAiPolicyDispatch(row);
+    await verifyApprovedAiSource(row,transport);
+  }
 }
 

@@ -6,7 +6,7 @@ import { database, transaction, closeDatabase } from '../src/lib/db';
 import { hashToken, STAFF_COOKIE, VISITOR_COOKIE, WIDGET_COOKIE, type Staff } from '../src/lib/auth';
 import { signBridgeRequest } from '../src/lib/bridge-protocol';
 import { handleBridgeCommand } from '../src/lib/bridge-commands';
-import { conversationAction } from '../src/lib/service';
+import { messageStream, visitorDetail, conversationAction } from '../src/lib/service';
 import { readBridgeEvents } from '../src/lib/chat-bridge';
 import { realtimeResponse } from '../src/lib/realtime';
 import { POST } from '../src/app/api/bridge/[...path]/route';
@@ -189,4 +189,30 @@ test('SSE rejects missing, foreign-origin and wrong-context cookies; abort relea
   const reader=(await realtimeResponse(streamRequest(widget,abort.signal,{'x-rrs-widget':'1'}),'visitor')).body!.getReader();
   try { frame(await chunk(reader),'change'); abort.abort(); assert.equal((await chunk(reader)).done,true); }
   finally { await reader.cancel(); }
+});
+
+test('Thai customer question produces one English review acknowledgement and a scoped staff reply', async()=>{
+  const f=await fixture(); allowBridge(f);
+  const previousProvider=process.env.AI_PROVIDER, previousActors=process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS;
+  try {
+    process.env.AI_PROVIDER='sale_gateway';
+    process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS=JSON.stringify([f.member]);
+    await database.query("UPDATE conversations SET status='bot_active',assignee_id=NULL WHERE org_id=$1 AND id=$2",[f.org,f.conversation]);
+    const visitor={orgId:f.org,conversationId:f.conversation}, request={text:'รุ่นนี้บรรทุกน้ำหนักได้เท่าไร',clientId:randomUUID()};
+    const first=await messageStream(visitor,request,new AbortController().signal);
+    assert.match(await first.text(),/Our sales team will review/);
+    await (await messageStream(visitor,request,new AbortController().signal)).text();
+    const items=(await database.query('SELECT * FROM messages WHERE org_id=$1 AND conversation_id=$2',[f.org,f.conversation])).rows;
+    const source=items.find(x=>x.role==='user')!,acks=items.filter(x=>x.role==='assistant');
+    assert.equal(acks.length,1); assert.equal(acks[0].sources[0].sourceMessageId,source.id);
+    assert.doesNotMatch(JSON.stringify((await visitorDetail(visitor)).messages),/sales_clarification/);
+    const events=await readBridgeEvents(f.org); assert.match(JSON.stringify(events),/sales_clarification/);
+    const base={conversationId:f.conversation,actorId:f.member,clarificationSourceMessageId:source.id};
+    await assert.rejects(handleBridgeCommand({...base,commandId:randomUUID(),action:'claim',clarificationSourceMessageId:randomUUID()}));
+    await handleBridgeCommand({...base,commandId:randomUUID(),action:'claim'});
+    await assert.rejects(handleBridgeCommand({...base,commandId:randomUUID(),action:'reply',text:'รับทราบครับ'}),{status:422});
+    const reply={...base,commandId:randomUUID(),action:'reply',text:'We need the exact model to confirm the payload.'};
+    await handleBridgeCommand(reply); await handleBridgeCommand(reply);
+    const after=await visitorDetail(visitor); assert.equal(after.messages.filter(x=>x.content===reply.text).length,1);
+  } finally { process.env.AI_PROVIDER=previousProvider; if(previousActors===undefined)delete process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS;else process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS=previousActors; }
 });

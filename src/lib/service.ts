@@ -3,6 +3,7 @@ import { database, transaction, camel, demoMode, getDatabase, type Executor, typ
 import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
 import {recordCustomerFacts,caseContext} from './sales-knowledge';
+import {staffReviewAcknowledgement} from './customer-language';
 import {CustomerTurnHandoff,type TurnSummary} from './customer-turn';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
@@ -73,7 +74,7 @@ export async function visitorDetail(visitor: Visitor) {
   const conversation=detail.conversation;
   const publicConversation={id:conversation.id,leadId:conversation.leadId,status:conversation.status,version:conversation.version,createdAt:conversation.createdAt,updatedAt:conversation.updatedAt};
   const settings=await orgSettings(visitor.orgId);
-  return {...detail,conversation:publicConversation,lead:publicLead,demo:demoMode(),provider:providerName(),settings:{botName:settings.botName,businessHours:settings.businessHours,aiEnabled:settings.aiEnabled,attachmentsEnabled:process.env.WEB_CHAT_ATTACHMENTS_ENABLED==='true'}};
+  return {...detail,messages:detail.messages.map(m=>({...m,sources:Array.isArray(m.sources)?m.sources.filter((source:Row)=>source?.kind!=='sales_clarification'):m.sources})),conversation:publicConversation,lead:publicLead,demo:demoMode(),provider:providerName(),settings:{botName:settings.botName,businessHours:settings.businessHours,aiEnabled:settings.aiEnabled,attachmentsEnabled:process.env.WEB_CHAT_ATTACHMENTS_ENABLED==='true'}};
 }
 
 export async function handoff(visitor:Visitor) {
@@ -126,7 +127,7 @@ export async function appointmentConfirm(visitor:Visitor,body:Record<string,unkn
   });
 }
 
-export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>,bridgeCommand?:{id:string;hash:string}) {
+export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>,bridgeCommand?:{id:string;hash:string;sourceMessageId?:string}) {
   uuid(id);fields(body,['text']);
   if(!['claim','release','reply','note','resolve','summarize'].includes(action))throw new ApiError(404,'ไม่พบคำสั่ง');
   const queuedCommand=await transaction(staff.orgId, async connection=>{
@@ -138,6 +139,21 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
       }
     }
     const conversation=await scopedConversation(connection,staff.orgId,id,true);
+    if(bridgeCommand?.sourceMessageId){
+      const source=(await connection.query(`SELECT m.id,p.provider,t.eligible,t.review_state,t.category,t.action,
+        EXISTS(SELECT 1 FROM messages ack, json_each(ack.sources) item WHERE ack.org_id=m.org_id AND ack.conversation_id=m.conversation_id
+          AND ack.role='assistant' AND ack.status='complete' AND ack.reply_to_client_id=m.client_id AND json_extract(item.value,'$.kind')='sales_clarification' AND json_extract(item.value,'$.sourceMessageId')=m.id) web_review,
+        EXISTS(SELECT 1 FROM social_identities i WHERE i.org_id=m.org_id AND i.conversation_id=m.conversation_id AND i.provider='whatsapp' AND i.opt_out=0) subscribed
+        FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id
+        LEFT JOIN whatsapp_triage t ON t.org_id=m.org_id AND t.message_id=m.id
+        WHERE m.org_id=$1 AND m.conversation_id=$2 AND m.id=$3 AND m.role='user' AND m.source_owner_only=0
+          AND p.removed_at IS NULL AND COALESCE(json_extract(p.metadata,'$.sourceScopeUnknown'),0)=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)=0`,
+        [staff.orgId,id,bridgeCommand.sourceMessageId])).rows[0];
+      const eligibleWhatsApp=source?.provider==='whatsapp' && source.subscribed && source.eligible && ['clear','released'].includes(source.review_state);
+      if(!source || !(source.web_review && !source.provider || eligibleWhatsApp))throw new ApiError(409,'This message is not available for sales clarification');
+      if(eligibleWhatsApp)await (await import('./whatsapp-triage')).assertTriageEligible(connection,staff.orgId,id);
+      if(conversation.status==='resolved')throw new ApiError(409,'This conversation has been closed');
+    }
     let outboundCommand:string|null=null;
     if(action==='claim') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id)throw new ApiError(409,'มีเจ้าหน้าที่รับผิดชอบแล้ว กรุณาประสานงานก่อนรับช่วง');
@@ -302,7 +318,13 @@ export async function snapshot(staff:Staff,url:URL) {
     metricDefinitions:{cohort:'บทสนทนาและลีดที่สร้างในช่วงวันที่กรุงเทพฯ; Pipeline แสดงสถานะปัจจุบันของกลุ่มนี้',handoff:'บทสนทนาในช่วงวันที่ที่เคยส่งต่ออย่างน้อยหนึ่งครั้ง / บทสนทนาทั้งหมดในช่วงวันที่',aiFirstResponse:'เวลาจากข้อความลูกค้าแรกถึงส่วนข้อความ AI แรกที่ส่งได้',humanFirstResponse:'เวลาจากส่งต่อครั้งแรกถึงคำตอบสาธารณะแรกของพนักงาน; ไม่รวมบันทึกภายใน',dueTasks:'งานที่ยังเปิด รอยืนยัน หรือยืนยันแล้ว และถึงกำหนด ณ เวลาปัจจุบัน ทุกช่วงวันที่',usage:'ผลรวม usage ที่ผู้ให้บริการรายงานสำหรับข้อความในช่วงวันที่; null หมายถึงไม่มีข้อมูล'}};
 }
 
-type Prepared = {policy?:string;conversationId:string;orgId:string;clientId:string;version:number;input:BotInput;sources:Row[];skip?:boolean;inbound?:WebFlowInboundSignal};
+async function recordSalesClarification(executor: Executor, orgId: string, conversationId: string, clientId: string, sourceMessageId: string, reason: string) {
+  const sources = JSON.stringify([{kind: 'sales_clarification', sourceMessageId, reason}]);
+  await executor.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,reply_to_client_id,sources) SELECT $1,$2,$3,'assistant',$4,'complete',$5,$6 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE org_id=$2 AND conversation_id=$3 AND reply_to_client_id=$5 AND role='assistant' AND status='complete')",
+    [randomUUID(), orgId, conversationId, staffReviewAcknowledgement, clientId, sources]);
+}
+
+type Prepared = {acknowledgement?:string;policy?:string;conversationId:string;orgId:string;clientId:string;version:number;input:BotInput;sources:Row[];skip?:boolean;inbound?:WebFlowInboundSignal};
 async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promise<Prepared> {
   fields(body,['text','clientId','retry']);const text=str(body.text,'ข้อความ',4000,true);const clientId=str(body.clientId,'รหัสข้อความ',100,true);
   if(!/^[a-zA-Z0-9_-]{8,100}$/.test(clientId))throw new ApiError(400,'รหัสข้อความไม่ถูกต้อง');
@@ -364,10 +386,15 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     }
     if(c.status!=='bot_active'||!settings.aiEnabled)return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
     const lifecycle=process.env.AI_LIFECYCLE_ENABLED==='true'||providerName()==='sale_gateway'?await aiRuntimeContext(visitor.orgId,'web',text,connection,await caseContext(connection,visitor.orgId,c.id)):null;
+    const reviewWithSales = async (reason: string) => {
+      if (!sourceMessageId || !settings.aiEnabled || process.env.CRM_BRIDGE_ENABLED !== 'true' || visitor.orgId !== process.env.CRM_BRIDGE_ORG_ID) return undefined;
+      await recordSalesClarification(connection, visitor.orgId, c.id, clientId, sourceMessageId, reason);
+      return staffReviewAcknowledgement;
+    };
     if(lifecycle?.handoff){
       await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
       await audit(connection,visitor.orgId,'system','ai.lifecycle.handoff',c.id,{reason:lifecycle.reason});
-      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
+      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],acknowledgement:await reviewWithSales(lifecycle.reason || 'policy_review'),skip:true,inbound};
     }
     if(lifecycle)settings.personality=lifecycle.personality;
     const cap=Math.max(1,Math.min(10000,Number.parseInt(process.env.AI_DAILY_CALL_LIMIT||'500',10)||500));
@@ -376,7 +403,7 @@ async function prepareMessage(visitor:Visitor,body:Record<string,unknown>):Promi
     if(Number(usage?.calls||0)>=cap) {
       await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[visitor.orgId,c.id]);
       await audit(connection,visitor.orgId,'system','ai.daily_cap.handoff',c.id);
-      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],skip:true,inbound};
+      return {conversationId:c.id,orgId:visitor.orgId,clientId,version:c.version+1,input:{history:[],facts:{},knowledge:[],settings},sources:[],acknowledgement:await reviewWithSales('daily_cap'),skip:true,inbound};
     }
     await connection.query('INSERT INTO ai_daily_usage(org_id,day,calls) VALUES($1,$2,1) ON CONFLICT(org_id,day) DO UPDATE SET calls=ai_daily_usage.calls+1',[visitor.orgId,day]);
     const version=c.version+1;
@@ -436,15 +463,16 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
       }
       if(current&&actual==='complete'&&handoffReason){
         await connection.query("UPDATE conversations SET status='waiting_human',version=version+1,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND id=$2 AND version=$3",[prepared.orgId,c.id,prepared.version]);
+        if(prepared.input.turn)await recordSalesClarification(connection,prepared.orgId,c.id,prepared.clientId,prepared.input.turn.requestId,handoffReason);
         await audit(connection,prepared.orgId,'system','ai.lifecycle.handoff',c.id,{reason:handoffReason});
       }
-      if(text)await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,reply_to_client_id,generation_version,sources,input_tokens,output_tokens,estimated_cost_usd) VALUES($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11)",[randomUUID(),prepared.orgId,prepared.conversationId,text,actual,prepared.clientId,prepared.version,JSON.stringify(prepared.sources),usage?.inputTokens??null,usage?.outputTokens??null,usage?.estimatedCostUsd??null]);
+      if(text&&!handoffReason)await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,reply_to_client_id,generation_version,sources,input_tokens,output_tokens,estimated_cost_usd) VALUES($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11)",[randomUUID(),prepared.orgId,prepared.conversationId,text,actual,prepared.clientId,prepared.version,JSON.stringify(prepared.sources),usage?.inputTokens??null,usage?.outputTokens??null,usage?.estimatedCostUsd??null]);
       await connection.query('UPDATE messages SET status=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$5',[prepared.orgId,prepared.conversationId,prepared.clientId,actual,prepared.version]);
       if(current)await connection.query("UPDATE conversations SET generating_client_id=NULL,generation_started_at=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2 AND version=$3",[prepared.orgId,prepared.conversationId,prepared.version]);
       return actual;
     });
     emit({type:'meta',version:prepared.version});
-    if(prepared.skip){emit({type:'done'});controller.close();return;}
+    if(prepared.skip){if(prepared.acknowledgement)emit({type:'token',text:prepared.acknowledgement,version:prepared.version});emit({type:'done'});controller.close();return;}
     try {
       if(signal.aborted||!await active()){await finish('interrupted');emit({type:'cancelled'});return;}
       for await(const chunk of generateReply({...prepared.input,signal:abort.signal})) {
@@ -472,9 +500,11 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
       const status=await finish('complete');emit({type:status==='complete'?'done':'cancelled'});
     } catch(error) {
       const interrupted=signal.aborted||abort.signal.aborted||!await active().catch(()=>false);
-      if(!interrupted&&providerName()==='sale_gateway'){
+      if(!interrupted&&(providerName()==='sale_gateway'||error instanceof CustomerTurnHandoff)){
         handoffReason=error instanceof CustomerTurnHandoff?error.reason:'gateway_unavailable';
-        await finish('complete');await routeWaitingConversation(prepared.orgId,prepared.conversationId);emit({type:'done'});return;
+        const status=await finish('complete');
+        if(status==='complete') {emit({type:'token',text:staffReviewAcknowledgement,version:prepared.version});await routeWaitingConversation(prepared.orgId,prepared.conversationId);}
+        emit({type:status==='complete'?'done':'cancelled'});return;
       }
       await finish(interrupted?'interrupted':'failed').catch(()=>{});
       if(interrupted)emit({type:'cancelled'});else emit({type:'error',error:'ตอบกลับไม่สำเร็จ กรุณาลองใหม่ หรือขอคุยกับเจ้าหน้าที่'});

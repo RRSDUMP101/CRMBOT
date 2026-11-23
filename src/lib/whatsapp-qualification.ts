@@ -2,10 +2,6 @@
 // account and immutable published version in by giving its orgId, accountId,
 // flowId, version and stepId in RRS_PHASE1_WA_QUALIFICATION_RULES (a JSON array).
 export const qualificationQuestions = [
-  'ต้องการใช้รถขนวัสดุอะไร และต้องการบรรทุกครั้งละประมาณกี่ตันครับ?',
-  'รถที่ต้องการติดตั้งเป็นรุ่นอะไร และเป็นรถปีไหนครับ?',
-  'ต้องการจำนวนกี่ชุด และปลายทางจัดส่งอยู่ที่ไหนครับ?',
-  'ต้องการรับใบเสนอราคาที่อีเมลใดครับ?',
   'What material will you carry, and approximately how much will each load weigh?',
   'What is the vehicle model and model year?',
   'How many units do you need, and where will they be delivered?',
