@@ -4,6 +4,16 @@ import { bridgePayloadHash } from './bridge-protocol';
 import { isEnglishCustomerReply } from './customer-language';
 import { conversationAction } from './service';
 
+export async function mappedBridgeMember(actorId:string,clarification=false):Promise<Staff>{
+  const orgId=process.env.CRM_BRIDGE_ORG_ID;
+  let allowed:unknown;try{allowed=JSON.parse((clarification ? process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS : process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS)||'[]');}catch{throw new ApiError(503,'Bridge members are not configured');}
+  if(!orgId||!Array.isArray(allowed)||!allowed.includes(actorId))throw new ApiError(403,'Bridge member is not permitted');
+  const member=(await database.query('SELECT id,org_id,name,email,role,active FROM members WHERE org_id=$1 AND id=$2',[orgId,actorId])).rows[0];
+  if(!member?.active)throw new ApiError(403,'Bridge member is inactive');
+  const staff:Staff={id:member.id,orgId:member.org_id,name:member.name,email:member.email,role:member.role};
+  return staff;
+}
+
 /** The service identity is fixed by deployment. Browser input never selects an organization. */
 export async function handleBridgeCommand(body: unknown) {
   if(process.env.CRM_BRIDGE_ENABLED!=='true')throw new ApiError(503,'Bridge is disabled');
@@ -18,12 +28,7 @@ export async function handleBridgeCommand(body: unknown) {
   if(action!=='reply'&&action!=='note'&&text!==undefined)throw new ApiError(400,'Unexpected message text');
   const sourceMessageId=input.clarificationSourceMessageId===undefined?undefined:uuid(input.clarificationSourceMessageId);
   if(sourceMessageId && (action!=='claim' && action!=='reply' || action==='reply' && !isEnglishCustomerReply(text||'')))throw new ApiError(422,'Sales clarification replies must be in English');
-  const orgId=process.env.CRM_BRIDGE_ORG_ID;
-  let allowed:unknown;try{allowed=JSON.parse((sourceMessageId ? process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS : process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS)||'[]');}catch{throw new ApiError(503,'Bridge members are not configured');}
-  if(!orgId||!Array.isArray(allowed)||!allowed.includes(actorId))throw new ApiError(403,'Bridge member is not permitted');
-  const member=(await database.query('SELECT id,org_id,name,email,role,active FROM members WHERE org_id=$1 AND id=$2',[orgId,actorId])).rows[0];
-  if(!member?.active)throw new ApiError(403,'Bridge member is inactive');
-  const staff:Staff={id:member.id,orgId:member.org_id,name:member.name,email:member.email,role:member.role};
+  const staff=await mappedBridgeMember(actorId,Boolean(sourceMessageId));
   const hash=await bridgePayloadHash(JSON.stringify({commandId,conversationId,actorId,action,text:text??null,...(sourceMessageId?{sourceMessageId}:{})}));
   // conversationAction revalidates the active member and assignment inside the CAS transaction.
   await conversationAction(staff,conversationId,action,text===undefined?{}:{text},{id:commandId,hash,sourceMessageId});

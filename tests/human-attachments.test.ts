@@ -134,3 +134,39 @@ test('late private upload completion after cleanup cannot resurrect a file or re
   await assert.rejects(uploadHumanAttachment(f.staff,f.chat,new Request('http://localhost:3000/upload',{method:'POST',headers:{'Content-Type':'application/pdf','X-File-Name':'late.pdf','X-Conversation-Version':String(f.version)},body:pdf}),{storage:wrapped}),{status:409});
   assert.equal(await storage.get(written),null);assert.equal((await database.query('SELECT count(*) AS n FROM human_attachments WHERE org_id=$1',[f.org])).rows[0].n,0);
 });
+
+test('Sales room files bind the authenticated member, market, signed bytes and a single approval',async()=>{
+  const {roomFileAction,signedRoomUpload}=await import('../src/lib/bridge-room-files');
+  const {signBridgeRequest}=await import('../src/lib/bridge-protocol');
+  const {createHash}=await import('node:crypto');
+  const f=await fixture(),base={conversationId:f.chat,actorId:f.staff.id,workspace:'live'};
+  const oldOrg=process.env.CRM_BRIDGE_ORG_ID,oldMembers=process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS;
+  try{
+    process.env.CRM_BRIDGE_ORG_ID=f.org;
+    process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS=JSON.stringify([f.staff.id]);
+    await database.query("UPDATE leads SET market='export' WHERE org_id=$1",[f.org]);
+    await assert.rejects(roomFileAction({...base,actorId:f.other.id,action:'list'}),{status:403});
+    await assert.rejects(roomFileAction({...base,workspace:'domestic',action:'list'}),{status:404});
+    const caps=await (await roomFileAction({...base,action:'list'})).json();
+    assert.equal(caps.provider,'whatsapp');assert.equal(caps.actorId,f.staff.id);
+    const cfg={orgId:f.org,secret:'fixture-bridge-key-'.repeat(3)},url='https://crm.example.invalid/api/bridge/room-files/upload';
+    const manifest=JSON.stringify({...base,name:'ตัวอย่าง.pdf',mime:'application/pdf',size:pdf.length,version:f.version,digest:createHash('sha256').update(pdf).digest('hex')});
+    async function request(bytes:Buffer,signed=manifest){
+      const headers=await signBridgeRequest(url,{...cfg,method:'POST',body:signed});
+      headers.set('x-rrs-file-manifest',encodeURIComponent(manifest));headers.set('content-type','application/octet-stream');
+      return new Request(url,{method:'POST',headers,body:new Uint8Array(bytes)});
+    }
+    await assert.rejects(signedRoomUpload(await request(pdf,'{}'),cfg),{status:401});
+    await assert.rejects(signedRoomUpload(await request(Buffer.alloc(pdf.length)),cfg),{status:400});
+    const upload=await (await signedRoomUpload(await request(pdf),cfg)).json();
+    const preview=await roomFileAction({...base,action:'preview',attachmentId:upload.id});
+    assert.deepEqual(Buffer.from(await preview.arrayBuffer()),pdf);
+    const send={...base,action:'send',attachmentId:upload.id,clientId:upload.id,expectedVersion:f.version};
+    const first=await (await roomFileAction(send)).json(),retry=await (await roomFileAction(send)).json();
+    assert.equal(first.messageId,retry.messageId);assert.equal(first.commandId,retry.commandId);
+    assert.equal((await database.query('SELECT id FROM social_outbound_commands WHERE org_id=$1',[f.org])).rows.length,1);
+  }finally{
+    if(oldOrg===undefined)delete process.env.CRM_BRIDGE_ORG_ID;else process.env.CRM_BRIDGE_ORG_ID=oldOrg;
+    if(oldMembers===undefined)delete process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS;else process.env.CRM_BRIDGE_ALLOWED_MEMBER_IDS=oldMembers;
+  }
+});
