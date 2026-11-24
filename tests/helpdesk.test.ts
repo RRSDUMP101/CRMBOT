@@ -140,6 +140,24 @@ describe("RRS helpdesk and widget HTTP acceptance", { concurrency: false }, () =
     template = updated;
   });
 
+  test("Admin restores a prior template snapshot as a new revision; access and concurrent restores are checked",async()=>{
+    const path='/api/admin/reply-templates/'+template.id+'/revisions';
+    denied((await agent.json(path)).response.status,'Agent reading private template history');
+    denied((await outsider.json(path)).response.status,'foreign template history');
+    const previous=(await admin.ok(path)).revisions[0];
+    assert.equal(previous.version,1);
+    const body={action:'restoreReplyTemplate',id:template.id,values:{version:template.version,fromVersion:previous.version}};
+    denied((await agent.json('/api/admin/action',{body})).response.status,'Agent restoring a template');
+    denied((await outsider.json('/api/admin/action',{body})).response.status,'foreign restore');
+    assert.equal((await admin.json('/api/admin/action',{body:{...body,values:{...body.values,fromVersion:99999}}})).response.status,404);
+    const results=await Promise.all([admin.json('/api/admin/action',{body}),admin.json('/api/admin/action',{body})]);
+    assert.deepEqual(results.map(r=>r.response.status).sort(),[200,409]);
+    const oldVersion=template.version;
+    template=(await admin.ok('/api/admin/reply-templates')).templates.find((row:Json)=>row.id===template.id);
+    assert.equal(template.version,oldVersion+1);
+    for(const field of ['title','content','shortcut','category'])assert.equal(template[field],previous[field]);
+    assert.deepEqual((await admin.ok(path)).revisions.map((r:Json)=>r.version),[oldVersion,1]);
+  });
   test("Agent reads templates without sending; an explicit staff reply sends the selected text", async () => {
     const visitor = await makeVisitor(`คำตอบสำเร็จรูป-${runId}`);
     const before = await visitor.client.history();

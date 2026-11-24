@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { subscribeCRMChanges } from './realtime';
 import { ArrowLeft, ArrowUpRight, Pin, ListFilter, Bookmark, Check, ClipboardList, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X, Clock3, CalendarDays, Users } from "lucide-react";
-import { api, date, stageNames, stages, statusNames, type Detail, type SaleContext } from "./data";
+import { api, date, stageNames, stages, statusNames, WorkspaceApiError, type Detail, type SaleContext, type SaleDeal } from "./data";
 import { emptyCounts, queueNames, type InboxItem, type InboxQueue, type InboxResult, type ReplyTemplate } from "./inbox-data";
 import { Badge, Button, Empty, Input, Select, Textarea } from "./ui";
 import { ChatMessage, LeadEditor, Modal, Summary } from "./workspace-panels";
@@ -16,6 +16,14 @@ import {WebChatAttachments,type WebAttachmentDraft} from "./web-chat-attachments
 function ChannelIcon({provider}: {provider?: string}) { const p = provider || "web"; const marks: Record<string, string> = {whatsapp:"☎",line:"LINE",facebook:"f",instagram:"◎",gmail:"M",outlook:"O",email:"✉"}; return <span className={`channel-platform channel-${p}`} title={p} aria-label={p}>{marks[p] || <Globe size={14}/>}</span>; }
 const queues: InboxQueue[] = ["all", "unread", "waiting", "mine", "unassigned", "closed"];
 type Drafts = Record<string, { reply: string; note: string }>;
+type SendIssue={reference:string;status:number;time:string};
+function issueGuidance(status:number){
+  if(status===401||status===403)return "ตรวจสิทธิ์และการเข้าสู่ระบบก่อนส่งอีกครั้ง";
+  if(status===409)return "ตรวจผู้รับผิดชอบและสถานะล่าสุดของห้องก่อนส่งอีกครั้ง";
+  if(status===400||status===422)return "ตรวจข้อความในร่าง คำตอบถึงลูกค้าต้องเป็นภาษาอังกฤษ";
+  if(status===429)return "กรุณารอสักครู่แล้วส่งอีกครั้ง";
+  return "ยังยืนยันผลไม่ได้ ตรวจประวัติห้องหรือส่งร่างเดิมอีกครั้ง";
+}
 
 export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, roomRequest, visible=true, compact=false, onUnread }: PanelProps & { roomRequest?: {id:string; sequence:number}; visible?:boolean; compact?:boolean; onUnread?:(count:number)=>void; searchRequest?: { value: string; revision: number; queue?:InboxQueue }; navigate?: (view: string) => void }) {
   const [shown, setShown] = useState({preview:true,status:true,date:true,channel:true});
@@ -50,6 +58,8 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
   const humanFiles=useRef(new Map<string,HumanAttachmentDraft>());
   const webFiles=useRef(new Map<string,WebAttachmentDraft>());
   const attempts=useRef(new Map<string,{text:string;clientId:string}>());
+  const [issues,setIssues]=useState<Record<string,SendIssue>>({});
+  const [insertions,setInsertions]=useState<Record<string,{before:string;after:string}>>({});
   const keepAtEnd=useRef(true);
   const [queueOpen,setQueueOpen]=useState(false);
   useEffect(()=>{
@@ -66,7 +76,14 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
   },[result,selected,onUnread]);
   const draftKey = note ? "note" : "reply";
   const text = drafts[selected]?.[draftKey] || "";
+  const issue=issues[selected+':'+draftKey];
+  const insertion=!note&&insertions[selected]?.after===text?insertions[selected]:null;
   const putDraft = (value: string) => setDrafts(previous => ({ ...previous, [selected]: { reply: previous[selected]?.reply || "", note: previous[selected]?.note || "", [draftKey]: value } }));
+  const insertTemplate=(content:string)=>{
+    const after=text?text+"\n"+content:content;
+    setInsertions(previous=>({...previous,[selected]:{before:text,after}}));
+    putDraft(after);setTemplateOpen(false);setTemplateSearch("");
+  };
 
   useEffect(() => { const timer = setTimeout(() => setQuery(search.trim()), 250); return () => clearTimeout(timer); }, [search]);
   const listUrl = useCallback((cursor?: string, limit = pageSize) => {
@@ -135,17 +152,23 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
     if(actionPending.current)return;
     actionPending.current=true;
     const id = selected; const mode = note ? "note" : "reply"; setBusy(true); setError("");
+    const key=id+':'+action;
+    let request=attempts.current.get(key);
     try {
-      const key=id+':'+action;
-      let request=attempts.current.get(key);
       if(content!==undefined && request?.text!==content){request={text:content,clientId:crypto.randomUUID()};attempts.current.set(key,request);}
       const updated = await api<Detail>(`/api/admin/conversations/${id}/${action}`, request && content!==undefined ? request : {});
       attempts.current.delete(key);
+      setIssues(previous=>{const next={...previous};delete next[key];return next;});
       if (selectedRef.current === id) setDetail(updated);
       if (action === "reply" || action === "note") setDrafts(previous => previous[id]?.[mode] !== content ? previous : ({ ...previous, [id]: { reply: previous[id]?.reply || "", note: previous[id]?.note || "", [mode]: "" } }));
-      await Promise.all([refreshList(), reload()]);
+      await Promise.allSettled([refreshList(), reload()]);
       notify(({ claim: "รับช่วงแล้ว AI หยุดตอบ", release: "ส่งกลับให้ AI แล้ว", resolve: "จบการสนทนาแล้ว", reply: "บันทึกคำตอบแล้ว ตรวจสถานะการส่งใต้ข้อความ", note: "บันทึกภายในแล้ว", summarize: "อัปเดตสรุปความต้องการแล้ว" } as Record<string, string>)[action] || "บันทึกแล้ว");
-    } catch (e) { if (selectedRef.current === id) setError((e as Error).message); }
+    } catch (e) {
+      if(request&&content!==undefined){
+        const failure={reference:request.clientId,status:e instanceof WorkspaceApiError?e.status:0,time:new Date().toISOString()};
+        setIssues(previous=>({...previous,[key]:failure}));
+      }else if(selectedRef.current===id)setError((e as Error).message);
+    }
     finally { actionPending.current=false; setBusy(false); }
   };
   const updateStage = async (stage: string) => {
@@ -173,7 +196,7 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
       <dl className="profile-fields"><dt>เบอร์โทร</dt><dd>{activeDetail.lead.phone || "ยังไม่ระบุ"}</dd><dt>อีเมล</dt><dd>{activeDetail.lead.email || "ยังไม่ระบุ"}</dd><dt>ตลาด</dt><dd>{activeDetail.lead.market === "export" ? "ส่งออก" : activeDetail.lead.market === "domestic" ? "ในประเทศ" : "ยังไม่ยืนยัน"}</dd><dt>ความสนใจ</dt><dd>{activeDetail.lead.interests || "กำลังเก็บข้อมูล"}</dd><dt>ผู้ดูแลลูกค้า</dt><dd>{data.members.find(member => member.id === activeDetail.lead.assigneeId)?.name || "ยังไม่มอบหมาย"}</dd></dl>
       {data.user.role === 'Admin' && <WhatsAppConsent key={activeDetail.conversation.id} conversationId={activeDetail.conversation.id}/>}
       <div className="profile-section"><h3>แท็ก <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>แก้ไข</Button></h3><div className="tag-list">{activeDetail.lead.tags.length ? activeDetail.lead.tags.map(tag => <Badge key={tag}>{tag}</Badge>) : <span className="profile-placeholder">ยังไม่มีแท็ก</span>}</div></div>
-      {activeDetail.saleContext && <SaleContextSection context={activeDetail.saleContext} />}
+      {activeDetail.saleContext && <SaleContextSection context={activeDetail.saleContext} conversationId={selected} visible={visible} />}
       <div className="profile-section"><h3><Sparkles size={16} />สรุปความต้องการ</h3><Button variant="secondary" size="sm" className="full-width" disabled={busy} onClick={() => act("summarize")}>สรุปจากข้อมูลลูกค้า</Button>{activeDetail.lead.summary ? <Summary lead={activeDetail.lead} /> : <p className="profile-placeholder">สรุปจะแยกข้อเท็จจริงและสิ่งที่ต้องตรวจสอบ</p>}</div>
       <details className="profile-facts"><summary>ข้อมูลจากบทสนทนา <ChevronDown size={14} /></summary>{Object.entries(activeDetail.lead.facts || {}).length ? Object.entries(activeDetail.lead.facts).map(([key, value]) => <p key={key}><strong>{key}</strong><span>{value}</span></p>) : <p>ยังไม่มีข้อมูลที่จับจากบทสนทนา</p>}</details>
     </div>
@@ -206,10 +229,19 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
           <div className="desk-composer-tabs" role="group" aria-label="ประเภทข้อความ"><button type="button" aria-pressed={!note} className={!note ? "active" : ""} onClick={() => setNote(false)}><MessageSquare size={15} />ตอบลูกค้า</button><button type="button" aria-pressed={note} className={note ? "active" : ""} onClick={() => { setNote(true); setTemplateOpen(false); }}><LockKeyhole size={14} />บันทึกภายใน</button>{text && <span>มีข้อความร่าง</span>}</div>
           {!canReply && !note && <div className="composer-locked"><Sparkles size={14} /><span>{activeDetail.conversation.status === "resolved" ? "แชตนี้จบแล้ว รับช่วงเพื่อเริ่มดูแลต่อ" : humanActive ? "ห้องนี้มีเจ้าหน้าที่คนอื่นรับผิดชอบ" : "รับช่วงก่อนตอบลูกค้า เพื่อให้ AI หยุดตอบ"}</span></div>}
           <Textarea aria-label={note ? "บันทึกภายใน" : "ข้อความตอบลูกค้า"} placeholder={note ? "บันทึกสำหรับทีม ลูกค้าจะไม่เห็นข้อความนี้…" : canReply ? "พิมพ์ข้อความ หรือเลือกข้อความสำเร็จรูป…" : "ร่างข้อความไว้ แล้วรับช่วงก่อนส่ง…"} value={text} onChange={e => putDraft(e.target.value)} maxLength={6000} rows={3} />
-          <div className="desk-composer-footer"><div className="composer-tools"><Button variant="ghost" size="sm" type="button" id="reply-template-trigger" disabled={note} aria-expanded={templateOpen} onClick={openTemplates}><Bookmark size={16} />ข้อความสำเร็จรูป</Button>{templateOpen && <div className="template-picker" ref={templateRef} tabIndex={-1} role="dialog" aria-label="เลือกข้อความสำเร็จรูป"><div className="template-picker-heading"><strong>เลือกข้อความสำเร็จรูป</strong><Button type="button" variant="ghost" size="icon" aria-label="ปิดข้อความสำเร็จรูป" onClick={() => setTemplateOpen(false)}><X size={16} /></Button></div><div className="template-picker-search"><Search size={15} /><Input data-initial-focus aria-label="ค้นหาข้อความสำเร็จรูป" placeholder="ชื่อข้อความหรือ /คำลัด" value={templateSearch} onChange={e => setTemplateSearch(e.target.value)} /></div><div className="template-picker-items">{templateLoading ? <p className="helper-text">กำลังโหลดข้อความ…</p> : templateError ? <p className="error-text" role="alert">{templateError}</p> : shownTemplates.length ? shownTemplates.map(template => <button key={template.id} type="button" onClick={() => { putDraft((text ? text + "\n" : "") + template.content); setTemplateOpen(false); setTemplateSearch(""); }}><span><strong>{template.title}</strong><code>{template.shortcut}</code></span><p>{template.content}</p></button>) : <Empty title="ไม่พบข้อความสำเร็จรูป" detail="ผู้ดูแลสามารถเพิ่มข้อความได้จากเมนูข้อความ" />}</div><footer>เติมลงในร่างเท่านั้น ตรวจสอบก่อนส่งทุกครั้ง</footer></div>}</div><Button size="sm" type="submit" disabled={busy || !text.trim() || (!note && !canReply)}><Send size={15} />{busy ? "กำลังบันทึก…" : note ? "บันทึก" : "ส่งข้อความ"}</Button></div>
+          <div className="desk-composer-footer"><div className="composer-tools"><Button variant="ghost" size="sm" type="button" id="reply-template-trigger" disabled={note} aria-expanded={templateOpen} onClick={openTemplates}><Bookmark size={16} />ข้อความสำเร็จรูป</Button>{templateOpen && <div className="template-picker" ref={templateRef} tabIndex={-1} role="dialog" aria-label="เลือกข้อความสำเร็จรูป"><div className="template-picker-heading"><strong>เลือกข้อความสำเร็จรูป</strong><Button type="button" variant="ghost" size="icon" aria-label="ปิดข้อความสำเร็จรูป" onClick={() => setTemplateOpen(false)}><X size={16} /></Button></div><div className="template-picker-search"><Search size={15} /><Input data-initial-focus aria-label="ค้นหาข้อความสำเร็จรูป" placeholder="ชื่อข้อความหรือ /คำลัด" value={templateSearch} onChange={e => setTemplateSearch(e.target.value)} /></div><div className="template-picker-items">{templateLoading ? <p className="helper-text">กำลังโหลดข้อความ…</p> : templateError ? <p className="error-text" role="alert">{templateError}</p> : shownTemplates.length ? shownTemplates.map(template => <button key={template.id} type="button" onClick={()=>insertTemplate(template.content)}><span><strong>{template.title}</strong><code>{template.shortcut}</code></span><p>{template.content}</p></button>) : <Empty title="ไม่พบข้อความสำเร็จรูป" detail="ผู้ดูแลสามารถเพิ่มข้อความได้จากเมนูข้อความ" />}</div><footer>เติมลงในร่างเท่านั้น ตรวจสอบก่อนส่งทุกครั้ง</footer></div>}</div><Button size="sm" type="submit" disabled={busy || !text.trim() || (!note && !canReply)}><Send size={15} />{busy ? "กำลังบันทึก…" : note ? "บันทึก" : "ส่งข้อความ"}</Button></div>
           {!note && <HumanAttachments drafts={humanFiles.current} key={selected} conversationId={selected} version={activeDetail.conversation.version} disabled={busy || !canReply || activeDetail.conversation.assigneeId !== data.user.id} onSent={async()=>{await Promise.all([loadDetail(selected),refreshList(),reload()]);}} />}
           {!note && <WebChatAttachments drafts={webFiles.current} key={'web-'+selected} conversationId={selected} version={activeDetail.conversation.version} disabled={busy || !canReply || activeDetail.conversation.assigneeId !== data.user.id} onSent={async()=>{await Promise.all([loadDetail(selected),refreshList(),reload()]);}} />}
           <div className="composer-note"><CircleHelp size={12} />{note ? "ข้อความนี้เห็นเฉพาะสมาชิกในทีม" : "ร่างแยกตามลูกค้า · ไม่มีการส่งอัตโนมัติ"}</div>
+          {insertion&&<Button type="button" variant="ghost" size="sm" onClick={()=>{putDraft(insertion.before);setInsertions(previous=>{const next={...previous};delete next[selected];return next;});}}>ย้อนการเติมข้อความสำเร็จรูป</Button>}
+          {issue&&<div className="desk-send-issue" role="alert">
+            <strong>{note?"ยังยืนยันการบันทึกโน้ตไม่ได้":"ยังยืนยันการส่งข้อความไม่ได้"}</strong>
+            <p>{issueGuidance(issue.status)}</p><small>เลขอ้างอิง <code>{issue.reference}</code></small>
+            <div className="button-row"><Button type="button" size="sm" variant="secondary" onClick={async()=>{
+              const report=["RRS CRM",draftKey,"ref="+issue.reference,"status="+(issue.status||"network"),"utc="+issue.time].join(" | ");
+              try{await navigator.clipboard.writeText(report);notify("คัดลอกเลขอ้างอิงแล้ว");}catch{notify("เลือกเลขอ้างอิงบนหน้าจอเพื่อคัดลอก");}
+            }}>คัดลอกเลขอ้างอิง</Button>{attempts.current.get(selected+':'+draftKey)?.text===text&&<Button type="button" size="sm" disabled={busy||(!note&&!canReply)} onClick={()=>void act(draftKey,text)}>ลองส่งร่างเดิมอีกครั้ง</Button>}</div>
+          </div>}
         </form>
       </>}
     </section>
@@ -235,8 +267,28 @@ const quotationNames: Record<string, string> = { draft: "ร่าง", review: 
 const productionNames: Record<string, string> = { planned: "วางแผน", producing: "กำลังผลิต", qc: "รอ QC", qc_passed: "ผ่าน QC", delivered: "ส่งมอบแล้ว", cancelled: "ยกเลิก" };
 const shipmentNames: Record<string, string> = { preparing: "เตรียมส่ง", active: "กำลังขนส่ง", completed: "ส่งถึงแล้ว", cancelled: "ยกเลิก" };
 /** Read-only Sale Office facts. Editing stays in Sale Office; nothing here is sent to the customer. */
-function SaleContextSection({ context }: { context: SaleContext }) {
+function SaleContextSection({context,conversationId,visible}:{context:SaleContext;conversationId:string;visible:boolean}){
+  const [revision,setRevision]=useState(0);
+  const [live,setLive]=useState<{id:string;deals:Pick<SaleDeal,'dealId'|'title'|'workspace'|'owner'|'customer'|'followDate'>[];failed?:boolean}|null>(null);
+  useEffect(()=>{
+    if(!visible)return;
+    let active=true;setLive(null);
+    api<{deals:Pick<SaleDeal,'dealId'|'title'|'workspace'|'owner'|'customer'|'followDate'>[]}>(`/api/admin/conversations/${conversationId}/sale-profile`).then(result=>{
+      if(active)setLive({id:conversationId,deals:result.deals});
+    }).catch(()=>{if(active)setLive({id:conversationId,deals:[],failed:true});});
+    return ()=>{active=false;};
+  },[conversationId,visible,revision]);
+  const profile=live?.id===conversationId?live:null;
   return <div className="profile-section" aria-label="ข้อมูลฝ่ายขายจาก Sale Office"><h3><ClipboardList size={16} />Sale Office</h3><p className="sale-context-readonly"><LockKeyhole size={12} />ข้อมูลอ้างอิง · อ่านอย่างเดียว</p>
+    <Button type="button" variant="ghost" size="sm" onClick={()=>setRevision(v=>v+1)}><RefreshCw size={13}/>รีเฟรชข้อมูลฝ่ายขาย</Button>
+    {profile?.failed&&<p role="status">โหลดข้อมูลลูกค้าจาก Sale Office ไม่สำเร็จ</p>}
+    {profile?.deals.map(deal=><dl className="sale-context" key={deal.dealId}>
+      <dt>ดีลที่ผูกกับลูกค้า</dt><dd>{deal.title}</dd>
+      {deal.customer&&<><dt>ลูกค้าใน Sale Office</dt><dd>{deal.customer.name||"ยังไม่ระบุ"}</dd><dt>อีเมลที่ฝ่ายขายใช้</dt><dd>{deal.customer.email||"ยังไม่ระบุ"}</dd></>}
+      {deal.owner!==undefined&&<><dt>ผู้รับผิดชอบดีล</dt><dd>{deal.owner||"ยังไม่มอบหมาย"}</dd></>}
+      <dt>วันติดตาม</dt><dd>{deal.followDate||"ยังไม่กำหนด"}</dd>
+      <dt>แก้ไขข้อมูล</dt><dd><a href={`https://rrs-sales-office-hub.com/${deal.workspace==="domestic"?"domestic/customer?":"customer?mode=live&"}deal=${encodeURIComponent(deal.dealId)}`} target="_blank" rel="noreferrer">เปิดดีลนี้ใน Sale Office <ArrowUpRight size={12}/></a></dd>
+    </dl>)}
     {!context.deals.length ? <p className="profile-placeholder">ยังไม่มีดีลที่เชื่อมกับลูกค้ารายนี้</p> : context.deals.map(deal => <dl className="sale-context" key={deal.dealId}>
       <dt>ดีล</dt><dd>{deal.title} · {deal.workspace === "domestic" ? "ในประเทศ" : "ส่งออก"}</dd>
       <dt>สถานะ</dt><dd>{deal.salesStatus || "—"}{deal.waitingLabel ? ` · ${deal.waitingLabel}` : ""}</dd>
@@ -246,7 +298,6 @@ function SaleContextSection({ context }: { context: SaleContext }) {
       <dt>การชำระเงิน</dt><dd>{deal.payments.confirmed} ยืนยันแล้ว · {deal.payments.reported} รอตรวจ</dd>
       <dt>ผลิต / ขนส่ง</dt><dd>{deal.production ? productionNames[deal.production.status] || deal.production.status : "—"} / {deal.shipment ? shipmentNames[deal.shipment.status] || deal.shipment.status : "—"}</dd>
     </dl>)}
-    <a href="https://rrs-sales-office-hub.com/" target="_blank" rel="noreferrer" className="button button-secondary button-sm full-width">เปิดข้อมูลการขาย <ArrowUpRight size={14} /></a>
     <p className="helper-text">{context.error ? "ซิงก์จาก Sale ล่าสุดไม่สำเร็จ ข้อมูลอาจไม่ใช่ล่าสุด" : context.syncedAt ? `ซิงก์จาก Sale ${date(context.syncedAt)}` : "ยังไม่เคยซิงก์จาก Sale"} · แก้ไขได้ใน Sale Office เท่านั้น</p>
   </div>;
 }

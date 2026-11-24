@@ -110,18 +110,26 @@ export async function replyTemplates(staff:Staff) {
   return {templates:result.rows.map(camel)};
 }
 
+export async function replyTemplateRevisions(staff:Staff,id:string) {
+  requireAdmin(staff);
+  return transaction(staff.orgId,async connection=>{
+    if(!(await connection.query('SELECT 1 FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows.length)throw new ApiError(404,'ไม่พบข้อความตอบสำเร็จรูป');
+    const result=await connection.query('SELECT version,title,shortcut,category,content,updated_at FROM reply_template_revisions WHERE org_id=$1 AND template_id=$2 ORDER BY version DESC LIMIT 20',[staff.orgId,id]);
+    return {revisions:result.rows.map(camel)};
+  },staff);
+}
 function version(value:unknown) {if(typeof value!=='number'||!Number.isSafeInteger(value)||value<1)throw new ApiError(400,'กรุณาระบุรุ่นข้อความที่กำลังแก้ไข');return value;}
 export async function templateAction(staff:Staff,body:Record<string,unknown>) {
   requireAdmin(staff);fields(body,['action','id','values']);
-  const action=oneOf(body.action,['saveReplyTemplate','deleteReplyTemplate'],'คำสั่ง');
+  const action=oneOf(body.action,['saveReplyTemplate','deleteReplyTemplate','restoreReplyTemplate'],'คำสั่ง');
   if(!body.values||typeof body.values!=='object'||Array.isArray(body.values))throw new ApiError(400,'ค่าข้อมูลไม่ถูกต้อง');
   const values=body.values as Record<string,unknown>;
-  fields(values,action==='deleteReplyTemplate'?['version']:['title','shortcut','content','category','version']);
+  fields(values,action==='deleteReplyTemplate'?['version']:action==='restoreReplyTemplate'?['version','fromVersion']:['title','shortcut','content','category','version']);
   await transaction(staff.orgId, async connection=>{
     // The organization revision serializes uniqueness checks and the template limit.
     await connection.query("SELECT id FROM organizations WHERE id=$1",[staff.orgId]);
     const id=body.id?uuid(body.id):randomUUID();
-    if(action==='deleteReplyTemplate'&&!body.id)throw new ApiError(400,'กรุณาระบุข้อความที่ต้องการลบ');
+    if(action!=='saveReplyTemplate'&&!body.id)throw new ApiError(400,'กรุณาระบุข้อความที่ต้องการแก้ไข');
     let existing:Row|undefined;
     if(body.id) {
       existing=(await connection.query("SELECT * FROM reply_templates WHERE org_id=$1 AND id=$2",[staff.orgId,id])).rows[0];
@@ -130,19 +138,24 @@ export async function templateAction(staff:Staff,body:Record<string,unknown>) {
     }
     if(action==='deleteReplyTemplate')await connection.query('DELETE FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id]);
     else {
-      const title=str(values.title,'ชื่อข้อความ',120,true);const content=str(values.content,'เนื้อหา',4000,true);const category=str(values.category,'หมวดหมู่',80)||'ทั่วไป';
-      const rawShortcut=str(values.shortcut,'คำย่อ',41,true).replace(/^\//,'').toLowerCase();
+      const source=action==='restoreReplyTemplate'?(await connection.query('SELECT title,shortcut,content,category FROM reply_template_revisions WHERE org_id=$1 AND template_id=$2 AND version=$3',[staff.orgId,id,version(values.fromVersion)])).rows[0]:values;
+      if(!source)throw new ApiError(404,'ไม่พบรุ่นข้อความที่เลือก');
+      const title=str(source.title,'ชื่อข้อความ',120,true);const content=str(source.content,'เนื้อหา',4000,true);const category=str(source.category,'หมวดหมู่',80)||'ทั่วไป';
+      const rawShortcut=str(source.shortcut,'คำย่อ',41,true).replace(/^\//,'').toLowerCase();
       if(!/^[a-z0-9_-]{1,40}$/.test(rawShortcut))throw new ApiError(400,'คำย่อใช้ตัวอักษรอังกฤษ ตัวเลข - หรือ _ ไม่เกิน 40 ตัว');
       const shortcut=`/${rawShortcut}`;
       if((await connection.query('SELECT id FROM reply_templates WHERE org_id=$1 AND shortcut=$2 AND id!=$3',[staff.orgId,shortcut,id])).rows.length)throw new ApiError(409,'คำย่อนี้มีอยู่แล้วในองค์กร');
-      if(existing)await connection.query("UPDATE reply_templates SET title=$3,shortcut=$4,content=$5,category=$6,version=version+1,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,title,shortcut,content,category]);
+      if(existing){
+        await connection.query('INSERT INTO reply_template_revisions(org_id,template_id,version,title,shortcut,category,content,updated_at) SELECT org_id,id,version,title,shortcut,category,content,updated_at FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id]);
+        await connection.query("UPDATE reply_templates SET title=$3,shortcut=$4,content=$5,category=$6,version=version+1,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,title,shortcut,content,category]);
+      }
       else {
         const count=(await connection.query("SELECT count(*) AS total FROM reply_templates WHERE org_id=$1",[staff.orgId])).rows[0].total;
         if(count>=200)throw new ApiError(400,'รองรับข้อความตอบสำเร็จรูปสูงสุด 200 รายการต่อองค์กร');
         await connection.query('INSERT INTO reply_templates(id,org_id,title,shortcut,content,category) VALUES($1,$2,$3,$4,$5,$6)',[id,staff.orgId,title,shortcut,content,category]);
       }
     }
-    await event(connection,staff,action,id,{previousVersion:existing?.version??null,nextVersion:action==='deleteReplyTemplate'?null:(existing?.version??0)+1});
+    await event(connection,staff,action,id,{previousVersion:existing?.version??null,nextVersion:action==='deleteReplyTemplate'?null:(existing?.version??0)+1,...(action==='restoreReplyTemplate'?{restoredVersion:values.fromVersion}:{})});
   }, staff);
   return {ok:true};
 }

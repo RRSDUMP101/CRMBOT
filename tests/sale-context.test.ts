@@ -5,7 +5,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { before, after, test } from 'node:test';
 import { database, getDatabase, closeDatabase } from '../src/lib/db';
-import { applySaleEvents, pullSaleContext, refreshSaleContextIfStale, saleContextForLead, saleContextHash } from '../src/lib/sale-context';
+import { applySaleEvents, currentSaleProfile, pullSaleContext, refreshSaleContextIfStale, saleContextForLead, saleContextHash } from '../src/lib/sale-context';
 import { verifyBridgeRequest } from '../src/lib/bridge-protocol';
 import { conversationDetail } from '../src/lib/service';
 
@@ -103,4 +103,29 @@ test('staff detail includes Sale context; visitor detail and other organizations
   assert.equal('saleContext' in visitor, false, 'visitors never receive Sale context');
   assert.deepEqual((await saleContextForLead(db, ids.other, ids.lead)).deals, []);
   assert.equal(JSON.stringify(staff.saleContext).includes('price'), false);
+});
+
+test('staff contact, owner and date project by mapped deal, including legacy and cleared fields',async()=>{
+  const db=await getDatabase(),legacy=(await saleContextForLead(db,ids.org,ids.lead)).deals[0];
+  assert.equal(legacy.customer,undefined);
+  const next=event(6,'deal-1',12,{customer:{name:'Fixture',email:'desk@example.invalid'},owner:'Synthetic Sales',followDate:'2026-12-03'});
+  await applySaleEvents(db,ids.org,[next]);
+  assert.equal((await saleContextForLead(db,ids.org,ids.lead)).deals[0].customer,undefined,'durable event alone may be stale after remapping');
+  let body:Record<string,any>={version:1,revision:12,orgId:ids.org,workspace:'live',leadId:ids.lead,deals:[next.payload]};
+  const fetcher:typeof fetch=async(input,init)=>{const req=new Request(input,init);assert.equal(new URL(req.url).searchParams.get('leadId'),ids.lead);await verifyBridgeRequest(req,{secret,orgId:ids.org});return Response.json(body);};
+  const view=()=>currentSaleProfile(ids.org,ids.lead,env(),fetcher);
+  const live=(await view()).deals[0];
+  assert.deepEqual(live.customer,{name:'Fixture',email:'desk@example.invalid'});assert.equal(live.owner,'Synthetic Sales');assert.equal(live.followDate,'2026-12-03');
+  assert.deepEqual((await saleContextForLead(db,ids.other,ids.lead)).deals,[]);
+  const visitor=await conversationDetail(ids.org,ids.conversation,false) as Record<string,unknown>;
+  assert.equal(visitor.saleContext,undefined);
+  await assert.rejects(()=>applySaleEvents(db,ids.org,[event(7,'deal-1',13,{customer:{name:42,email:'wrong'}})]),/SALE_EVENT_INVALID/);
+  await applySaleEvents(db,ids.org,[event(7,'deal-1',13,{customer:{name:'',email:''},owner:'',followDate:''})]);
+  body.deals=[event(7,'deal-2',13,{customer:{name:'',email:''},owner:'',followDate:''}).payload];
+  const cleared=(await view()).deals[0];assert.equal(cleared.dealId,'deal-2','current remap replaces old profile');
+  assert.deepEqual(cleared.customer,{name:'',email:''});assert.equal(cleared.owner,'');assert.equal(cleared.followDate,'');
+  body.deals=[legacy];assert.equal((await view()).deals[0].customer,undefined);
+  body.orgId=ids.other;await assert.rejects(view,/SALE_PROFILE_INVALID/);
+  body.orgId=ids.org;body.deals=[{...legacy,workspace:'domestic'}];await assert.rejects(view,/SALE_PROFILE_INVALID/);
+  body.deals=[{...legacy,leadId:'another'}];await assert.rejects(view,/SALE_PROFILE_INVALID/);
 });

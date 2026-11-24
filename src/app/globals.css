@@ -118,6 +118,15 @@ button, input, textarea, select { font: inherit; } button, a, summary { -webkit-
 .desk-loading { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 15px; color: #8b97a9; font-size: 13px; min-height: 230px; height: 100%; padding: 25px; text-align: center; }
 .desk-inline-error { background: #fff3ed; color: #b0654a; padding: 10px 14px; font-size: 12px; line-height: 1.8; }
 .desk-inline-error > button { background: transparent; color: #80533f; text-decoration: underline; margin-left: 8px; }
+.desk-send-issue,.reply-preview,.reply-versions {padding:10px 12px;border-radius:8px;margin:8px 0;}
+.desk-send-issue {background:#fff5e7;color:#764816;font-size:13px;overflow-wrap:anywhere;}
+.desk-send-issue p,.reply-preview p {margin:4px 0;}
+.desk-send-issue .button-row {margin-top:8px;flex-wrap:wrap;}
+.reply-preview {background:#edf5ff;color:#193957;}
+.reply-preview p {white-space:pre-wrap;overflow-wrap:anywhere;}
+.reply-preview small {display:block;}
+.reply-versions {border:1px solid #d8e1ec;}
+.reply-versions summary {cursor:pointer;font-weight:600;}
 .desk-chat-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; }
 .desk-start { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 30px; text-align: center; background: #fcfdfd; }
 .desk-start > span { width: 83px; height: 83px; border-radius: 24px; background: #e9faf5; color: #34b5a0; display: grid; place-items: center; margin-bottom: 24px; box-shadow: 0 0 0 13px #f5fcf9; }

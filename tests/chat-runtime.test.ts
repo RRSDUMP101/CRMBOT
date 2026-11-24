@@ -10,7 +10,7 @@ import { messageStream, visitorDetail, conversationAction } from '../src/lib/ser
 import { readBridgeEvents } from '../src/lib/chat-bridge';
 import { realtimeResponse } from '../src/lib/realtime';
 import { POST } from '../src/app/api/bridge/[...path]/route';
-import { GET as getApi } from '../src/app/api/[...path]/route';
+import { GET as getApi, POST as staffPost } from '../src/app/api/[...path]/route';
 import { NextRequest } from 'next/server';
 
 test('native reply and note reuse the same action receipt across a retry and reject a changed draft',async()=>{
@@ -62,6 +62,20 @@ async function counts(org:string) {
   return {...row,head:(await readBridgeEvents(org)).headSequence};
 }
 
+test('failed staff send has a durable support reference without request contents or credentials',async()=>{
+  const f=await fixture(),token=randomUUID(),clientId=randomUUID(),text='Fixture customer draft. Never log this text.';
+  await database.query('INSERT INTO staff_sessions(token_hash,org_id,member_id,expires_at) VALUES($1,$2,$3,$4)',[hashToken(token),f.org,f.member,'2099-01-01']);
+  await database.query("UPDATE conversations SET status='waiting_human',assignee_id=NULL WHERE id=$1",[f.conversation]);
+  const request=()=>new NextRequest(origin+'/api/admin/conversations/'+f.conversation+'/reply',{method:'POST',headers:{origin,cookie:STAFF_COOKIE+'='+token,'Content-Type':'application/json'},body:JSON.stringify({text,clientId})});
+  assert.equal((await staffPost(request())).status,409);assert.equal((await staffPost(request())).status,409);
+  const rows=(await database.query('SELECT * FROM desk_send_issues WHERE org_id=$1 AND member_id=$2 AND client_id=$3',[f.org,f.member,clientId])).rows;
+  assert.equal(rows.length,1);assert.equal(rows[0].status,409);assert.equal(rows[0].operation,'reply');
+  assert.deepEqual(Object.keys(rows[0]).sort(),['client_id','last_seen_at','member_id','operation','org_id','status']);
+  assert.ok(!JSON.stringify(rows).includes(token));assert.ok(!JSON.stringify(rows).includes(text));
+  await conversationAction(f.staff,f.conversation,'claim',{});
+  assert.equal((await staffPost(request())).status,200);assert.equal((await staffPost(request())).status,200);
+  assert.equal((await database.query('SELECT count(*) n FROM crm_bridge_commands WHERE org_id=$1 AND command_id=$2',[f.org,'desk:'+clientId])).rows[0].n,1);
+});
 test('concurrent signed commands and retry after a lost response commit one reply and one receipt',async()=>{
   const f=await fixture(); allowBridge(f);
   const command={commandId:randomUUID(),conversationId:f.conversation,actorId:f.member,action:'reply',text:'Synthetic reply exactly once'};

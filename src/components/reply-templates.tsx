@@ -4,7 +4,7 @@ import { FeatureHeading } from "./specialist-workspace";
 import { useCallback, useEffect, useState } from "react";
 import { Bookmark, Copy, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { api, date } from "./data";
-import { Badge, Button, Card, Empty, Field, Input, Textarea } from "./ui";
+import { Badge, Button, Card, Empty, Field, Input, Select, Textarea } from "./ui";
 import { Modal } from "./workspace-panels";
 import type { PanelProps } from "./workspace";
 import type { ReplyTemplate } from "./inbox-data";
@@ -45,11 +45,33 @@ export function ReplyTemplatesPanel({ data, notify }: PanelProps) {
 function TemplateEditor({ item, close, onSaved }: { item: ReplyTemplate | null; close: () => void; onSaved: () => Promise<void> }) {
   const [values, setValues] = useState({ title: item?.title || "", shortcut: item?.shortcut || "", content: item?.content || "", category: item?.category || "ทั่วไป" });
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const [revisions,setRevisions]=useState<Omit<ReplyTemplate,"id">[]>([]);
+  const [previousVersion,setPreviousVersion]=useState("");
+  const [historyError,setHistoryError]=useState(false);
+  useEffect(()=>{
+    if(!item)return;
+    let active=true;
+    api<{revisions:Omit<ReplyTemplate,"id">[]}>(`/api/admin/reply-templates/${item.id}/revisions`).then(data=>{
+      if(active)setRevisions(data.revisions);
+    }).catch(()=>{if(active)setHistoryError(true);});
+    return ()=>{active=false;};
+  },[item]);
+  const previous=revisions.find(snapshot=>String(snapshot.version)===previousVersion);
   const put = (key: keyof typeof values, value: string) => setValues(previous => ({ ...previous, [key]: value }));
   return <form className="form-stack" onSubmit={async e => { e.preventDefault(); setBusy(true); setError(""); try { await api("/api/admin/action", { action: "saveReplyTemplate", ...(item ? { id: item.id } : {}), values: { ...values, ...(item ? { version: item.version } : {}) } }); await onSaved(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } }}>
     <Field label="ชื่อข้อความ"><Input autoFocus required maxLength={120} value={values.title} onChange={e => put("title", e.target.value)} placeholder="เช่น ขอข้อมูลรถสำหรับประเมินราคา" /></Field>
     <div className="form-grid"><Field label="คำลัด" hint="ใช้เพื่อค้นหาได้รวดเร็ว เช่น /vehicle"><Input required maxLength={40} value={values.shortcut} onChange={e => put("shortcut", e.target.value)} placeholder="/vehicle" /></Field><Field label="หมวดหมู่"><Input required maxLength={80} value={values.category} onChange={e => put("category", e.target.value)} /></Field></div>
     <Field label="ข้อความ" hint="ใช้ข้อมูลที่ทีมตรวจสอบแล้ว ไม่ใส่ข้อมูลลูกค้าหรือราคาที่ยังไม่ได้ยืนยัน"><Textarea required rows={7} maxLength={4000} value={values.content} onChange={e => put("content", e.target.value)} /></Field>
+    <section className="reply-preview" aria-label="ตัวอย่างข้อความถึงลูกค้า"><strong>ตัวอย่างข้อความถึงลูกค้า</strong><p>{values.content||"พิมพ์ข้อความเพื่อดูตัวอย่าง"}</p></section>
+    {item&&<details className="reply-versions"><summary>ประวัติรุ่น · รุ่นปัจจุบัน {item.version}</summary>
+      {historyError?<p>โหลดประวัติไม่สำเร็จ กรุณาเปิดข้อความอีกครั้ง</p>:!revisions.length?<p>ยังไม่มีรุ่นก่อนหน้า</p>:<><Field label="เลือกรุ่นที่ต้องการกู้คืน"><Select value={previousVersion} onChange={e=>setPreviousVersion(e.target.value)}><option value="">เลือกรุ่น</option>{revisions.map(snapshot=><option key={snapshot.version} value={snapshot.version}>รุ่น {snapshot.version} · {date(snapshot.updatedAt)}</option>)}</Select></Field>
+      {previous&&<><div className="reply-preview"><strong>{previous.title}</strong><small>{previous.shortcut} · {previous.category}</small><p>{previous.content}</p></div><Button type="button" variant="secondary" disabled={busy} onClick={async()=>{
+        if(!window.confirm(`กู้คืนรุ่น ${previous.version} เป็นรุ่นใหม่และแทนที่ร่างที่กำลังแก้ไขหรือไม่`))return;
+        setBusy(true);setError("");
+        try{await api("/api/admin/action",{action:"restoreReplyTemplate",id:item.id,values:{version:item.version,fromVersion:previous.version}});await onSaved();}
+        catch(err){setError((err as Error).message);}finally{setBusy(false);}
+      }}>กู้คืนรุ่น {previous.version}</Button></>}</>}
+    </details>}
     {error && <div className="alert alert-error" role="alert">{error}</div>}
     <div className="form-actions"><Button variant="secondary" type="button" onClick={close}>ยกเลิก</Button><Button type="submit" disabled={busy}>{busy ? "กำลังบันทึก…" : "บันทึกข้อความ"}</Button></div>
   </form>;

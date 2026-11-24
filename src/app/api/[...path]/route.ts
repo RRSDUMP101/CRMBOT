@@ -4,7 +4,7 @@ import { database, demoMode, transaction } from '@/lib/db';
 import { ApiError, STAFF_COOKIE, assertOrigin, checkPassword, cookieValue, fields, hashToken, isWidgetRequest, newToken, rateLimit, readJson, setCookie, staffSession, str, uuid, visitorCookieName, visitorSession } from '@/lib/auth';
 import { adminAction, appointmentConfirm, appointmentPreview, conversationAction, conversationDetail, createVisitor, handoff, messageStream, publicMember, saveContact, snapshot, visitorDetail } from '@/lib/service';
 import { providerName } from '@/lib/bot';
-import { adminWidgetConfig, getPublicWidgetConfig, getWidgetEmbedConfig, inbox, inboxSummary, markConversationRead, replyTemplates, saveWidgetConfig, templateAction } from '@/lib/helpdesk';
+import { adminWidgetConfig, getPublicWidgetConfig, getWidgetEmbedConfig, inbox, inboxSummary, markConversationRead, replyTemplates, replyTemplateRevisions, saveWidgetConfig, templateAction } from '@/lib/helpdesk';
 import {downloadFile,listFiles,uploadFile} from '@/lib/files';
 import {realtimeResponse} from '@/lib/realtime';
 import {downloadSocialAttachment} from '@/lib/social-media';
@@ -86,10 +86,30 @@ async function handle(request:NextRequest) {
       if(path[1]==='snapshot'&&path.length===2&&method==='GET')return json(await snapshot(staff,url));
       if(path[1]==='conversations'&&path.length===3&&method==='GET')return json(await conversationDetail(staff.orgId,uuid(path[2]),true,staff.role==='Admin'));
       if(path[1]==='conversations'&&path.length===4&&path[3]==='read'&&method==='POST')return json(await markConversationRead(staff,uuid(path[2]),await readJson(request)));
-      if(path[1]==='conversations'&&path.length===4&&method==='POST')return json(await conversationAction(staff,uuid(path[2]),path[3],await readJson(request)));
+      if(path[1]==='reply-templates'&&path.length===4&&path[3]==='revisions'&&method==='GET')return json(await replyTemplateRevisions(staff,uuid(path[2])));
+      if(path[1]==='conversations'&&path.length===4&&path[3]==='sale-profile'&&method==='GET'){
+        const room=(await database.query('SELECT lead_id FROM conversations WHERE org_id=$1 AND id=$2',[staff.orgId,uuid(path[2])])).rows[0];
+        if(!room)throw new ApiError(404,'ไม่พบห้องสนทนา');
+        const {currentSaleProfile}=await import('@/lib/sale-context');
+        try{return json(await currentSaleProfile(staff.orgId,room.lead_id));}catch{throw new ApiError(503,'โหลดข้อมูลลูกค้าจาก Sale Office ไม่สำเร็จ');}
+      }
+      if(path[1]==='conversations'&&path.length===4&&method==='POST'){
+        const id=uuid(path[2]),action=path[3],body=await readJson(request);
+        try{return json(await conversationAction(staff,id,action,body));}
+        catch (error){
+          if((action==='reply'||action==='note')&&typeof body.clientId==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(body.clientId)){
+            const status=error instanceof ApiError?error.status:500;
+            const reference=body.clientId;
+            try{
+              await database.query('INSERT INTO desk_send_issues(org_id,member_id,client_id,operation,status) VALUES($1,$2,$3,$4,$5) ON CONFLICT(org_id,member_id,client_id) DO UPDATE SET status=excluded.status,last_seen_at=CURRENT_TIMESTAMP',[staff.orgId,staff.id,reference,action,status]);
+            }catch{console.warn('[rrs] desk_send_issue',{reference,action,status});}
+          }
+          throw error;
+        }
+      }
       if(path[1]==='action'&&path.length===2&&method==='POST') {
         const body=await readJson(request);
-        return json(await (['saveReplyTemplate','deleteReplyTemplate'].includes(String(body.action))?templateAction(staff,body):adminAction(staff,body)));
+        return json(await (['saveReplyTemplate','deleteReplyTemplate','restoreReplyTemplate'].includes(String(body.action))?templateAction(staff,body):adminAction(staff,body)));
       }
     }
     if(path[0]==='chat') {

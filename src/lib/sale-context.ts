@@ -36,6 +36,8 @@ export function validateSaleEvent(value: unknown, orgId: string): SaleContextEve
   if (typeof value.occurred_at !== 'string' || !Number.isFinite(Date.parse(value.occurred_at)) || typeof value.payload_hash !== 'string' || !/^[a-f0-9]{64}$/.test(value.payload_hash)) throw new SaleContextError('SALE_EVENT_INVALID');
   const payload = value.payload;
   if (!object(payload) || payload.dealId !== value.aggregate_id || !ID.test(String(payload.leadId)) || !['live', 'domestic'].includes(String(payload.workspace))) throw new SaleContextError('SALE_EVENT_INVALID');
+  if(payload.customer!==undefined&&(!object(payload.customer)||typeof payload.customer.name!=='string'||payload.customer.name.length>500||typeof payload.customer.email!=='string'||payload.customer.email.length>500))throw new SaleContextError('SALE_EVENT_INVALID');
+  if(payload.owner!==undefined&&(typeof payload.owner!=='string'||payload.owner.length>500))throw new SaleContextError('SALE_EVENT_INVALID');
   if (saleContextHash(payload) !== value.payload_hash) throw new SaleContextError('SALE_EVENT_HASH_MISMATCH');
   return value as unknown as SaleContextEvent;
 }
@@ -108,13 +110,36 @@ export async function pullSaleContext(db: D1Binding, env: Env, fetcher: typeof f
   }
 }
 const waitingNames: Record<string, string> = { rrs: 'รอฝ่ายขาย', customer: 'รอลูกค้า', none: 'ไม่มีงานค้าง' };
+export async function currentSaleProfile(orgId:string,leadId:string,env:Env=process.env,fetcher?:typeof fetch){
+  const config=saleContextConfig(env);
+  if(!config||config.orgId!==orgId)return {deals:[]};
+  if(!fetcher&&env.RRS_WORKERS==='true'){
+    const {getCloudflareContext}=await import('@opennextjs/cloudflare');
+    const binding=(getCloudflareContext().env as unknown as {SALE_SERVICE?:{fetch(request:Request):Promise<Response>}}).SALE_SERVICE;
+    if(binding)fetcher=(input,init)=>binding.fetch(new Request(input,init));
+  }
+  const url=config.origin+'/api/rrs/crm/sale-context?leadId='+encodeURIComponent(leadId);
+  const response=await (fetcher||fetch)(url,{headers:await signBridgeRequest(url,{...config,method:'GET'}),redirect:'manual',signal:AbortSignal.timeout(5000)});
+  if(!response.ok){await response.body?.cancel();if(response.status===404)return {deals:[]};throw new SaleContextError('SALE_PROFILE_UNAVAILABLE');}
+  const body=await boundedJson(response);
+  if(!object(body)||body.version!==1||body.orgId!==orgId||body.leadId!==leadId||!['live','domestic'].includes(String(body.workspace))||!Array.isArray(body.deals)||!Number.isSafeInteger(body.revision))throw new SaleContextError('SALE_PROFILE_INVALID');
+  const text=(value:unknown)=>typeof value==='string'&&value.length<=500;
+  const deals=body.deals.slice(0,20).map(deal=>{
+    if(!object(deal)||deal.workspace!==body.workspace||deal.leadId!==leadId||typeof deal.dealId!=='string'||!ID.test(deal.dealId)||!text(deal.title))throw new SaleContextError('SALE_PROFILE_INVALID');
+    const customer=deal.customer;
+    if(customer!==undefined&&(!object(customer)||!text(customer.name)||!text(customer.email)))throw new SaleContextError('SALE_PROFILE_INVALID');
+    if(deal.owner!==undefined&&!text(deal.owner)||deal.followDate!==undefined&&!text(deal.followDate))throw new SaleContextError('SALE_PROFILE_INVALID');
+    return {dealId:deal.dealId,workspace:body.workspace,title:deal.title,customer:object(customer)?{name:customer.name,email:customer.email}:undefined,owner:deal.owner,followDate:deal.followDate};
+  });
+  return {deals};
+}
 /** Staff-only view for one lead. Visitors never receive this. */
 export async function saleContextForLead(db: D1Binding, orgId: string, leadId: string) {
   const rows = await all(db.prepare('SELECT deal_id,workspace,aggregate_version,payload,updated_at FROM crm_sale_context WHERE org_id=? AND lead_id=? ORDER BY updated_at DESC LIMIT 20').bind(orgId, leadId));
   const sync = (await all(db.prepare('SELECT last_success_at,last_error FROM crm_sale_context_cursor WHERE org_id=?').bind(orgId)))[0];
   return {
     syncedAt: sync?.last_success_at ?? null, error: sync?.last_error || null,
-    deals: rows.map(row => { const p = JSON.parse(String(row.payload)); return { ...p, waitingLabel: waitingNames[String(p.waiting)] ?? '', updatedAt: row.updated_at, version: Number(row.aggregate_version) }; }).filter(deal => !deal.removed),
+    deals: rows.map(row => { const {customer:_customer,owner:_owner,...p} = JSON.parse(String(row.payload)); return { ...p, waitingLabel: waitingNames[String(p.waiting)] ?? '', updatedAt: row.updated_at, version: Number(row.aggregate_version) }; }).filter(deal => !deal.removed),
   };
 }
 /** On-view refresh without a pull per request: at most once per `maxAgeMs`. */
