@@ -2,13 +2,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Expand, MessageSquare, Minimize2, X } from "lucide-react";
-import { InboxWorkspace } from "./inbox-workspace";
+import { InboxWorkspace, type InboxSession } from "./inbox-workspace";
 import { api } from "./data";
 import type { InboxResult } from "./inbox-data";
 import type { PanelProps } from "./workspace";
 import { subscribeCRMChanges } from "./realtime";
 
-export function ConversationDock(props: PanelProps) {
+export function ConversationDock(props: PanelProps & {session:InboxSession}) {
   const [room, setRoom] = useState("");
   const [size, setSize] = useState<"closed" | "mini" | "room" | "inbox">("closed");
   const [notice, setNotice] = useState<{id:string; name:string; count:number} | null>(null);

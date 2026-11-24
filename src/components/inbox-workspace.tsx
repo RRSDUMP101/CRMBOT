@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import "./messenger.css";
 import { subscribeCRMChanges } from './realtime';
 import { ArrowLeft, ArrowUpRight, Bookmark, Check, ClipboardList, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X, Clock3, CalendarDays, Users } from "lucide-react";
@@ -18,7 +18,20 @@ function ChannelIcon({provider}: {provider?: string}) { const p = provider || "w
 const queues: InboxQueue[] = ["all", "unread", "waiting", "mine", "unassigned", "closed"];
 type Drafts = Record<string, { reply: string; note: string }>;
 
-export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, requestedRoom, roomRevision, onRoomChange, visible = true }: PanelProps & { requestedRoom?: string; roomRevision?: number; onRoomChange?: (room:string)=>void; visible?: boolean; searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
+export function createInboxSession() {
+  let drafts: Drafts = {};
+  const listeners = new Set<()=>void>();
+  return {
+    read:()=>drafts,
+    update:(change:(previous:Drafts)=>Drafts)=>{ drafts=change(drafts); for(const listen of listeners)listen(); },
+    subscribe:(listen:()=>void)=>{listeners.add(listen);return ()=>{listeners.delete(listen);};},
+    socialFiles:new Map<string,SocialFileDraft>(), webFiles:new Map<string,WebFileDraft>(),
+    pending:new Map<string,{id:string;text:string}>(), sending:new Set<string>(),
+  };
+}
+export type InboxSession=ReturnType<typeof createInboxSession>;
+
+export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, session:sharedSession, requestedRoom, roomRevision, onRoomChange, visible = true }: PanelProps & { session?: InboxSession; requestedRoom?: string; roomRevision?: number; onRoomChange?: (room:string)=>void; visible?: boolean; searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
   const [shown, setShown] = useState({preview:true,status:true,date:true,channel:true});
   const [pageSize, setPageSize] = useState(25);
   const [queue, setQueue] = useState<InboxQueue>("all");
@@ -33,9 +46,10 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
   const [result, setResult] = useState<InboxResult>({ items: [], nextCursor: null, total: 0, counts: emptyCounts });
   const [listLoading, setListLoading] = useState(true); const [listError, setListError] = useState(""); const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState(""); const [detail, setDetail] = useState<Detail | null>(null); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
-  const socialFiles = useRef(new Map<string,SocialFileDraft>());
-  const webFiles = useRef(new Map<string,WebFileDraft>());
-  const [drafts, setDrafts] = useState<Drafts>({}); const [note, setNote] = useState(false); const [profileOpen, setProfileOpen] = useState(false); const [editing, setEditing] = useState(false);
+  const [ownSession] = useState(createInboxSession);
+  const session = sharedSession || ownSession;
+  const drafts = useSyncExternalStore(session.subscribe,session.read,session.read);
+  const setDrafts=session.update; const [note, setNote] = useState(false); const [profileOpen, setProfileOpen] = useState(false); const [editing, setEditing] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false); const [templates, setTemplates] = useState<ReplyTemplate[]>([]); const [templateSearch, setTemplateSearch] = useState(""); const [templateLoading, setTemplateLoading] = useState(false); const [templateError, setTemplateError] = useState("");
   const selectedRef = useRef(""); const queryVersion = useRef(0); const listRequest = useRef(0); const loadedPages = useRef(1); const readMessages = useRef(new Set<string>()); const history = useRef<HTMLDivElement>(null);
   selectedRef.current = selected;
@@ -101,27 +115,25 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
   useEffect(()=>subscribeCRMChanges(()=>{void refreshList();if(selectedRef.current)void loadDetail(selectedRef.current);}),[refreshList,loadDetail]);
   useEffect(() => { const panel = history.current; if (panel) panel.scrollTop = panel.scrollHeight; }, [detail?.conversation.id, detail?.messages.length]);
   const selectConversation = (id: string) => { selectedRef.current = id; setSelected(id); setNote(false); setTemplateOpen(false); setProfileOpen(false); setError(""); };
-  const actionInFlight = useRef(new Set<string>());
-  const pendingCommands = useRef(new Map<string,{id:string; text:string}>());
   const act = async (action: string, content?: string) => {
-    if (!selected || actionInFlight.current.has(selected)) return;
-    actionInFlight.current.add(selected);
+    if (!selected || session.sending.has(selected)) return;
+    session.sending.add(selected);
     const id = selected; const mode = note ? "note" : "reply"; setBusy(true); setError("");
     try {
       const key = id + "/" + action;
-      let command = pendingCommands.current.get(key);
+      let command = session.pending.get(key);
       if (content !== undefined && (!command || command.text !== content)) {
         command = {id:crypto.randomUUID(),text:content};
-        pendingCommands.current.set(key,command);
+        session.pending.set(key,command);
       }
       const updated = await api<Detail>(`/api/admin/conversations/${id}/${action}`, content === undefined ? {} : {text:content, commandId:command!.id});
-      pendingCommands.current.delete(key);
+      session.pending.delete(key);
       if (selectedRef.current === id) setDetail(updated);
       if (action === "reply" || action === "note") setDrafts(previous => previous[id]?.[mode] !== content ? previous : ({ ...previous, [id]: { reply: previous[id]?.reply || "", note: previous[id]?.note || "", [mode]: "" } }));
       await Promise.all([refreshList(), reload()]);
       notify(({ claim: "รับช่วงแล้ว AI หยุดตอบ", release: "ส่งกลับให้ AI แล้ว", resolve: "จบการสนทนาแล้ว", reply: "บันทึกคำตอบแล้ว ตรวจสถานะการส่งใต้ข้อความ", note: "บันทึกภายในแล้ว", summarize: "อัปเดตสรุปความต้องการแล้ว" } as Record<string, string>)[action] || "บันทึกแล้ว");
     } catch (e) { if (selectedRef.current === id) setError((e as Error).message); }
-    finally { actionInFlight.current.delete(id); setBusy(false); }
+    finally { session.sending.delete(id); setBusy(false); }
   };
   const updateStage = async (stage: string) => {
     if (!detail) return; const id = selected; setBusy(true); setError("");
@@ -180,15 +192,15 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
           {!canReply && !note && <div className="composer-locked"><Sparkles size={14} /><span>{activeDetail.conversation.status === "resolved" ? "แชตนี้จบแล้ว รับช่วงเพื่อเริ่มดูแลต่อ" : "รับช่วงก่อนตอบลูกค้า เพื่อให้ AI หยุดตอบ"}</span></div>}
           <Textarea aria-label={note ? "บันทึกภายใน" : "ข้อความตอบลูกค้า"} placeholder={note ? "บันทึกสำหรับทีม ลูกค้าจะไม่เห็นข้อความนี้…" : canReply ? "พิมพ์ข้อความ หรือเลือกข้อความสำเร็จรูป…" : "ร่างข้อความไว้ แล้วรับช่วงก่อนส่ง…"} value={text} onChange={e => putDraft(e.target.value)} maxLength={6000} rows={3} />
           <div className="desk-composer-footer"><div className="composer-tools"><Button variant="ghost" size="sm" type="button" id="reply-template-trigger" disabled={note} aria-expanded={templateOpen} onClick={openTemplates}><Bookmark size={16} />ข้อความสำเร็จรูป</Button>{templateOpen && <div className="template-picker" ref={templateRef} tabIndex={-1} role="dialog" aria-label="เลือกข้อความสำเร็จรูป"><div className="template-picker-heading"><strong>เลือกข้อความสำเร็จรูป</strong><Button type="button" variant="ghost" size="icon" aria-label="ปิดข้อความสำเร็จรูป" onClick={() => setTemplateOpen(false)}><X size={16} /></Button></div><div className="template-picker-search"><Search size={15} /><Input data-initial-focus aria-label="ค้นหาข้อความสำเร็จรูป" placeholder="ชื่อข้อความหรือ /คำลัด" value={templateSearch} onChange={e => setTemplateSearch(e.target.value)} /></div><div className="template-picker-items">{templateLoading ? <p className="helper-text">กำลังโหลดข้อความ…</p> : templateError ? <p className="error-text" role="alert">{templateError}</p> : shownTemplates.length ? shownTemplates.map(template => <button key={template.id} type="button" onClick={() => { putDraft((text ? text + "\n" : "") + template.content); setTemplateOpen(false); setTemplateSearch(""); }}><span><strong>{template.title}</strong><code>{template.shortcut}</code></span><p>{template.content}</p></button>) : <Empty title="ไม่พบข้อความสำเร็จรูป" detail="ผู้ดูแลสามารถเพิ่มข้อความได้จากเมนูข้อความ" />}</div><footer>เติมลงในร่างเท่านั้น ตรวจสอบก่อนส่งทุกครั้ง</footer></div>}</div><Button size="sm" type="submit" disabled={busy || !text.trim() || (!note && !canReply)}><Send size={15} />{busy ? "กำลังบันทึก…" : note ? "บันทึก" : "ส่งข้อความ"}</Button></div>
-          {!note && <HumanAttachments drafts={socialFiles.current} key={selected} conversationId={selected} version={activeDetail.conversation.version} disabled={busy || !canReply || activeDetail.conversation.assigneeId !== data.user.id} onSent={async()=>{await Promise.all([loadDetail(selected),refreshList(),reload()]);}} />}
-          {!note && <WebChatAttachments drafts={webFiles.current} key={'web-'+selected} conversationId={selected} version={activeDetail.conversation.version} disabled={busy || !canReply || activeDetail.conversation.assigneeId !== data.user.id} onSent={async()=>{await Promise.all([loadDetail(selected),refreshList(),reload()]);}} />}
+          {!note && <HumanAttachments drafts={session.socialFiles} key={selected} conversationId={selected} version={activeDetail.conversation.version} disabled={busy || !canReply || activeDetail.conversation.assigneeId !== data.user.id} onSent={async()=>{await Promise.all([loadDetail(selected),refreshList(),reload()]);}} />}
+          {!note && <WebChatAttachments drafts={session.webFiles} key={'web-'+selected} conversationId={selected} version={activeDetail.conversation.version} disabled={busy || !canReply || activeDetail.conversation.assigneeId !== data.user.id} onSent={async()=>{await Promise.all([loadDetail(selected),refreshList(),reload()]);}} />}
           <div className="composer-note"><CircleHelp size={12} />{note ? "ข้อความนี้เห็นเฉพาะสมาชิกในทีม" : "ร่างแยกตามลูกค้า · ไม่มีการส่งอัตโนมัติ"}</div>
         </form>
       </>}
     </section>
     <aside ref={profileRef} tabIndex={-1} role={profileOpen ? "dialog" : undefined} aria-modal={profileOpen || undefined} aria-label="ข้อมูลลูกค้า" className={`desk-profile-pane ${profileOpen ? "is-open" : ""}`}>{profile || <div className="profile-empty"><UserRound size={29} /><strong>รู้จักลูกค้าให้มากขึ้น</strong><p>ข้อมูลติดต่อ ความสนใจ และประวัติ<br />จะแสดงเมื่อเลือกบทสนทนา</p></div>}</aside>
     {profileOpen && <button className="profile-backdrop" aria-label="ปิดข้อมูลลูกค้า" onClick={() => setProfileOpen(false)} />}
-    {editing && activeDetail && <Modal title="แก้ไขข้อมูลลูกค้า" close={() => setEditing(false)}><LeadEditor lead={activeDetail.lead} data={data} reload={async () => { await Promise.all([reload(), loadDetail(selected), refreshList()]); }} notify={notify} close={() => setEditing(false)} /></Modal>}
+    {editing && activeDetail && <Modal title="แก้ไขข้อมูลลูกค้า" close={() => setEditing(false)}><LeadEditor showChat={false} lead={activeDetail.lead} data={data} reload={async () => { await Promise.all([reload(), loadDetail(selected), refreshList()]); }} notify={notify} close={() => setEditing(false)} /></Modal>}
   </section>;
 }
 
