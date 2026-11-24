@@ -1,3 +1,4 @@
+import { uiText } from "./interface-text";
 export type Member = { id: string; name: string; email: string; role: "Admin" | "Agent"; jobTitle?: string | null; active?: boolean };
 export type Conversation = { id: string; leadId: string; status: string; version: number; assigneeId: string | null; createdAt: string; updatedAt: string; lastMessage?: string; leadName?: string; tags: string[] };
 export type Lead = { id: string; name: string; phone: string; email: string; tags: string[]; interests: string; source: string; market: string; stage: string; assigneeId: string | null; facts: Record<string, string>; summary?: { facts: string[]; unconfirmed: string[] }; createdAt: string; updatedAt: string };
@@ -26,6 +27,6 @@ export async function api<T>(path:string,body?:unknown):Promise<T>{
   return res.json() as Promise<T>;
 }
 export function date(value: string | null | undefined, time = true) { return value ? new Intl.DateTimeFormat(typeof document !== "undefined" && document.documentElement.lang==="en"?"en-GB":"th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", ...(time ? { hour: "2-digit", minute: "2-digit" } : {}) }).format(new Date(value)) : "—"; }
-export function number(value: number | null | undefined) { return value == null ? "ไม่มีข้อมูล" : new Intl.NumberFormat("th-TH", { maximumFractionDigits: 2 }).format(value); }
+export function number(value: number | null | undefined) { return value == null ? uiText("ไม่มีข้อมูล") : new Intl.NumberFormat(typeof document !== "undefined" && document.documentElement.lang === "en" ? "en-GB" : "th-TH", { maximumFractionDigits: 2 }).format(value); }
 export function isoLocal(value: string) { return value ? new Date(value + ":00+07:00").toISOString() : ""; }
 export function localDate(value: string | null | undefined) { return value ? new Date(new Date(value).getTime() + 7 * 3600000).toISOString().slice(0, 16) : ""; }

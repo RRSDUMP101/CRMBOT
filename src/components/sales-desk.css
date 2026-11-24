@@ -88,3 +88,4 @@
 .rrs-company-lockup .rrs-logo-night, .login-story .rrs-logo-day, html[data-theme="dark"] .rrs-company-lockup .rrs-logo-day { display: none; }
 .login-story .rrs-logo-night, html[data-theme="dark"] .rrs-company-lockup .rrs-logo-night { display: block; }
 .login-story .rrs-company-lockup small, html[data-theme="dark"] .rrs-company-lockup small { color: #c6d5e7; }
+.rrs-workspace .rail-brand > .rrs-company-lockup { flex-direction:column; align-items:flex-start; }
