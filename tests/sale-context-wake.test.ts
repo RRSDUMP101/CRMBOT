@@ -64,6 +64,8 @@ test('signed wake pulls committed context once; duplicate wake is a cheap no-op'
   const response = await handleSaleContextSync(await wake(), e, fakeSale);
   assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'private, no-store');
   assert.deepEqual(await response.json(), { status: 'ok', sequence: 1, applied: 1 });
+  assert.deepEqual((await saleContextForLead(e.DB, orgId, leadId)).deals, [], 'an orphan projection remains private until the matching customer is imported');
+  await database.query("INSERT INTO leads(id,org_id,name,market) VALUES($1,$2,'Imported buyer','domestic')",[leadId,orgId]);
   assert.equal((await saleContextForLead(e.DB, orgId, leadId)).deals[0].dealId, payload.dealId);
   const before = calls.length;
   assert.deepEqual(await (await handleSaleContextSync(await wake(), e, fakeSale)).json(), { status: 'up_to_date', sequence: 1 });
