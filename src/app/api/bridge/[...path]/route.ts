@@ -55,6 +55,10 @@ async function handle(request: Request) {
       return json(await (await import('@/lib/semantic-spam')).claimSemanticSpam(config.orgId));
     }
     if(path==='spam-suggestion'&&request.method==='POST')return json(await (await import('@/lib/semantic-spam')).finishSemanticSpam(config.orgId,objectBody(body,['messageId','token','suggestion'])));
+    if(path==='lead-profile'&&request.method==='POST'){
+      const input=objectBody(body,['action','actorId','conversationId','leadId','market','version','commandId','changes']);
+      return json(await (await import('@/lib/lead-profile-bridge')).bridgeLeadProfile(config.orgId,input));
+    }
     if(path==='ai-policy'&&request.method==='POST')return json(await (await import('@/lib/ai-policy-bridge')).resolveBridgeAiPolicy(config.orgId,objectBody(body,['conversationId','expectedVersion'])));
     if(path==='domestic-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-domestic-messages')).acceptDomestic(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','source'])));
     if(path==='reviewed-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-sale-messages')).acceptReviewedSale(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','template','parts','source'])));
