@@ -166,8 +166,10 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
     let outboundCommand:string|null=null;
     if(action==='claim') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id)throw new ApiError(409,'มีเจ้าหน้าที่รับผิดชอบแล้ว กรุณาประสานงานก่อนรับช่วง');
+      if(!(bridgeCommand?.sourceMessageId&&conversation.status==='human_active'&&conversation.assignee_id===staff.id)){
       await connection.query("UPDATE conversations SET status='human_active',assignee_id=$3,version=version+1,generating_client_id=NULL,generation_started_at=NULL,handoff_at=COALESCE(handoff_at,(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,staff.id]);
       await connection.query("UPDATE leads SET assignee_id=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,conversation.lead_id,staff.id]);
+      }
     } else if(action==='release'||action==='resolve') {
       if(conversation.status==='human_active'&&conversation.assignee_id!==staff.id&&staff.role!=='Admin')throw new ApiError(403,'เฉพาะผู้รับผิดชอบหรือผู้ดูแลระบบที่เปลี่ยนสถานะได้');
       if(action==='resolve')await validateRequiredFields(connection,staff.orgId,id);
@@ -187,7 +189,7 @@ export async function conversationAction(staff:Staff,id:string,action:string,bod
       await connection.query("UPDATE leads SET summary=$3,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,lead.id,JSON.stringify(summarizeFacts(lead.facts))]);
     }
     await audit(connection,staff.orgId,staff.id,`conversation.${action}`,id,{previousStatus:conversation.status,previousAssigneeId:conversation.assignee_id,...(action==='claim'?{nextStatus:'human_active',nextAssigneeId:staff.id}:action==='release'?{nextStatus:'bot_active'}:action==='resolve'?{nextStatus:'resolved'}:{})});
-    if(bridgeCommand)await connection.query('INSERT INTO crm_bridge_commands(org_id,command_id,payload_hash,actor_id,conversation_id,result_json) VALUES($1,$2,$3,$4,$5,$6)',[staff.orgId,bridgeCommand.id,bridgeCommand.hash,staff.id,id,JSON.stringify({ok:true,action})]);
+    if(bridgeCommand)await connection.query('INSERT INTO crm_bridge_commands(org_id,command_id,payload_hash,actor_id,conversation_id,result_json) VALUES($1,$2,$3,$4,$5,$6)',[staff.orgId,bridgeCommand.id,bridgeCommand.hash,staff.id,id,JSON.stringify({ok:true,action,...(bridgeCommand.sourceMessageId?{sourceMessageId:bridgeCommand.sourceMessageId}:{})})]);
     return outboundCommand;
   }, staff);
   if(queuedCommand)await (queuedCommand.startsWith('email:')?(await import('./external-mail')).dispatchEmail(staff.orgId,queuedCommand.slice(6)):dispatchSocialReply(staff.orgId,queuedCommand)).catch(()=>{console.error('[rrs] dispatch_deferred');});

@@ -24,6 +24,19 @@ async function chat(c:Executor,staff:Staff,id:string,version?:number):Promise<Ro
   if(identity.opt_out)throw new ApiError(409,'ลูกค้ายกเลิกการติดต่อแล้ว');
   return {...row,provider:identity.provider,account_id:identity.account_id};
 }
+export async function assertPhotoCase(c:Executor,orgId:string,memberId:string,conversationId:string,sourceId:string){
+  const verified=(await c.query(`SELECT 1 ok FROM messages m JOIN conversations conv ON conv.org_id=m.org_id AND conv.id=m.conversation_id
+    JOIN whatsapp_triage t ON t.org_id=m.org_id AND t.message_id=m.id
+    JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id AND p.provider='whatsapp'
+    JOIN social_identities i ON i.org_id=m.org_id AND i.conversation_id=m.conversation_id AND i.id=t.identity_id AND i.provider='whatsapp' AND i.opt_out=0
+    WHERE m.org_id=$1 AND conv.id=$2 AND m.id=$3 AND conv.status='human_active' AND conv.assignee_id=$4 AND m.role='user' AND m.source_owner_only=0
+    AND m.customer_seq=conv.customer_message_seq AND t.eligible=1 AND t.review_state IN ('clear','released') AND p.removed_at IS NULL
+    AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)=0 AND COALESCE(json_extract(p.metadata,'$.sourceScopeUnknown'),0)=0
+    AND EXISTS(SELECT 1 FROM crm_bridge_commands receipt WHERE receipt.org_id=m.org_id AND receipt.conversation_id=conv.id AND receipt.actor_id=$4
+      AND json_extract(receipt.result_json,'$.action')='claim' AND json_extract(receipt.result_json,'$.sourceMessageId')=m.id)`,[orgId,conversationId,sourceId,memberId])).rows[0];
+  if(!verified)throw new ApiError(409,'ต้องรับช่วงจากเคส WhatsApp ล่าสุดของลูกค้ารายนี้ก่อนส่งรูป');
+  await (await import('./whatsapp-triage')).assertTriageEligible(c,orgId,conversationId);
+}
 const item=(r:Row)=>({id:r.id,filename:r.filename,contentType:r.content_type,sizeBytes:r.size_bytes,sha256:r.sha256,conversationVersion:r.conversation_version,customerSeq:r.customer_seq,expiresAt:r.expires_at});
 export async function listHumanAttachments(staff:Staff,id:string){
   uuid(id);if(!(await database.query('SELECT 1 FROM conversations WHERE org_id=$1 AND id=$2',[staff.orgId,id])).rows.length)throw new ApiError(404,'ไม่พบบทสนทนา');
@@ -51,7 +64,7 @@ export async function sweepExpiredHumanAttachments(orgId:string,limit=10,storage
   }
   return {removed};
 }
-export async function uploadHumanAttachment(staff:Staff,id:string,request:Request,options:{storage?:PrivateBucket}={}){
+export async function uploadHumanAttachment(staff:Staff,id:string,request:Request,options:{storage?:PrivateBucket;draftId?:string;caseSource?:string}={}){
   requireEnabled();const rawVersion=request.headers.get('x-conversation-version')||'';if(!/^\d{1,10}$/.test(rawVersion))throw new ApiError(400,'ไม่พบรุ่นบทสนทนา');const version=Number(rawVersion);
   const current=await chat(database,staff,id,version);const type=request.headers.get('content-type')||'',limit=supportedFormats(current.provider)[type];if(!limit)throw new ApiError(415,'ชนิดไฟล์นี้ไม่รองรับในช่องทางที่เลือก');
   await sweepExpiredHumanAttachments(staff.orgId,10,options.storage);
@@ -59,18 +72,35 @@ export async function uploadHumanAttachment(staff:Staff,id:string,request:Reques
   name=str(name,'ชื่อไฟล์',180,true);if(/[\x00-\x1f\x7f/\\]/.test(name))throw new ApiError(400,'ชื่อไฟล์ไม่ถูกต้อง');
   if(Number(request.headers.get('content-length')||0)>limit)throw new ApiError(413,'ไฟล์เกินขนาดที่รองรับ');
   const bytes=await bytesFrom(new Response(request.body),limit);if(!bytes.length)throw new ApiError(400,'ไฟล์ว่าง');mediaContainer(bytes,type);
-  const asset=randomUUID(),key=staff.orgId+'/'+asset,sha=hash(bytes),expires=new Date(Date.now()+15*60_000).toISOString();
+  const asset=options.draftId?uuid(options.draftId):randomUUID(),key=staff.orgId+'/'+asset,sha=hash(bytes),expires=new Date(Date.now()+15*60_000).toISOString();
   const row=await transaction(staff.orgId,async c=>{
     const conversation=await chat(c,staff,id,version),used=Number((await c.query('SELECT COALESCE(sum(size_bytes),0) AS n FROM human_attachments WHERE org_id=$1',[staff.orgId])).rows[0].n);
     if(conversation.provider!==current.provider||conversation.account_id!==current.account_id)throw new ApiError(409,'บัญชีช่องทางเปลี่ยน กรุณาเลือกไฟล์อีกครั้ง');
+    if(options.caseSource)await assertPhotoCase(c,staff.orgId,staff.id,id,options.caseSource);
+    if(options.draftId){
+      const prior=(await c.query("SELECT * FROM human_attachments WHERE org_id=$1 AND id=$2",[staff.orgId,asset])).rows[0];
+      if(prior){
+        if(prior.uploaded_by!==staff.id||prior.conversation_id!==id||prior.conversation_version!==version||prior.customer_seq!==conversation.customer_message_seq||prior.account_id!==conversation.account_id||prior.provider!==conversation.provider||prior.filename!==name||prior.sha256!==sha||prior.content_type!==type||prior.size_bytes!==bytes.length||prior.status==='deleting'||prior.expires_at<=now())throw new ApiError(409,'รหัสร่างรูปภาพนี้ใช้กับข้อมูลอื่นแล้ว');
+        return prior;
+      }
+    }
     const configured=Number(process.env.HUMAN_ATTACHMENT_STORAGE_LIMIT_BYTES||100*1024*1024),quota=Number.isSafeInteger(configured)&&configured>0?configured:100*1024*1024;
     if(used+bytes.length>quota)throw new ApiError(409,'พื้นที่ไฟล์แนบถึงขีดจำกัด');
     await c.query("INSERT INTO human_attachments(id,org_id,conversation_id,uploaded_by,provider,account_id,conversation_version,customer_seq,filename,content_type,size_bytes,sha256,object_key,expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",[asset,staff.orgId,id,staff.id,conversation.provider,conversation.account_id,version,conversation.customer_message_seq,name,type,bytes.length,sha,key,expires,now()]);
-    return {id:asset,filename:name,content_type:type,size_bytes:bytes.length,sha256:sha,conversation_version:version,customer_seq:conversation.customer_message_seq,expires_at:expires};
+    return {status:'pending',id:asset,filename:name,content_type:type,size_bytes:bytes.length,sha256:sha,conversation_version:version,customer_seq:conversation.customer_message_seq,expires_at:expires};
   },staff);
-  const storage=options.storage||await getPrivateBucket();await storage.put(key,bytes,{httpMetadata:{contentType:type}});
-  const ready=await transaction(staff.orgId,async c=>{const pending=(await c.query('SELECT status FROM human_attachments WHERE org_id=$1 AND id=$2',[staff.orgId,asset])).rows[0];if(pending?.status!=='pending')return false;await chat(c,staff,id,version);await c.query("UPDATE human_attachments SET status='ready' WHERE org_id=$1 AND id=$2 AND status='pending'",[staff.orgId,asset]);return true;},staff);
-  if(!ready){await storage.delete?.(key);throw new ApiError(409,'การอัปโหลดหมดอายุ กรุณาเลือกไฟล์อีกครั้ง');}
+  if(row.status==='ready'||row.status==='approved')return item(row);
+  const storage=options.storage||await getPrivateBucket();
+  try{await storage.put(key,bytes,{httpMetadata:{contentType:type}});}
+  catch(error){
+    if(!options.draftId)throw error;
+    const existing=await storage.get(key);
+    if(!existing)throw new ApiError(503,'ยังยืนยันการอัปโหลดรูปไม่ได้ กรุณาลองอีกครั้งด้วยร่างเดิม');
+    const stored=await bytesFrom(new Response(existing.body),bytes.length);
+    if(stored.length!==bytes.length||hash(stored)!==sha)throw new ApiError(503,'รูปยังไม่พร้อม กรุณาลองอีกครั้งด้วยร่างเดิม');
+  }
+  const ready=await transaction(staff.orgId,async c=>{const pending=(await c.query('SELECT status FROM human_attachments WHERE org_id=$1 AND id=$2',[staff.orgId,asset])).rows[0];if(options.caseSource)await assertPhotoCase(c,staff.orgId,staff.id,id,options.caseSource);if(options.draftId&&(pending?.status==='ready'||pending?.status==='approved'))return true;if(pending?.status!=='pending')return false;await chat(c,staff,id,version);await c.query("UPDATE human_attachments SET status='ready' WHERE org_id=$1 AND id=$2 AND status='pending'",[staff.orgId,asset]);return true;},staff);
+  if(!ready){if(!options.draftId)await storage.delete?.(key);throw new ApiError(409,'การอัปโหลดหมดอายุ กรุณาเลือกไฟล์อีกครั้ง');}
   return item(row);
 }
 async function fileBytes(row:Row){
@@ -82,11 +112,12 @@ export async function downloadHumanAttachment(staff:Staff,id:string,attachmentId
   if(!row||row.expires_at<now()&&row.status!=='approved')throw new ApiError(404,'ไม่พบไฟล์แนบ');
   const bytes=await fileBytes(row);return new Response(bytes,{headers:{'Content-Type':row.content_type,'Content-Length':String(bytes.length),'Content-Disposition':`attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(row.filename).replace(/'/g,'%27')}`,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"}});
 }
-export async function approveHumanAttachment(staff:Staff,id:string,body:Record<string,unknown>,options:DispatchOptions&{dispatch?:boolean}={}){
+export async function approveHumanAttachment(staff:Staff,id:string,body:Record<string,unknown>,options:DispatchOptions&{dispatch?:boolean;caseSource?:string}={}){
   requireEnabled();fields(body,['attachmentId','clientId','expectedVersion']);const asset=uuid(body.attachmentId),client=uuid(body.clientId);if(!Number.isSafeInteger(body.expectedVersion)||Number(body.expectedVersion)<0)throw new ApiError(400,'รุ่นบทสนทนาไม่ถูกต้อง');
   const result=await transaction(staff.orgId,async c=>{
     const previous=(await c.query('SELECT * FROM human_attachments WHERE org_id=$1 AND client_id=$2',[staff.orgId,client])).rows[0];
     if(previous){if(previous.id!==asset||previous.conversation_id!==id||previous.uploaded_by!==staff.id||previous.conversation_version!==body.expectedVersion)throw new ApiError(409,'คำสั่งส่งนี้ถูกใช้กับข้อมูลอื่นแล้ว');return {attachmentId:asset,messageId:previous.message_id,commandId:previous.outbound_command_id};}
+    if(options.caseSource)await assertPhotoCase(c,staff.orgId,staff.id,id,options.caseSource);
     const conversation=await chat(c,staff,id,Number(body.expectedVersion));
     const file=(await c.query("SELECT * FROM human_attachments WHERE org_id=$1 AND conversation_id=$2 AND uploaded_by=$3 AND id=$4 AND status='ready'",[staff.orgId,id,staff.id,asset])).rows[0];
     if(!file)throw new ApiError(404,'ไม่พบไฟล์ที่คุณอัปโหลด');
@@ -95,7 +126,7 @@ export async function approveHumanAttachment(staff:Staff,id:string,body:Record<s
     await c.query("INSERT INTO messages(id,org_id,conversation_id,role,content,author_member_id,author_type) VALUES($1,$2,$3,'agent',$4,$5,'human')",[messageId,staff.orgId,id,text,staff.id]);
     const command=await enqueueSocialReply(c,staff.orgId,id,messageId,text);if(!command.commandId)throw new ApiError(422,'ช่องทางนี้ยังไม่รองรับไฟล์แนบ');
     await c.query("UPDATE human_attachments SET status='approved',client_id=$3,message_id=$4,outbound_command_id=$5 WHERE org_id=$1 AND id=$2",[staff.orgId,asset,client,messageId,command.commandId]);
-    await c.query("INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata,storage_state,object_key) VALUES($1,$2,$3,$4,$5,$6,'',$7,'archived',$8)",[asset,staff.orgId,messageId,file.provider,file.account_id,file.content_type==='application/pdf'?'document':'image',JSON.stringify({name:file.filename,mime:file.content_type,size:file.size_bytes,sha256:file.sha256,humanAttachment:true}),file.object_key]);
+    await c.query("INSERT INTO social_message_attachments(id,org_id,message_id,provider,account_id,media_type,provider_ref,metadata,storage_state,object_key) VALUES($1,$2,$3,$4,$5,$6,'',$7,'archived',$8)",[asset,staff.orgId,messageId,file.provider,file.account_id,file.content_type==='application/pdf'?'document':'image',JSON.stringify({name:file.filename,mime:file.content_type,size:file.size_bytes,sha256:file.sha256,humanAttachment:true,...(options.caseSource?{clarificationSourceMessageId:options.caseSource}:{})}),file.object_key]);
     await c.query("INSERT INTO social_media_archive(org_id,attachment_id,object_key,size_bytes,content_type,sha256,status,created_at) VALUES($1,$2,$3,$4,$5,$6,'ready',$7)",[staff.orgId,asset,file.object_key,file.size_bytes,file.content_type,file.sha256,now()]);
     await c.query('UPDATE conversations SET updated_at=$3,first_agent_at=COALESCE(first_agent_at,$3) WHERE org_id=$1 AND id=$2',[staff.orgId,id,now()]);
     await c.query("INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,'conversation.attachment_approved',$4,$5)",[randomUUID(),staff.orgId,staff.id,id,JSON.stringify({attachmentId:asset,messageId,commandId:command.commandId,sha256:file.sha256})]);
@@ -106,6 +137,11 @@ export async function approveHumanAttachment(staff:Staff,id:string,body:Record<s
 }
 export async function guardHumanAttachment(c:Executor,command:Row){
   const row=(await c.query('SELECT * FROM human_attachments WHERE org_id=$1 AND outbound_command_id=$2',[command.org_id,command.id])).rows[0];if(!row)return;
+  const metadata=(await c.query("SELECT json_extract(metadata,'$.clarificationSourceMessageId') case_source FROM social_message_attachments WHERE org_id=$1 AND id=$2",[command.org_id,row.id])).rows[0];
+  if(metadata?.case_source){
+    await (await import('./bridge-commands')).bridgeMember(row.uploaded_by,true);
+    await assertPhotoCase(c,command.org_id,row.uploaded_by,row.conversation_id,metadata.case_source);
+  }
   requireEnabled();const conversation=(await c.query('SELECT customer_message_seq FROM conversations WHERE org_id=$1 AND id=$2',[command.org_id,command.conversation_id])).rows[0];
   if(row.status!=='approved'||row.uploaded_by!==command.approved_by||row.conversation_id!==command.conversation_id||row.conversation_version!==command.conversation_version||row.customer_seq!==conversation?.customer_message_seq||row.message_id!==command.message_id||row.provider!==command.provider||row.account_id!==command.account_id||command.body!=='[ไฟล์แนบ: '+row.filename+']')throw new ApiError(409,'การอนุมัติไฟล์แนบเปลี่ยน');
 }

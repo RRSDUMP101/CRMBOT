@@ -222,7 +222,7 @@ test('Thai customer question produces one English review acknowledgement and a s
     const events=await readBridgeEvents(f.org); assert.match(JSON.stringify(events),/sales_clarification/);
     const base={conversationId:f.conversation,actorId:f.member,clarificationSourceMessageId:source.id};
     await assert.rejects(handleBridgeCommand({...base,commandId:randomUUID(),action:'claim',clarificationSourceMessageId:randomUUID()}));
-    await handleBridgeCommand({...base,commandId:randomUUID(),action:'claim'});
+    const scopedClaim=await POST(await commandRequest({...base,commandId:randomUUID(),action:'claim'}));assert.equal(scopedClaim.status,200);
     await assert.rejects(handleBridgeCommand({...base,commandId:randomUUID(),action:'reply',text:'รับทราบครับ'}),{status:422});
     const reply={...base,commandId:randomUUID(),action:'reply',text:'We need the exact model to confirm the payload.'};
     await handleBridgeCommand(reply); await handleBridgeCommand(reply);

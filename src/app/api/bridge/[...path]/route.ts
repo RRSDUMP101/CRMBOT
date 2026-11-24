@@ -19,7 +19,11 @@ async function handle(request: Request) {
     const config = bridgeConfig();
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\/bridge\//, '');
-    const { body } = await verifyBridgeRequest(request, config, path === 'import' ? 8 * 1024 * 1024 : path==='approved-commands'?512_000:64_000);
+    const { body } = await verifyBridgeRequest(request, config, path === 'import' ? 8 * 1024 * 1024 : path==='approved-commands'?512_000:path==='staff-photos'?1_340_000:64_000);
+    if(path==='staff-photos'&&request.method==='POST'){
+      const input=objectBody(body,['action','actorId','conversationId','clarificationSourceMessageId','expectedVersion','clientId','mime','name','base64','attachmentId']);
+      return json(await (await import('@/lib/sale-staff-photos')).staffPhoto(input));
+    }
     if(path==='knowledge-source'&&request.method==='POST')return json(await (await import('@/lib/sales-learning')).learningEvidence(config.orgId,objectBody(body,['conversationId','messageId','excerpt'])));
     if(path==='knowledge-proposal'&&request.method==='POST')return json(await (await import('@/lib/sales-learning')).acceptLearningProposal(config.orgId,objectBody(body,['commandId','conversationId','messageId','excerpt','sourceHash','sourceVersion','summary','runId'])));
     if(path==='reviewed-templates'&&request.method==='GET'){
@@ -76,7 +80,7 @@ async function handle(request: Request) {
     }
     if (path === 'commands' && request.method === 'POST') {
       const { handleBridgeCommand } = await import('@/lib/bridge-commands');
-      return json(await handleBridgeCommand(objectBody(body, ['commandId', 'conversationId', 'actorId', 'action', 'text'])));
+      return json(await handleBridgeCommand(objectBody(body, ['commandId', 'conversationId', 'actorId', 'action', 'text','clarificationSourceMessageId'])));
     }
     if (path === 'import' && request.method === 'POST') {
       const { handleLegacyImport } = await import('@/lib/legacy-chat-import');
