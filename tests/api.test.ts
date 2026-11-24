@@ -388,9 +388,13 @@ describe("RRS real API acceptance (synthetic Demo data)", { concurrency: false }
     await admin.post("/api/admin/action", { action: "createMember", values: { name: `สมาชิกทดสอบ ${runId}`, email, password, role: "Agent" } });
     const member = (await admin.snapshot()).members.find((item: Json) => item.email === email);
     assert.ok(member?.id);
+    assert.equal(member.jobTitle, null);
     const temporary = new Client();
     await temporary.post("/api/auth/login", { email, password });
-    assert.equal((await temporary.snapshot()).user.role, "Agent");
+    await admin.post("/api/admin/action", { action: "updateMember", id: member.id, values: { jobTitle: "Export coordinator" } });
+    const profile = (await temporary.snapshot()).user;
+    assert.equal(profile.role, "Agent");
+    assert.equal(profile.jobTitle, "Export coordinator", "a role title edit reaches the signed-in member without revoking their session");
     denied((await agent.json("/api/admin/action", { body: { action: "updateMember", id: member.id, values: { role: "Admin" } } })).response.status, "Agent granting Admin");
     denied((await outsider.json("/api/admin/action", { body: { action: "updateMember", id: member.id, values: { active: false } } })).response.status, "cross-tenant member modification");
     await admin.post("/api/admin/action", { action: "revokeMemberSessions", id: member.id });

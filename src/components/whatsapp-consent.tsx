@@ -1,4 +1,5 @@
 "use client";
+import { uiText } from "./interface-text";
 import {useCallback,useEffect,useRef,useState} from 'react';
 import type {WhatsAppConsentStatus} from '@/lib/social-consent';
 import {api,date} from './data';
@@ -33,12 +34,12 @@ export function WhatsAppConsent({conversationId}:{conversationId:string}){
       {status.recordedAt&&<p className="helper-text">บันทึกหลักฐาน {date(status.recordedAt)}</p>}
       <p className="helper-text">บันทึกจากหลักฐานที่ตรวจสอบแล้ว การทักเข้ามาเพียงอย่างเดียวไม่ถือเป็นหลักฐานยินยอม การบันทึกนี้ไม่ส่งข้อความถึงลูกค้า</p>
       {status.lastReview&&<details><summary>หลักฐานที่ตรวจล่าสุด</summary><p style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{status.lastReview.evidenceNote}</p><small>{date(status.lastReview.recordedAt)}</small></details>}
-      {status.affectedConversations>1&&<p className="helper-text">ใช้กับบทสนทนา WhatsApp ของลูกค้ารายนี้ทั้ง {status.affectedConversations} บทสนทนา</p>}
+      {status.affectedConversations>1&&<p className="helper-text">ใช้กับบทสนทนา WhatsApp ของลูกค้ารายนี้ทั้ง {status.affectedConversations} {uiText("บทสนทนา")}</p>}
       {!!status.inFlight&&<p className="helper-text">มี {status.inFlight} ข้อความที่เริ่มส่งแล้วหรือยังไม่ทราบผล ต้องตรวจใบตอบรับ การถอนความยินยอมไม่ดึงข้อความที่ส่งถึงผู้ให้บริการกลับ</p>}
       <label className="field"><span>ผลการตรวจหลักฐาน</span><Select value={decision} disabled={busy} onChange={e=>{setDecision(e.target.value);setConfirmed(false);}}><option value="">เลือกรายการ</option><option value="granted" disabled={status.optedOut}>ลูกค้ายินยอมให้ติดต่อ</option><option value="revoked">ถอนความยินยอม / หยุดการติดต่อ</option></Select></label>
       <label className="field"><span>ที่มาและรายละเอียดหลักฐาน</span><Textarea value={note} disabled={busy} rows={3} maxLength={1000} placeholder="เช่น ลูกค้ายืนยันผ่านแบบฟอร์มใด วันเวลาใด และหมายเลขอ้างอิง" onChange={e=>{setNote(e.target.value);setConfirmed(false);}}/></label>
       <label className="field"><span><input type="checkbox" checked={confirmed} disabled={busy||loading||!decision||note.trim().length<3} onChange={e=>setConfirmed(e.target.checked)}/> ฉันตรวจหลักฐานแล้ว และยืนยันผลที่เลือก</span></label>
-      <Button size="sm" disabled={busy||loading||!decision||!confirmed||note.trim().length<3} onClick={()=>void save()}>{busy?'กำลังบันทึก…':'บันทึกผลตรวจหลักฐาน'}</Button>
+      <Button size="sm" disabled={busy||loading||!decision||!confirmed||note.trim().length<3} onClick={()=>void save()}>{busy?uiText("กำลังบันทึก…"):'บันทึกผลตรวจหลักฐาน'}</Button>
     </>}
     <Button variant="ghost" size="sm" disabled={busy} onClick={()=>void load()}>โหลดสถานะล่าสุด</Button>
   </section>;

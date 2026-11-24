@@ -81,3 +81,10 @@
  .crm-dock-bubble{bottom:calc(76px + env(safe-area-inset-bottom))}
  .rrs-workspace .workspace-brandline>div small{display:none}
 }
+
+.rrs-brand.rrs-company-lockup { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.rrs-company-lockup img { display: block; width: 112px; height: auto; }
+.rrs-company-lockup small { margin-left: 20px; color: #225077; font: 600 7px/1.5 Arial, sans-serif; letter-spacing: 1px; white-space: nowrap; }
+.rrs-company-lockup .rrs-logo-night, .login-story .rrs-logo-day, html[data-theme="dark"] .rrs-company-lockup .rrs-logo-day { display: none; }
+.login-story .rrs-logo-night, html[data-theme="dark"] .rrs-company-lockup .rrs-logo-night { display: block; }
+.login-story .rrs-company-lockup small, html[data-theme="dark"] .rrs-company-lockup small { color: #c6d5e7; }

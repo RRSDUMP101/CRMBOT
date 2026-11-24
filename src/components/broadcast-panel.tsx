@@ -1,4 +1,5 @@
 "use client";
+import { uiText } from "./interface-text";
 import {DataView} from './data-view';
 import { FeatureHeading, FeatureSteps } from "./specialist-workspace";
 import {useCallback,useEffect,useRef,useState} from 'react';
@@ -40,22 +41,22 @@ export function BroadcastPanel({isAdmin}:{isAdmin:boolean}){
     try{const created=await api<Detail>('/api/admin/broadcasts',{name,provider,accountId,messageText:''});setName('');await load();setSelected(created.campaign.id);}
     catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
-  return <div className="rrs-specialist"><FeatureHeading eyebrow="CAMPAIGNS" title="แคมเปญข้อความ" description="เตรียมผู้รับและเนื้อหา ตรวจความยินยอม แล้วอนุมัติการส่งแต่ละฉบับ"/><FeatureSteps steps={["กลุ่มเป้าหมาย","เนื้อหา","ตรวจสอบและทดสอบ","อนุมัติและกำหนดเวลา"]}/>
+  return <div className="rrs-specialist"><FeatureHeading eyebrow="CAMPAIGNS" title={uiText("แคมเปญข้อความ")} description="เตรียมผู้รับและเนื้อหา ตรวจความยินยอม แล้วอนุมัติการส่งแต่ละฉบับ"/><FeatureSteps steps={["กลุ่มเป้าหมาย","เนื้อหา","ตรวจสอบและทดสอบ","อนุมัติและกำหนดเวลา"]}/>
     {error&&<div className="alert alert-error" role="alert">{error}</div>}
     {list&&<GateWarnings gates={list.gates}/>}
     {isAdmin&&<Card><div className="card-heading"><div><h2>สร้างแคมเปญบรอดแคสต์</h2><p>ส่งได้เฉพาะลูกค้าที่มีหลักฐานยินยอม (WhatsApp) หรือเป็นเพื่อนอยู่ (LINE) ไม่สร้างรายชื่อหรือความยินยอมใหม่</p></div><Megaphone size={20}/></div>
       <div className="form-grid" style={{padding:'0 24px 20px'}}><Field label="ชื่อแคมเปญ"><Input value={name} maxLength={120} onChange={e=>setName(e.target.value)} placeholder="เช่น แจ้งสินค้าใหม่ ตุลาคม"/></Field>
-        <Field label="ช่องทาง"><Select value={provider} onChange={e=>{setProvider(e.target.value as Provider);setAccountId('');}}><option value="whatsapp">WhatsApp</option><option value="line">LINE OA</option></Select></Field>
+        <Field label={uiText("ช่องทาง")}><Select value={provider} onChange={e=>{setProvider(e.target.value as Provider);setAccountId('');}}><option value="whatsapp">WhatsApp</option><option value="line">LINE OA</option></Select></Field>
         <Field label="บัญชีที่จะส่ง"><Select value={accountId} onChange={e=>setAccountId(e.target.value)}><option value="">เลือกบัญชี</option>{list?.gates.accounts?.filter(a=>a.provider===provider).map(a=><option key={a.accountId} value={a.accountId}>{a.displayName}</option>)}</Select></Field>
         <div className="button-row"><Button disabled={busy||!name.trim()||!accountId} onClick={()=>void create()}><Plus size={15}/>สร้างฉบับร่าง</Button></div></div></Card>}
     {!isAdmin&&<p className="helper-text">ผู้ดูแลระบบเป็นผู้สร้างและอนุมัติการส่งบรอดแคสต์ คุณดูรายการและสถานะได้อย่างเดียว</p>}
-    <Card><div className="card-heading"><div><h2>แคมเปญ</h2><p>ล่าสุด 100 รายการ</p></div><Button variant="ghost" size="sm" onClick={()=>void load()}><RefreshCw size={14}/>รีเฟรช</Button></div>
-      {!list?<p className="helper-text" style={{padding:'0 24px'}}>กำลังโหลด…</p>:!list.campaigns.length?<Empty title="ยังไม่มีแคมเปญ"/>:
-      <div className="table-wrap"><DataView><table><thead><tr><th>แคมเปญ</th><th>ช่องทาง</th><th>สถานะ</th><th>ผู้รับ</th><th>อัปเดต</th><th/></tr></thead><tbody>{list.campaigns.map(c=><tr key={c.id}>
-        <td><strong>{c.name}</strong><small>{c.messageKind==='template'?'เทมเพลต':'ข้อความ'}{c.scheduledAt?' · ตั้งเวลา '+date(c.scheduledAt):''}</small></td><td>{providerNames[c.provider]}</td>
+    <Card><div className="card-heading"><div><h2>{uiText("แคมเปญ")}</h2><p>ล่าสุด 100 รายการ</p></div><Button variant="ghost" size="sm" onClick={()=>void load()}><RefreshCw size={14}/>{uiText("รีเฟรช")}</Button></div>
+      {!list?<p className="helper-text" style={{padding:'0 24px'}}>{uiText("กำลังโหลด…")}</p>:!list.campaigns.length?<Empty title="ยังไม่มีแคมเปญ"/>:
+      <div className="table-wrap"><DataView><table><thead><tr><th>{uiText("แคมเปญ")}</th><th>{uiText("ช่องทาง")}</th><th>{uiText("สถานะ")}</th><th>ผู้รับ</th><th>อัปเดต</th><th/></tr></thead><tbody>{list.campaigns.map(c=><tr key={c.id}>
+        <td><strong>{c.name}</strong><small>{c.messageKind==='template'?uiText("เทมเพลต"):uiText("ข้อความ")}{c.scheduledAt?' · ตั้งเวลา '+date(c.scheduledAt):''}</small></td><td>{providerNames[c.provider]}</td>
         <td><Badge tone={statusTone[c.status]}>{label(statusNames,c.status)}</Badge></td>
         <td>{c.launchedCount??'—'}{c.recipients.submitted?` · ส่งแล้ว ${c.recipients.submitted}`:''}</td><td>{date(c.updatedAt)}</td>
-        <td><Button variant="ghost" size="sm" onClick={()=>setSelected(selected===c.id?null:c.id)}>{selected===c.id?'ปิด':'เปิด'}</Button></td></tr>)}</tbody></table></DataView></div>}
+        <td><Button variant="ghost" size="sm" onClick={()=>setSelected(selected===c.id?null:c.id)}>{selected===c.id?uiText("ปิด"):uiText("เปิด")}</Button></td></tr>)}</tbody></table></DataView></div>}
     </Card>
     {selected&&<CampaignDetail key={selected} id={selected} isAdmin={isAdmin} onChanged={load}/>}
   </div>;
@@ -116,7 +117,7 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
     <div className="card-heading"><div><h2>{c.name}</h2><p>{providerNames[c.provider]} · บัญชี {c.accountId} · ฉบับที่ {c.version}</p></div><Badge tone={statusTone[c.status]}>{label(statusNames,c.status)}</Badge></div>
     <div className="form-stack">
       {error&&<p role="alert" className="error-text">{error}</p>}{notice&&<p role="status">{notice}</p>}
-      {c.asset&&<section aria-label="ไฟล์แนบแคมเปญ"><h3>ไฟล์แนบ</h3><a href={`/api/admin/broadcasts/${id}/assets/${c.asset.id}`} target="_blank" rel="noreferrer">{c.asset.name}</a> · {Math.ceil(c.asset.size/1024)} KB
+      {c.asset&&<section aria-label="ไฟล์แนบแคมเปญ"><h3>{uiText("ไฟล์แนบ")}</h3><a href={`/api/admin/broadcasts/${id}/assets/${c.asset.id}`} target="_blank" rel="noreferrer">{c.asset.name}</a> · {Math.ceil(c.asset.size/1024)} KB
         {manage&&draft&&<Button variant="ghost" disabled={busy} onClick={()=>void act(()=>{setPreview(null);return api(`/api/admin/broadcasts/${id}/remove-asset`,{expectedVersion:c.version});},()=> 'นำไฟล์แนบออกแล้ว กรุณาทดสอบฉบับใหม่')}>นำไฟล์ออก</Button>}</section>}
       {c.status!=='draft'&&<section aria-label="สถานะการส่ง"><h3>สถานะการส่ง</h3>
         <p className="helper-text">ยืนยันส่ง {c.launchedCount??0} ราย{c.launchedAt?' · '+date(c.launchedAt):''}{c.scheduledAt?' · กำหนดส่ง '+date(c.scheduledAt):''}{c.completedAt?' · ส่งครบ '+date(c.completedAt):''}</p>
@@ -124,7 +125,7 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
         {Object.keys(detail.stats.skipReasons).length>0&&<><strong>เหตุผลที่ข้าม</strong><ul>{counts(detail.stats.skipReasons,reasonNames)}</ul></>}
         {Object.keys(detail.stats.delivery).length>0&&<p className="helper-text">สถานะจากผู้ให้บริการ: {Object.entries(detail.stats.delivery).map(([k,n])=>`${k} ${n}`).join(' · ')} — ยืนยันการส่งถึงได้จากใบตอบรับของผู้ให้บริการเท่านั้น</p>}
       </section>}
-      {manage&&draft&&<section aria-label="แก้ไขฉบับร่าง"><h3>ข้อความ</h3>
+      {manage&&draft&&<section aria-label="แก้ไขฉบับร่าง"><h3>{uiText("ข้อความ")}</h3>
         <Field label="ชื่อแคมเปญ"><Input value={form.name} maxLength={120} disabled={busy} onChange={e=>setForm({...form,name:e.target.value})}/></Field>
         {c.provider==='whatsapp'&&<Field label="รูปแบบ" hint="นอกช่วง 24 ชม. หลังข้อความล่าสุดของลูกค้า WhatsApp อนุญาตเฉพาะเทมเพลตที่อนุมัติแล้ว"><Select value={form.kind} disabled={busy} onChange={e=>setForm({...form,kind:e.target.value as 'text'|'template'})}><option value="text">ข้อความ (เฉพาะลูกค้าที่ทักมาภายใน 24 ชม.)</option><option value="template">เทมเพลตที่อนุมัติแล้ว</option></Select></Field>}
         {form.kind==='template'&&c.provider==='whatsapp'?<div className="form-grid"><Field label="ชื่อเทมเพลต"><Input value={form.templateName} disabled={busy} onChange={e=>setForm({...form,templateName:e.target.value})} placeholder="เช่น promo_october"/></Field><Field label="ภาษา"><Input value={form.templateLanguage} disabled={busy} onChange={e=>setForm({...form,templateLanguage:e.target.value})} placeholder="th หรือ en_US"/></Field>
@@ -137,10 +138,10 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
         </Field>}
         <h3>กลุ่มเป้าหมาย</h3>
         <Field label="แท็กลูกค้า (คั่นด้วยจุลภาค ตรงกับแท็กใดก็ได้)"><Input value={form.tags} disabled={busy} onChange={e=>setForm({...form,tags:e.target.value})}/></Field>
-        <div className="form-grid"><fieldset><legend>ตลาด</legend>{Object.entries(markets).map(([k,v])=><label key={k} style={{marginRight:12}}><input type="checkbox" checked={form.markets.includes(k)} disabled={busy} onChange={()=>toggle('markets',k)}/> {v}</label>)}</fieldset>
+        <div className="form-grid"><fieldset><legend>{uiText("ตลาด")}</legend>{Object.entries(markets).map(([k,v])=><label key={k} style={{marginRight:12}}><input type="checkbox" checked={form.markets.includes(k)} disabled={busy} onChange={()=>toggle('markets',k)}/> {v}</label>)}</fieldset>
           <fieldset><legend>สถานะลูกค้า</legend>{Object.entries(stageNames).map(([k,v])=><label key={k} style={{marginRight:12}}><input type="checkbox" checked={form.stages.includes(k)} disabled={busy} onChange={()=>toggle('stages',k)}/> {v}</label>)}</fieldset></div>
-        <div className="form-grid"><Field label="ติดต่อครั้งแรก ตั้งแต่"><Input type="date" value={form.firstFrom} disabled={busy} onChange={e=>setForm({...form,firstFrom:e.target.value})}/></Field><Field label="ถึง"><Input type="date" value={form.firstTo} disabled={busy} onChange={e=>setForm({...form,firstTo:e.target.value})}/></Field>
-          <Field label="ลูกค้าทักล่าสุด ตั้งแต่"><Input type="date" value={form.lastFrom} disabled={busy} onChange={e=>setForm({...form,lastFrom:e.target.value})}/></Field><Field label="ถึง"><Input type="date" value={form.lastTo} disabled={busy} onChange={e=>setForm({...form,lastTo:e.target.value})}/></Field></div>
+        <div className="form-grid"><Field label="ติดต่อครั้งแรก ตั้งแต่"><Input type="date" value={form.firstFrom} disabled={busy} onChange={e=>setForm({...form,firstFrom:e.target.value})}/></Field><Field label={uiText("ถึง")}><Input type="date" value={form.firstTo} disabled={busy} onChange={e=>setForm({...form,firstTo:e.target.value})}/></Field>
+          <Field label="ลูกค้าทักล่าสุด ตั้งแต่"><Input type="date" value={form.lastFrom} disabled={busy} onChange={e=>setForm({...form,lastFrom:e.target.value})}/></Field><Field label={uiText("ถึง")}><Input type="date" value={form.lastTo} disabled={busy} onChange={e=>setForm({...form,lastTo:e.target.value})}/></Field></div>
         {form.importId&&<p className="helper-text">จำกัดเฉพาะรายชื่อที่นำเข้า (ตรงกับลูกค้าที่มีอยู่แล้วเท่านั้น) <Button variant="ghost" size="sm" disabled={busy} onClick={()=>void save({importId:''})}>เลิกใช้รายชื่อนำเข้า</Button></p>}
         <div className="button-row"><Button disabled={busy} onClick={()=>void save()}>บันทึกฉบับร่าง</Button></div>
       </section>}
@@ -159,7 +160,7 @@ function CampaignDetail({id,isAdmin,onChanged}:{id:string;isAdmin:boolean;onChan
         <div className="form-grid"><Field label="ไฟล์ CSV (UTF-8, คั่นด้วยจุลภาค)"><Input type="file" accept=".csv,text/csv" disabled={busy} onChange={async e=>{const file=e.target.files?.[0];setImported(null);setCsv(file?{name:file.name,text:await file.text()}:null);}}/></Field>
           <Field label="คอลัมน์ผู้รับ (ชื่อหัวตาราง)" hint={c.provider==='whatsapp'?'เบอร์พร้อมรหัสประเทศ เช่น +66812345678':'LINE user ID (U + 32 ตัวอักษร)'}><Input value={column} disabled={busy} onChange={e=>setColumn(e.target.value)}/></Field></div>
         <Button variant="secondary" disabled={busy||!csv} onClick={()=>void act(()=>api<ImportResult>(`/api/admin/broadcasts/${id}/import`,{csv:csv!.text,column}),value=>{setImported(value);})}>ตรวจไฟล์แบบทดลอง</Button>
-        {imported&&<div><p>ทั้งหมด {imported.totalRows} แถว · ถูกต้อง {imported.valid} · ไม่ถูกต้อง {imported.invalid} · ซ้ำ {imported.duplicates} · ตรงกับลูกค้าที่มีอยู่ {imported.matched} (ส่งได้ {imported.matchedEligible}) · ไม่พบในระบบ {imported.unmatched} · สร้างผู้รับ {imported.recipientsCreated}</p>
+        {imported&&<div><p>{uiText("ทั้งหมด")} {imported.totalRows} แถว · ถูกต้อง {imported.valid} · ไม่ถูกต้อง {imported.invalid} · ซ้ำ {imported.duplicates} · ตรงกับลูกค้าที่มีอยู่ {imported.matched} (ส่งได้ {imported.matchedEligible}) · ไม่พบในระบบ {imported.unmatched} · สร้างผู้รับ {imported.recipientsCreated}</p>
           {Object.keys(imported.invalidReasons).length>0&&<ul>{counts(imported.invalidReasons,importErrors)}</ul>}
           {Object.keys(imported.excluded).length>0&&<><strong>ตรงกับลูกค้าแต่ไม่ผ่านเงื่อนไข</strong><ul>{counts(imported.excluded,reasonNames)}</ul></>}
           <details><summary>ตัวอย่าง 20 แถวแรก</summary><ul>{imported.samples.map(s=><li key={s.row}>แถว {s.row}: {s.recipient||'—'} · {s.error?label(importErrors,s.error):s.match==='eligible'?'ส่งได้':s.match==='excluded'?label(reasonNames,s.reason):'ไม่พบในระบบ'}</li>)}</ul></details>

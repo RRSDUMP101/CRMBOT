@@ -19,3 +19,8 @@
 @media(min-width:1500px){.content{padding:30px 36px}.inbox{grid-template-columns:360px minmax(0,1fr)}}
 @media(max-width:1100px){.rail{width:198px;padding-inline:9px}.content{padding:20px}.header{padding:22px}.management{grid-template-columns:220px minmax(0,1fr)}.inbox{grid-template-columns:270px minmax(0,1fr)}}
 @media(max-width:800px){.page{display:block;padding:0}.rail{position:relative;width:auto;height:auto;padding:14px 12px 8px}.page .brand{padding:0 6px 12px}.brand strong{font-size:32px}.brand i{height:38px}.page .back{position:absolute;right:14px;top:12px;border:0}.navLabel,.identity{display:none}.tabs{display:flex;flex-wrap:nowrap;overflow-x:auto;margin:0;padding:2px 0 4px}.tabs button{white-space:nowrap;flex-shrink:0;font-size:13px;padding:10px}.header{padding:19px;display:flex;align-items:start;gap:12px;min-height:0}.header h1{font-size:23px}.header p{font-size:12px}.header button{font-size:12px}.content{padding:14px}.inbox,.management{grid-template-columns:1fr}.two{grid-template-columns:1fr}.conversationList{max-height:310px}.timeline{max-height:430px;padding:12px}.skip{left:10px}}
+
+.brand :global(.rrs-logo-day){display:none}
+.brand :global(.rrs-logo-night){display:block}
+:global(html[data-theme=dark]) .page{background:#101b2a;color:#edf3ff}
+:global(html[data-theme=dark]) .page :is(.content,.section,.timeline,.memberCard,.hours,.fieldCard,.conversationList){background:#1b2b40;color:#e2edfd;border-color:#435772}

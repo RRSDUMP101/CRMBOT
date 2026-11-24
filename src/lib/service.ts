@@ -17,7 +17,7 @@ import { aiRuntimeContext } from './ai-lifecycle';
 
 const settingsDefaults = {botName:'RRS ผู้ช่วย AI',personality:'สุภาพ กระชับ ถามครั้งละหนึ่งเรื่อง',businessHours:'ทีมงานจะยืนยันเวลาติดต่อกลับ',handoffRule:'ราคา สต็อก ส่วนลด และนัดหมายให้ทีมงานยืนยัน',aiEnabled:true};
 const rows = (items: Row[]) => items.map(camel);
-const publicMember = (staff: Staff) => ({id:staff.id,name:staff.name,email:staff.email,role:staff.role});
+const publicMember = (staff: Staff) => ({id:staff.id,name:staff.name,email:staff.email,role:staff.role,jobTitle:staff.jobTitle || null});
 export {publicMember};
 
 async function audit(executor: Executor, orgId: string, actorId: string, action: string, entityId: string, metadata:Row={}) {
@@ -267,14 +267,14 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       await connection.query('UPDATE organizations SET settings=$2 WHERE id=$1',[staff.orgId,JSON.stringify(settings)]);
       if(settings.aiEnabled===false)await connection.query("UPDATE conversations SET version=version+1,generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND status='bot_active'",[staff.orgId]);
     } else if(action==='createMember') {
-      fields(values,['name','email','role','password']);entityId=randomUUID();
+      fields(values,['name','email','role','password','jobTitle']);entityId=randomUUID();
       const email=str(values.email,'อีเมล',254,true).toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');
       const password=str(values.password,'รหัสผ่าน',200,true);if(password.length<12)throw new ApiError(400,'รหัสผ่านต้องยาวอย่างน้อย 12 ตัวอักษร');
       const exists=await connection.query('SELECT id FROM members WHERE email=$1',[email]);if(exists.rows.length)throw new ApiError(409,'ไม่สามารถใช้อีเมลนี้ได้');
-      await connection.query('INSERT INTO members(id,org_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5,$6)',[entityId,staff.orgId,str(values.name,'ชื่อ',120,true),email,await hashPassword(password),oneOf(values.role,['Admin','Agent'],'บทบาท')]);
+      await connection.query('INSERT INTO members(id,org_id,name,email,password_hash,role,job_title) VALUES($1,$2,$3,$4,$5,$6,$7)',[entityId,staff.orgId,str(values.name,'ชื่อ',120,true),email,await hashPassword(password),oneOf(values.role,['Admin','Agent'],'บทบาท'),str(values.jobTitle ?? '', 'ตำแหน่ง', 120) || null]);
     } else if(action==='updateMember'||action==='revokeMemberSessions') {
       entityId=uuid(body.id);
-      fields(values,action==='revokeMemberSessions'?[]:['name','role','active','password']);
+      fields(values,action==='revokeMemberSessions'?[]:['name','role','active','password','jobTitle']);
       // Serialize administration per organization, including concurrent attempts to remove its final administrator.
       await connection.query("SELECT id FROM organizations WHERE id=$1",[staff.orgId]);
       const old=(await connection.query("SELECT * FROM members WHERE org_id=$1 AND id=$2",[staff.orgId,entityId])).rows[0];
@@ -290,10 +290,10 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
         }
         let passwordHash=old.password_hash;
         if(values.password!==undefined) {const password=str(values.password,'รหัสผ่าน',200,true);if(password.length<12)throw new ApiError(400,'รหัสผ่านต้องยาวอย่างน้อย 12 ตัวอักษร');passwordHash=await hashPassword(password);}
-        await connection.query('UPDATE members SET name=$3,role=$4,active=$5,password_hash=$6 WHERE org_id=$1 AND id=$2',[staff.orgId,entityId,name,role,active,passwordHash]);
+        await connection.query('UPDATE members SET name=$3,role=$4,active=$5,password_hash=$6,job_title=$7 WHERE org_id=$1 AND id=$2',[staff.orgId,entityId,name,role,active,passwordHash,values.jobTitle===undefined?old.job_title:(str(values.jobTitle,'ตำแหน่ง',120)||null)]);
         metadata={...metadata,previousRole:old.role,nextRole:role,previousActive:old.active,nextActive:active};
       }
-      await connection.query('DELETE FROM staff_sessions WHERE org_id=$1 AND member_id=$2',[staff.orgId,entityId]);
+      if(action==='revokeMemberSessions'||Object.keys(values).some(key=>key!=='jobTitle')) await connection.query('DELETE FROM staff_sessions WHERE org_id=$1 AND member_id=$2',[staff.orgId,entityId]);
     }
     await audit(connection,staff.orgId,staff.id,action+detail,entityId,metadata);
   }, staff);
@@ -316,7 +316,7 @@ export async function snapshot(staff:Staff,url:URL) {
     database.query('SELECT * FROM leads WHERE org_id=$1 ORDER BY updated_at DESC LIMIT 2000',[staff.orgId]),
     database.query('SELECT * FROM tasks WHERE org_id=$1 ORDER BY due_at LIMIT 2000',[staff.orgId]),
     database.query("SELECT k.* FROM knowledge k WHERE k.org_id=$1 AND ($2=1 OR NOT EXISTS(SELECT 1 FROM sales_knowledge_scope s WHERE s.org_id=k.org_id AND s.source_id=k.id AND s.version=k.version AND json_extract(s.applicability,'$.conversationId') IS NOT NULL)) ORDER BY updated_at DESC",[staff.orgId,staff.role==='Admin'?1:0]),
-    database.query('SELECT id,name,email,role,active FROM members WHERE org_id=$1 ORDER BY name',[staff.orgId]),
+    database.query('SELECT id,name,email,role,job_title,active FROM members WHERE org_id=$1 ORDER BY name',[staff.orgId]),
     database.query('SELECT id,actor_id,action,entity_id,metadata,created_at FROM audit_events WHERE org_id=$1 ORDER BY created_at DESC LIMIT 100',[staff.orgId]),
     database.query("SELECT count(*) AS total,count(*) FILTER(WHERE handoff_at IS NOT NULL) AS handed_off,avg((julianday(first_ai_at)-julianday(first_customer_at))*86400000) FILTER(WHERE first_ai_at IS NOT NULL) AS ai_ms,avg((julianday(first_agent_at)-julianday(handoff_at))*86400000) FILTER(WHERE first_agent_at>=handoff_at) AS human_ms FROM conversations WHERE org_id=$1 AND created_at >= $2 AND created_at < $3",p),
     database.query("SELECT stage,count(*) AS total FROM leads WHERE org_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY stage",p),

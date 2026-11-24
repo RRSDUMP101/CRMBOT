@@ -1,0 +1,47 @@
+.account-controls { position:relative; display:flex; gap:6px; align-items:center; margin-left:auto; flex:none; --menu-bg:#fff; --menu-ink:#172e46; --menu-muted:#51677d; --menu-rule:#ccd8e4; --menu-accent:#165cbb; --menu-active:#eff6ff; }
+.account-controls button { cursor:pointer; color:inherit; }
+.account-trigger,.pref-trigger,.account-close { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:1px solid var(--menu-rule); border-radius:10px; background:var(--menu-bg); color:var(--menu-ink)!important; }
+.account-trigger { gap:7px; padding:4px 7px; } .pref-trigger { width:40px; }
+.account-controls button[aria-expanded=true],.account-controls button[aria-pressed=true] { border-color:var(--menu-accent); background:var(--menu-active); color:var(--menu-accent)!important; }
+.account-avatar { display:inline-grid; place-items:center; width:29px; height:29px; flex:none; border-radius:50%; background:#1956aa; color:#fff; font-size:13px; font-weight:700; }
+.account-popover { position:absolute; right:0; top:calc(100% + 9px); width:min(300px,calc(100vw - 24px)); max-height:calc(100dvh - 76px); overflow:auto; z-index:95; padding:16px; border-radius:14px; border:1px solid var(--menu-rule); background:var(--menu-bg); color:var(--menu-ink); box-shadow:0 12px 36px #0a28492b; }
+.account-popover header { display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--menu-rule); padding-bottom:9px; }
+.account-popover h2,.account-popover h3,.employee-summary p { margin:0; color:inherit; }
+.account-close { border:0; min-height:32px; width:32px; }
+.employee-summary { display:flex; gap:12px; align-items:center; padding-top:16px; overflow-wrap:anywhere; } .employee-summary .account-avatar { width:44px;height:44px;font-size:17px; }
+.employee-summary strong { font-size:17px; } .employee-summary p,.pref-group h3,.theme-options button>span:last-child,.language-options button { display:flex; align-items:center; gap:7px; }
+.employee-summary p,.employee-summary small { color:var(--menu-muted); }
+.pref-group { margin-top:14px; } .pref-group h3 { font-size:14px; margin-bottom:8px; }
+.theme-options,.language-options { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.pref-group button { border:1px solid var(--menu-rule); background:var(--menu-bg); color:var(--menu-ink); border-radius:8px; padding:8px; text-align:left; }
+.pref-group button svg:last-child:not(:first-child) { margin-left:auto; }
+.theme-preview { display:grid; grid-template:7px 1fr / 22% 1fr 1fr; height:38px; padding:4px; gap:3px; border-radius:4px; margin-bottom:7px; border:1px solid #b7c9dd; background:#eef4fc; }
+.theme-preview i {grid-column:1/-1;background:#afc9ed;} .theme-preview b {background:#8dadde;} .theme-preview em {grid-column:2/-1;background:#ccdbee;}
+.preview-dark {background:#18283e;border-color:#425675}.preview-dark i{background:#41536c}.preview-dark b{background:#536982}.preview-dark em{background:#2d4158}
+.rrs-workspace .workspace-topbar { z-index:66; position:relative; }
+.rrs-workspace .workspace-brandline {min-width:0} .rrs-workspace .workspace-brandline strong {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+@media(max-width:600px){.rrs-workspace .workspace-search {flex:1; min-width:45px;width:auto}.rrs-workspace .workspace-brandline>div{max-width:95px}.account-controls {gap:3px}.account-trigger{padding:3px}.rrs-workspace .workspace-topbar {gap:6px}}
+html[data-theme=dark] { color-scheme:dark; --paper:#101b2a; --ink:#e8f0fc; --muted:#b2c4da; --line:#3d5068; --pale:#1c3740; }
+html[data-theme=dark] .rrs-workspace {--rrs-bg:#101b2a;--rrs-ink:#e8f0fc;--rrs-muted:#b2c4da;--rrs-line:#3d5068;--desk-rule:#38495f;--desk-tint:#1c2b40;--rrs-blue:#6baaff;color:#e5edf8;background:#101b2a;}
+html[data-theme=dark] .account-controls {--menu-bg:#1c2b40;--menu-ink:#edf3ff;--menu-rule:#425570;--menu-muted:#b6c6d9;--menu-accent:#9ac7ff;--menu-active:#233e60; }
+html[data-theme=dark] .rrs-workspace :is(.app-rail,.workspace-topbar,.workspace-body,.main-content,.card,.desk-inbox,.desk-list-pane,.desk-chat-pane,.desk-profile-pane,.desk-view-menu,.desk-list-header,.desk-queues,.desk-result-count,.desk-conversations,.desk-conversation,.desk-thread-header,.desk-composer,.desk-history-date,.mobile-bottom-nav,.desk-recent-room,.crm-room-dock,.crm-lead-row,.lead-card,.modal,.desk-today,.priority-card,.desk-today button,table,th,td,.desk-pinned,.desk-filters,.workspace-search,.input,.select,.textarea,.button-secondary) {background-color:#19283b;color:#e0ebfa;border-color:#374b63}
+html[data-theme=dark] .rrs-workspace :is(.main-content,.desk-message-history,.desk-conversation:hover,.workspace-body,.desk-filters,.workspace-footer) {background-color:#101c2c}
+html[data-theme=dark] .rrs-workspace :is(.app-rail .rail-item,.rail-sale-link,.rail-operator-links a,.rail-account button,.rail-account strong,.workspace-brandline strong,.workspace-refresh,.desk-view-menu button,.desk-queues button,.desk-conversation strong,.desk-view-menu h2,.desk-list-header h1,.page-heading h1,.card h2,.card h3,.desk-profile-pane h2,.desk-thread-header h2,.desk-thread-header h1,.desk-history-date,.mobile-menu,.desk-profile-pane strong){color:#e0ebfa}
+html[data-theme=dark] .rrs-workspace :is(.rail-group-label,.rail-item svg,.workspace-brandline small,.rail-account small,.desk-conversation-preview,.card-heading p,.desk-conversation small,.activity-row small,.field small,.muted,.helper-text){color:#b2c5dd}
+html[data-theme=dark] .rrs-workspace :is(.rail-item.active,.desk-conversation.active,.desk-conversation[aria-current=true],.desk-queues button[aria-pressed=true],.desk-view-menu button[aria-pressed=true]){background:#25476b;color:#cbe6ff}
+html[data-theme=dark] .rrs-workspace .desk-message-history {background-image:radial-gradient(#304157 1px,transparent 1px);background-size:16px 16px}
+
+html[data-theme=dark] { --text:#edf4ff; --background:#101c2b; --surface:#1c2c40; --border:#40516b; --primary-soft:#243e5c; }
+html[data-theme=dark] .rrs-workspace :is(.stat-number,.stat-top,.stat-card>small,.filter-row,.filter-row label,.response-metric strong,.activity-row strong,.pipeline-chart-row,.pipeline-chart-row b,.rrs-view-toolbar,.task-main strong,.desk-start h2,.desk-chat-identity h2,.desk-profile-content h3,.desk-conversation.unread .desk-conversation-top strong,.table-wrap th,.table-wrap td,.lead-card strong,.rrs-feature-heading h2,.desk-chat-actions) { color:#e4efff; }
+html[data-theme=dark] .rrs-workspace :is(.metric-help,.response-metric,.activity-row small,.stat-card>small,.empty p,.desk-start p,.profile-empty p,.desk-chat-identity span,.desk-recent-room small,.desk-conversation.unread .desk-conversation-preview,.desk-conversation time,.rrs-feature-heading p,.rrs-feature-tabs button,.task-main p,.lead-card p) { color:#bacbe0; }
+html[data-theme=dark] .rrs-workspace :is(.desk-start,.desk-search,.desk-chat-header,.desk-chat-actions,.desk-profile-content,.profile-empty,.usage-box,.definitions,.bar-track,.card-link,.rrs-view-toolbar,.rrs-view-toolbar button,.rrs-view-toolbar select,.rrs-view-toolbar summary,.rrs-column-options,.rrs-data-view.is-expanded,.inbox-columns>div,.desk-advanced-filters,.table-wrap th,.rrs-feature-heading,.rrs-feature-tabs,.desk-composer.is-note,.template-picker,.desk-loading) { background:#1c2d42; color:#e0edff; border-color:#405473; }
+html[data-theme=dark] .rrs-workspace :is(.desk-ownership-status,.desk-conversation.selected,.desk-conversation.selected:hover,.desk-start>span,.usage-box strong,.card-link:hover){background:#243f56;color:#d0ebff;box-shadow:none}
+html[data-theme=dark] .rrs-workspace .desk-message-history .message-bubble {background:#25394a;border-color:#40556b;color:#e7f3ff}
+html[data-theme=dark] .rrs-workspace .desk-message-history :is(.message-agent,.message-assistant) .message-bubble {background:#174f59;color:#f0ffff}
+html[data-theme=dark] .rrs-workspace .desk-message-history .message-note .message-bubble {background:#4d3e21;color:#fff1cd}
+html[data-theme=dark] .rrs-workspace .desk-message-history :is(.message-label,.message-label>span,.message-label .desk-model,.desk-model span,.message-label time) {color:#c3d6e8}
+html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(1){background:#493d26;color:#ffe6af}
+html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(2){background:#214139;color:#b5ebd8}
+html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(3){background:#39314f;color:#e4d6ff}
+html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(4){background:#213b55;color:#cbe3ff}
+html[data-theme=dark] .rrs-workspace .rail-item.active svg {color:#b5d9ff}

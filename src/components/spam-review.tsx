@@ -1,4 +1,5 @@
 'use client';
+import { uiText } from "./interface-text";
 import {useCallback,useEffect,useState} from 'react';
 import {api,date} from './data';
 import {Button,Card,Input,Select} from './ui';
@@ -37,7 +38,7 @@ export function SpamReview() {
         <label>ภายในกี่วินาที <Input type="number" min={10} max={3600} value={windowSeconds} onChange={e=>setWindowSeconds(Number(e.target.value))}/></label>
         <Button disabled={busy} onClick={()=>void save({mode,repeatLimit:limit,windowSeconds,expectedRevision:data.policy.revision})}>บันทึกเกณฑ์</Button>
       </details></Card>}
-    <label>สถานะ <Select value={filter} onChange={e=>{setCursor('');setFilter(e.target.value);}}>{Object.entries(filters).map(([value,label])=><option key={value} value={value}>{label}</option>)}</Select></label>
+    <label>{uiText("สถานะ")} <Select value={filter} onChange={e=>{setCursor('');setFilter(e.target.value);}}>{Object.entries(filters).map(([value,label])=><option key={value} value={value}>{label}</option>)}</Select></label>
     {!data&&!error&&<p role="status">กำลังโหลดคิว…</p>}
     {data&&!data.items.length&&<p>ไม่มีข้อความในสถานะนี้</p>}
     {data?.items.map(row=><Card key={row.message_id}><h4>{row.lead_name} · {date(new Date(row.received_ms).toISOString())}</h4>

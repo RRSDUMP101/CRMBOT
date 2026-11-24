@@ -5,7 +5,7 @@ import { database, demoMode, type Executor } from './db';
 
 import { ApiError } from './errors';
 export { ApiError };
-export type Staff = { id: string; orgId: string; name: string; email: string; role: 'Admin'|'Agent' };
+export type Staff = { id: string; orgId: string; name: string; email: string; jobTitle?: string | null; role: 'Admin'|'Agent' };
 export type Visitor = { orgId: string; conversationId: string };
 export const STAFF_COOKIE = 'rrs_staff';
 export const VISITOR_COOKIE = 'rrs_visitor';
@@ -35,8 +35,8 @@ export function assertOrigin(request: Request) {
 export async function staffSession(request: Request, required = true): Promise<Staff|null> {
   const token = cookieValue(request, STAFF_COOKIE);
   if (token) {
-    const result = await database.query("SELECT m.id,m.org_id,m.name,m.email,m.role FROM staff_sessions s JOIN members m ON m.org_id=s.org_id AND m.id=s.member_id WHERE s.token_hash=$1 AND s.expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') AND m.active=true", [hashToken(token)]);
-    if (result.rows[0]) { const row=result.rows[0]; return {id:row.id,orgId:row.org_id,name:row.name,email:row.email,role:row.role}; }
+    const result = await database.query("SELECT m.id,m.org_id,m.name,m.email,m.role,m.job_title FROM staff_sessions s JOIN members m ON m.org_id=s.org_id AND m.id=s.member_id WHERE s.token_hash=$1 AND s.expires_at>(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') AND m.active=true", [hashToken(token)]);
+    if (result.rows[0]) { const row=result.rows[0]; return {id:row.id,orgId:row.org_id,name:row.name,email:row.email,role:row.role,jobTitle:row.job_title}; }
   }
   if (required) throw new ApiError(401, 'กรุณาเข้าสู่ระบบ');
   return null;

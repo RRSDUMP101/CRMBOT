@@ -4,6 +4,7 @@
  * All progress comes from the server, so the wizard resumes after a refresh or the Meta redirect.
  * Staff see plain Thai with exactly one next action; never tokens, raw JSON or server setting names.
  */
+import { uiText } from "./interface-text";
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {date} from './data';
 import {Badge,Button,Card,Field,Input} from './ui';
@@ -102,7 +103,7 @@ export function SocialAccountsWizard(){
     {overview&&<div className="social-account-list">
       {overview.accounts.length===0&&overview.attempts.length===0&&<p className="helper-text">ยังไม่มีช่องทางในทะเบียน กด “เพิ่มช่องทาง” เพื่อเริ่ม</p>}
       {overview.attempts.filter(item=>item.status==='awaiting_selection').map(item=><Card key={item.id} className="social-account-row"><div><strong>{PROVIDERS[item.provider]}</strong><small>อนุญาตแล้ว รอเลือกบัญชี</small></div><StateBadge state={item.status}/><Button size="sm" variant="secondary" onClick={()=>openAttempt(item)}>ทำต่อ</Button></Card>)}
-      {overview.accounts.map(item=><Card key={item.id} className="social-account-row"><div><strong>{PROVIDERS[item.provider]} · {item.displayName}</strong><small>{item.maskedIdentity} · ตรวจสิทธิ์ {AUTH[item.readiness.auth]} · รับข้อความ {INBOUND[item.readiness.inbound]} · ส่งข้อความ {OUTBOUND[item.readiness.outbound]}</small></div><StateBadge state={item.state}/><Button size="sm" variant="secondary" onClick={()=>openAccount(item)}>{item.state==='ready'?'ดูรายละเอียด':`ทำต่อ · ขั้นที่ ${item.step}`}</Button></Card>)}
+      {overview.accounts.map(item=><Card key={item.id} className="social-account-row"><div><strong>{PROVIDERS[item.provider]} · {item.displayName}</strong><small>{item.maskedIdentity} · ตรวจสิทธิ์ {AUTH[item.readiness.auth]} · รับข้อความ {INBOUND[item.readiness.inbound]} · ส่งข้อความ {OUTBOUND[item.readiness.outbound]}</small></div><StateBadge state={item.state}/><Button size="sm" variant="secondary" onClick={()=>openAccount(item)}>{item.state==='ready'?uiText("ดูรายละเอียด"):`ทำต่อ · ขั้นที่ ${item.step}`}</Button></Card>)}
     </div>}
     {selection&&<Card className="settings-card social-wizard-panel">
       <ol className="social-wizard-steps" aria-label="ขั้นตอนการเชื่อมต่อ">{STEPS.map((label,index)=><li key={label} aria-current={index+1===step?'step':undefined} className={index+1<step?'done':index+1===step?'current':''}><span>{index+1}</span>{label}</li>)}</ol>
@@ -118,7 +119,7 @@ export function SocialAccountsWizard(){
         {step>=5&&account&&<SocialAccountRuntimePanel account={account} refresh={load}/>}
         {step>=5&&!account&&<p className="helper-text">ยังไม่มีบัญชีสำหรับขั้นนี้ กลับไปเชื่อมต่อบัญชีก่อน</p>}
         <div className="button-row social-wizard-nav">
-          <Button variant="ghost" size="sm" disabled={busy||step<=1||(step>=5&&!!account&&step<=5)} onClick={()=>setStep(step-1)}>ย้อนกลับ</Button>
+          <Button variant="ghost" size="sm" disabled={busy||step<=1||(step>=5&&!!account&&step<=5)} onClick={()=>setStep(step-1)}>{uiText("ย้อนกลับ")}</Button>
           <Button variant="ghost" size="sm" disabled={busy} onClick={()=>{setSelection(null);setProblem(null);setNotice('');void load();}}>ปิดหน้าต่างขั้นตอน</Button>
           <Button variant="ghost" size="sm" disabled={busy} onClick={()=>void run(async()=>null,(_,fresh)=>{const current=fresh?.accounts.find(item=>item.id===account?.id);if(current)setStep(current.step);})}>ตรวจสถานะล่าสุด</Button>
         </div>
@@ -158,7 +159,7 @@ function Connect({provider,overview,attempt,busy,onMeta,onLine}:{provider:Provid
     {field('channelId','Channel ID (แท็บ Basic settings)')}{field('channelSecret','Channel secret (แท็บ Basic settings)',true)}
     {field('botUserId','Your user ID ของบอต (แท็บ Basic settings)')}{field('accessToken','Channel access token (long-lived) (แท็บ Messaging API)',true)}
     {field('displayName','ชื่อที่แสดงในระบบ (ไม่บังคับ)')}
-    <p className="helper-text">ลิงก์รับข้อความที่ต้องวางใน LINE (ขั้นตั้งค่ารับข้อความ): <code style={{overflowWrap:'anywhere'}}>{overview.callbackUrls.line||'ยังไม่พร้อม'}</code></p>
+    <p className="helper-text">ลิงก์รับข้อความที่ต้องวางใน LINE (ขั้นตั้งค่ารับข้อความ): <code style={{overflowWrap:'anywhere'}}>{overview.callbackUrls.line||uiText("ยังไม่พร้อม")}</code></p>
     <Button type="submit" disabled={busy||invalid.length>0}>บันทึกและไปตรวจสิทธิ์</Button>
   </form>;
 }
@@ -175,7 +176,7 @@ function CopyLink({url}:{url:string}){
 }
 function AccountStep({account,step,busy,setStep,act}:{account:Account;step:number;busy:boolean;setStep:(step:number)=>void;act:(action:string,extra?:Record<string,unknown>,message?:string)=>Promise<void>}){
   const [confirmed,setConfirmed]=useState(false);
-  const summary=<dl className="social-summary"><dt>บัญชี</dt><dd>{account.displayName} · {account.maskedIdentity}</dd><dt>สถานะ</dt><dd><StateBadge state={account.state}/></dd><dt>ตรวจสิทธิ์</dt><dd>{AUTH[account.readiness.auth]}{account.expiresAt?` · หมดอายุ ${date(account.expiresAt)}`:''}</dd><dt>รับข้อความ</dt><dd>{INBOUND[account.readiness.inbound]}</dd><dt>ตรวจบัญชีล่าสุด</dt><dd>{account.verificationFresh?'ผ่าน · '+date(account.lastVerifiedAt):'ยังไม่ผ่าน หรือหมดอายุ'}</dd><dt>ส่งข้อความ</dt><dd>{OUTBOUND[account.readiness.outbound]}</dd></dl>;
+  const summary=<dl className="social-summary"><dt>บัญชี</dt><dd>{account.displayName} · {account.maskedIdentity}</dd><dt>{uiText("สถานะ")}</dt><dd><StateBadge state={account.state}/></dd><dt>ตรวจสิทธิ์</dt><dd>{AUTH[account.readiness.auth]}{account.expiresAt?` · หมดอายุ ${date(account.expiresAt)}`:''}</dd><dt>รับข้อความ</dt><dd>{INBOUND[account.readiness.inbound]}</dd><dt>ตรวจบัญชีล่าสุด</dt><dd>{account.verificationFresh?'ผ่าน · '+date(account.lastVerifiedAt):'ยังไม่ผ่าน หรือหมดอายุ'}</dd><dt>{uiText("ส่งข้อความ")}</dt><dd>{OUTBOUND[account.readiness.outbound]}</dd></dl>;
   if(['disconnected','expired','missing_permission','awaiting_provider_review'].includes(account.state)&&step<10)return <>{summary}<p className="helper-text">บัญชีนี้ต้องเชื่อมต่อใหม่ ประวัติข้อความและลูกค้าเดิมยังอยู่ครบ</p><Button variant="secondary" disabled={busy} onClick={()=>setStep(3)}>เชื่อมต่อใหม่</Button></>;
   if(account.state==='paused')return <>{summary}<p className="helper-text">บัญชีนี้หยุดชั่วคราวในทะเบียน การส่งจริงยังควบคุมด้วยปุ่มในการ์ดช่องทางด้านบน</p><Button disabled={busy} onClick={()=>void act('resume',{},'ใช้งานต่อแล้ว กรุณาตรวจการรับข้อความและผลทดสอบอีกครั้ง')}>ใช้งานต่อ</Button></>;
   if(step===5)return <><p className="helper-text">ตรวจว่ากุญแจที่บันทึกไว้ยังใช้ได้ ออกให้แอปของระบบ ตรงกับบัญชีที่เลือก และมีสิทธิ์ครบ ขั้นนี้ไม่ส่งข้อความถึงลูกค้า</p>{summary}<Button disabled={busy} onClick={()=>void act('validate',{},'ตรวจสิทธิ์เสร็จแล้ว')}>ตรวจสิทธิ์</Button></>;

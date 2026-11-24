@@ -1,4 +1,5 @@
 "use client";
+import { uiText } from "./interface-text";
 import {DataView} from './data-view';
 import { FeatureHeading } from "./specialist-workspace";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
@@ -64,26 +65,26 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
     <form className="reports-filters" aria-label="ตัวกรองรายงาน" onSubmit={submit}>
       <Field label="ตั้งแต่วันที่"><Input type="date" required value={filters.from} max={filters.to || undefined} onChange={set("from")} /></Field>
       <Field label="ถึงวันที่"><Input type="date" required value={filters.to} min={filters.from || undefined} onChange={set("to")} /></Field>
-      <Field label="ช่องทาง"><Select value={filters.channel} onChange={set("channel")}>{channelOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
-      <Field label="ตลาด"><Select value={filters.market} onChange={set("market")}>{marketOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
-      <Field label="ผู้รับผิดชอบ"><Select value={filters.assignee} onChange={set("assignee")}>
+      <Field label={uiText("ช่องทาง")}><Select value={filters.channel} onChange={set("channel")}>{channelOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
+      <Field label={uiText("ตลาด")}><Select value={filters.market} onChange={set("market")}>{marketOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
+      <Field label={uiText("ผู้รับผิดชอบ")}><Select value={filters.assignee} onChange={set("assignee")}>
         <option value="">ทุกคน</option>
-        {isAdmin ? members.map(member => <option key={member.id} value={member.id}>{member.name}{member.active === false ? " (ปิดใช้งาน)" : ""}</option>) : <option value={user.id}>ของฉัน</option>}
+        {isAdmin ? members.map(member => <option key={member.id} value={member.id}>{member.name}{member.active === false ? " (ปิดใช้งาน)" : ""}</option>) : <option value={user.id}>{uiText("ของฉัน")}</option>}
         <option value="unassigned">ยังไม่มีผู้รับผิดชอบ</option>
       </Select></Field>
       <Field label="รอเกินกี่ชั่วโมง" hint="ใช้นับงานรอเกินกำหนด"><Input type="number" inputMode="numeric" min={1} max={720} step={1} required value={filters.overdueHours} onChange={set("overdueHours")} /></Field>
       <div className="reports-actions">
         <Button type="submit" disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />{loading ? "กำลังคำนวณ…" : "ดูรายงาน"}</Button>
-        <Button type="button" variant="ghost" size="sm" onClick={() => { const next = defaults(); setFilters(next); setApplied(queryString(next)); }}>30 วันล่าสุด</Button>
+        <Button type="button" variant="ghost" size="sm" onClick={() => { const next = defaults(); setFilters(next); setApplied(queryString(next)); }}>{uiText("30 วันล่าสุด")}</Button>
         {isAdmin && report && <a className="button button-secondary button-sm" href={exportHref} download><Download size={15} />ส่งออก CSV</a>}
       </div>
     </form>
 
-    {error && <div className="alert alert-error" role="alert">{error}<Button variant="ghost" size="sm" onClick={() => void load(applied)}>ลองอีกครั้ง</Button></div>}
+    {error && <div className="alert alert-error" role="alert">{error}<Button variant="ghost" size="sm" onClick={() => void load(applied)}>{uiText("ลองอีกครั้ง")}</Button></div>}
     <section id={ids.result} aria-busy={loading} aria-label="ผลรายงาน">
       {!report && loading && <div className="workspace-loading" role="status"><span className="spinner" /><p>กำลังคำนวณรายงานจากข้อมูลจริง…</p></div>}
       {report && t && <>
-        <p className="reports-meta" role="status"><Badge tone="green">ข้อมูลจริง</Badge> {report.range.from} ถึง {report.range.to} · เวลา Asia/Bangkok · สร้างเมื่อ {new Intl.DateTimeFormat("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" }).format(new Date(report.generatedAt))}</p>
+        <p className="reports-meta" role="status"><Badge tone="green">ข้อมูลจริง</Badge> {report.range.from} {uiText("ถึง")} {report.range.to} · เวลา Asia/Bangkok · สร้างเมื่อ {new Intl.DateTimeFormat("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" }).format(new Date(report.generatedAt))}</p>
         <div className="stats-grid reports-cards">
           <Metric title="บทสนทนาใหม่" value={count(t.newConversations)} caption="สร้างในช่วงวันที่เลือก" icon={MessageSquare} accent="teal" />
           <Metric title="ข้อความจากลูกค้า" value={count(t.inboundMessages)} caption="ข้อความที่เข้ามาในช่วงวันที่" icon={MessagesSquare} accent="blue" />
@@ -105,11 +106,11 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
             <p className="reports-note">ยังไม่มีคำตอบแรก {count(t.awaitingFirstReply)} บทสนทนา · จบแล้ว {count(t.resolved)} บทสนทนา (คำนวณเวลาไม่ได้ {count(t.resolvedWithoutTiming)})</p>
           </Card>
           <Card><div className="card-heading"><div><h2 id={ids.outcome}>AI และเจ้าหน้าที่</h2><p>ใครเป็นผู้ดูแลบทสนทนาใหม่</p></div><Users size={19} aria-hidden="true" /></div>
-            <div className="table-wrap"><DataView><table aria-labelledby={ids.outcome}><thead><tr><th scope="col">ผลลัพธ์</th><th scope="col">บทสนทนา</th><th scope="col">สัดส่วน</th></tr></thead><tbody>
+            <div className="table-wrap"><DataView><table aria-labelledby={ids.outcome}><thead><tr><th scope="col">ผลลัพธ์</th><th scope="col">{uiText("บทสนทนา")}</th><th scope="col">สัดส่วน</th></tr></thead><tbody>
               <tr><th scope="row">AI ดูแลเอง</th><td>{count(t.aiHandled)}</td><td>{share(t.aiHandled, t.newConversations)}</td></tr>
               <tr><th scope="row">เจ้าหน้าที่เข้าร่วม</th><td>{count(t.humanInvolved)}</td><td>{share(t.humanInvolved, t.newConversations)}</td></tr>
               <tr><th scope="row">อื่น ๆ (ยังไม่มีผู้ตอบ / รอเจ้าหน้าที่)</th><td>{count(t.otherOutcome)}</td><td>{share(t.otherOutcome, t.newConversations)}</td></tr>
-              <tr><th scope="row">ส่งต่อเจ้าหน้าที่</th><td>{count(t.handedOff)}</td><td>{rate(t.handoffRate)}</td></tr>
+              <tr><th scope="row">{uiText("ส่งต่อเจ้าหน้าที่")}</th><td>{count(t.handedOff)}</td><td>{rate(t.handoffRate)}</td></tr>
             </tbody></table></DataView></div>
           </Card>
         </div>
@@ -121,7 +122,7 @@ export function ReportsPanel({ user, members }: { user: Member; members: Member[
           {report.byAgent.length ? <GroupTable labelledBy={ids.agents} firstColumn="ผู้รับผิดชอบ" rows={report.byAgent.map(row => ({ key: row.agentId ?? "unassigned", label: row.name + (row.active ? "" : " (ปิดใช้งาน)"), metrics: row }))} /> : <Empty title={NO_DATA} detail="ยังไม่มีบทสนทนาที่มอบหมายตามตัวกรองนี้" />}
         </Card>
 
-        <Card><h2>ผลงานตามผู้เขียนจริง</h2><p>นับผู้ส่งข้อความที่ระบบบันทึกไว้ แม้เปลี่ยนผู้รับผิดชอบภายหลัง · ไม่นำประวัติที่ไม่ทราบผู้เขียนหรือข้อความอัตโนมัติมาให้เครดิตพนักงาน</p><div className="table-wrap"><DataView><table><thead><tr><th>ผู้เขียน</th><th>คำตอบสาธารณะ</th><th>บันทึกภายใน</th><th>บทสนทนา</th></tr></thead><tbody>{report.byAuthor.map(row=><tr key={row.memberId}><th>{row.name}</th><td>{row.replies}</td><td>{row.notes}</td><td>{row.conversations}</td></tr>)}</tbody></table></DataView></div></Card>
+        <Card><h2>ผลงานตามผู้เขียนจริง</h2><p>นับผู้ส่งข้อความที่ระบบบันทึกไว้ แม้เปลี่ยนผู้รับผิดชอบภายหลัง · ไม่นำประวัติที่ไม่ทราบผู้เขียนหรือข้อความอัตโนมัติมาให้เครดิตพนักงาน</p><div className="table-wrap"><DataView><table><thead><tr><th>ผู้เขียน</th><th>คำตอบสาธารณะ</th><th>{uiText("บันทึกภายใน")}</th><th>{uiText("บทสนทนา")}</th></tr></thead><tbody>{report.byAuthor.map(row=><tr key={row.memberId}><th>{row.name}</th><td>{row.replies}</td><td>{row.notes}</td><td>{row.conversations}</td></tr>)}</tbody></table></DataView></div></Card>
         <details className="definitions"><summary><CircleHelp size={16} aria-hidden="true" />นิยามตัวชี้วัด</summary><dl className="reports-definitions">{Object.entries(definitionLabels).map(([key, label]) => report.definitions[key] ? <div key={key}><dt>{label}</dt><dd>{report.definitions[key]}</dd></div> : null)}</dl></details>
       </>}
     </section>
@@ -138,7 +139,7 @@ function StatRow({ label, stat }: { label: string; stat: Stat }) {
 }
 function GroupTable({ labelledBy, firstColumn, rows }: { labelledBy: string; firstColumn: string; rows: { key: string; label: string; metrics: GroupMetrics }[] }) {
   return <div className="table-wrap"><DataView><table aria-labelledby={labelledBy}><thead><tr>
-    <th scope="col">{firstColumn}</th><th scope="col">บทสนทนาใหม่</th><th scope="col">ข้อความลูกค้า</th><th scope="col">ตอบครั้งแรก p50</th><th scope="col">เจ้าหน้าที่ตอบ p50</th><th scope="col">เวลาจบ p50</th><th scope="col">อัตราส่งต่อ</th><th scope="col">รอเจ้าหน้าที่</th><th scope="col">กำลังดูแล</th><th scope="col">รอเกินกำหนด</th>
+    <th scope="col">{firstColumn}</th><th scope="col">บทสนทนาใหม่</th><th scope="col">ข้อความลูกค้า</th><th scope="col">ตอบครั้งแรก p50</th><th scope="col">เจ้าหน้าที่ตอบ p50</th><th scope="col">เวลาจบ p50</th><th scope="col">อัตราส่งต่อ</th><th scope="col">{uiText("รอเจ้าหน้าที่")}</th><th scope="col">กำลังดูแล</th><th scope="col">รอเกินกำหนด</th>
   </tr></thead><tbody>{rows.map(({ key, label, metrics: m }) => <tr key={key}>
     <th scope="row">{label}</th><td>{count(m.newConversations)}</td><td>{count(m.inboundMessages)}</td>
     <td>{formatDuration(m.firstResponse.p50Ms)}<small>{count(m.firstResponse.samples)} ตัวอย่าง</small></td>

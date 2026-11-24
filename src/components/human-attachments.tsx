@@ -1,4 +1,5 @@
 "use client";
+import { uiText } from "./interface-text";
 import {useEffect,useRef,useState} from 'react';
 import {api,date} from './data';
 import {Button} from './ui';
@@ -22,10 +23,10 @@ export function HumanAttachments({conversationId,version,disabled,onSent,drafts}
  }
  const changed=!!item&&item.conversationVersion!==version;
  if(caps&&(!caps.enabled||caps.provider==='web'))return null;
- return <div aria-label="ไฟล์แนบ" className="composer-attachments">
+ return <div aria-label={uiText("ไฟล์แนบ")} className="composer-attachments">
   {caps?.supported?<label>{caps.provider === "whatsapp" ? "แนบไฟล์ PDF หรือรูปภาพ" : "แนบรูปภาพ JPEG หรือ PNG (ไม่เกิน 1 MB)"} <input ref={input} type="file" accept={Array.isArray(caps.accept)?caps.accept.join(','):caps.accept} disabled={disabled||busy} onChange={e=>{const file=e.target.files?.[0];if(file)void upload(file);}} /></label>:caps&&<small>ช่องทางนี้ยังไม่รองรับการส่งไฟล์แนบ</small>}
   {busy&&<p role="status">กำลังดำเนินการ…</p>}
-  {item&&<div><a href={base+'/'+item.id} target="_blank" rel="noreferrer">ดูไฟล์ {item.filename}</a> <small>{Math.ceil(item.sizeBytes/1024)} KB · ใช้ได้ถึง {date(item.expiresAt)}</small>{changed&&<p role="alert">บทสนทนาเปลี่ยนแล้ว กรุณาตรวจข้อความล่าสุดและแนบไฟล์อีกครั้ง</p>}<div className="button-row"><Button type="button" size="sm" disabled={disabled||busy||changed} onClick={()=>void send()}>ยืนยันส่งไฟล์นี้</Button><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={clearDraft}>ยกเลิก</Button></div></div>}
+  {item&&<div><a href={base+'/'+item.id} target="_blank" rel="noreferrer">ดูไฟล์ {item.filename}</a> <small>{Math.ceil(item.sizeBytes/1024)} KB · ใช้ได้ถึง {date(item.expiresAt)}</small>{changed&&<p role="alert">บทสนทนาเปลี่ยนแล้ว กรุณาตรวจข้อความล่าสุดและแนบไฟล์อีกครั้ง</p>}<div className="button-row"><Button type="button" size="sm" disabled={disabled||busy||changed} onClick={()=>void send()}>ยืนยันส่งไฟล์นี้</Button><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={clearDraft}>{uiText("ยกเลิก")}</Button></div></div>}
   {error&&<p role="alert" className="error-text">{error}</p>}{result&&<p role="status">{result}</p>}
  </div>;
 }

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="124" height="48" viewBox="0 0 124 48">
+  <title>RRS</title>
+  <defs>
+    <linearGradient id="blue" x1="0" x2=".47" y1="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#3438f1"/><stop offset=".48" stop-color="#0768fa"/><stop offset="1" stop-color="#0ed9ef"/>
+    </linearGradient>
+    <linearGradient id="silver" x2="0" y2="1">
+      <stop offset=".15" stop-color="#fff"/><stop offset=".48" stop-color="#b9c1ce"/>
+      <stop offset=".55" stop-color="#fafcff"/><stop offset="1" stop-color="#9caabd"/>
+    </linearGradient>
+  </defs>
+  <rect y=".5" width="15" height="47" rx="3" fill="url(#blue)"/>
+  <text x="21" y="40" font-family="Arial, sans-serif" font-size="49" font-weight="900" font-style="italic" letter-spacing="-4" fill="#183b56">RRS</text>
+</svg>
