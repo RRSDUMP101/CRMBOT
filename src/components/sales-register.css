@@ -1,0 +1,47 @@
+.customer-register-tools {display:flex; gap:12px; align-items:center; flex-wrap:wrap;}
+.customer-register-tools .search-input {flex:1 1 260px; min-width:220px;}
+.customer-register-tools > select {flex:0 1 200px; width:auto;}
+.customer-register-tools .segmented {margin-left:auto;}
+@media(max-width:600px) {
+  .customer-register-tools .search-input {flex-basis:100%; min-width:0;}
+  .customer-register-tools > select {flex:1; min-width:0;}
+}
+.rrs-register {
+  min-width: 0;
+  --register-line: #d8dfe6;
+  --register-ink: #18324c;
+}
+.rrs-register .rrs-data-view {border: 1px solid var(--register-line); border-radius: 12px; background: white; overflow: visible;}
+.rrs-register .rrs-view-content {overflow: auto;}
+.rrs-register .rrs-view-toolbar {display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:12px 14px;}
+.rrs-register .rrs-view-toolbar > b {margin-right:auto; color:var(--register-ink);}
+.rrs-register table {border-collapse:collapse; width:100%; font-size:.875rem; text-align:left;}
+.rrs-register th {color:#48586a; background:#f2f5f8; font-weight:600;}
+.rrs-register th, .rrs-register td {padding:12px 14px; border-bottom:1px solid var(--register-line); vertical-align:top;}
+.rrs-register tbody tr {cursor:pointer;}
+.rrs-register tbody tr:hover, .rrs-register tbody tr:focus-within {background:#f4f8fc;}
+.rrs-register td small {display:block; color:#536478; margin-top:3px;}
+.rrs-register .rrs-record-link {display:inline; border:0; background:transparent; color:#194d78; font:inherit; font-weight:700; text-align:left; padding:0; cursor:pointer;}
+.rrs-register :focus-visible {outline:2px solid #246697; outline-offset:2px;}
+.rrs-date-range {display:flex; align-items:center; flex-wrap:wrap; gap:12px; border:0; padding:0; margin:8px 0 16px; color:#35495d; font-size:.875rem;}
+.rrs-date-range legend {float:left; display:flex; align-items:center; gap:6px; padding:8px 0; font-weight:650;}
+.rrs-date-range label {display:flex; align-items:center; gap:6px;}
+.rrs-date-range input {max-width:100%; min-height:38px; background:white; color:#213747; border:1px solid #bdcbd6; border-radius:6px; padding:5px 8px; font:inherit;}
+.rrs-status-strip {display:flex; flex-wrap:wrap; gap:6px; margin:10px 0;}
+.rrs-status-strip button {border:1px solid #cad3dc; color:#344a60; background:white; border-radius:6px; padding:6px 10px; font:inherit; font-size:.875rem; cursor:pointer;}
+.rrs-status-strip button[aria-pressed="true"] {color:white; background:#244968; border-color:#244968;}
+.rrs-status-strip button strong {margin-left:6px; font-variant-numeric:tabular-nums;}
+@media(max-width:760px) {
+  .rrs-register table, .rrs-register tbody {display:block; width:auto; min-width:0;}
+  .rrs-register thead {position:absolute; clip-path:inset(50%); width:1px; height:1px; overflow:hidden;}
+  .rrs-register tbody tr {display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); padding:12px; gap:9px 12px; border-top:1px solid var(--register-line);}
+  .rrs-register td {display:block; border:0; padding:0; min-width:0; overflow-wrap:anywhere;}
+  .rrs-register td:first-child {grid-column:1/-1;}
+  .rrs-register td[data-label]::before {content:attr(data-label); display:block; font-size:.75rem; color:#55687a;}
+  .rrs-register .rrs-record-link {min-height:36px; font-size:1rem;}
+  .rrs-register .rrs-view-content {overflow:visible;}
+  .rrs-register .rrs-view-toolbar {row-gap:8px;}
+  .rrs-register .rrs-view-toolbar > b {flex-basis:100%;}
+  .rrs-date-range legend {float:none;}
+  .rrs-date-range input {min-height:44px;}
+}
