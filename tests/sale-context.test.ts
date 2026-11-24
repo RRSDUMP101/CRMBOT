@@ -7,7 +7,7 @@ import { before, after, test } from 'node:test';
 import { database, getDatabase, closeDatabase } from '../src/lib/db';
 import { applySaleEvents, pullSaleContext, refreshSaleContextIfStale, saleContextForLead, saleContextHash } from '../src/lib/sale-context';
 import { verifyBridgeRequest } from '../src/lib/bridge-protocol';
-import { saleQuotationHref } from '../src/components/data';
+import { saleQuotationHref, salePersonalQuoteQueueHref } from '../src/components/data';
 import { conversationDetail } from '../src/lib/service';
 
 const ids = { org: randomUUID(), other: randomUUID(), lead: randomUUID(), conversation: randomUUID() };
@@ -126,5 +126,14 @@ test('staff context only projects deals in the current customer market', async (
     assert.deepEqual((await saleContextForLead(db,ids.org,ids.lead)).deals,[]);
   } finally {
     await database.query("UPDATE leads SET market='export' WHERE org_id=$1 AND id=$2",[ids.org,ids.lead]);
+  }
+});
+
+test('personal quotation links select the Sales market and queue without passing an employee identity',()=>{
+  for(const market of ['domestic','export'] as const)for(const queue of ['revision','approval'] as const){
+    const url=new URL(salePersonalQuoteQueueHref(market,queue));
+    assert.equal(url.origin,'https://rrs-sales-office-hub.com');
+    assert.equal(url.pathname,market==='domestic'?'/domestic/today':'/today');
+    assert.deepEqual([...url.searchParams],[['mode',market==='domestic'?'domestic':'live'],['quoteQueue',queue]]);
   }
 });

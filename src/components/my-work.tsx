@@ -1,13 +1,13 @@
 'use client';
 
 import {useState} from 'react';
-import {date, localDate} from './data';
+import {date, localDate, salePersonalQuoteQueueHref} from './data';
 import {Badge, Card} from './ui';
 import {Tasks} from './workspace-panels';
 import type {PanelProps} from './workspace';
 
 export function MyWork({data, reload, notify}: PanelProps) {
-  const [group, setGroup] = useState<'chats' | 'tasks'>('chats');
+  const [group, setGroup] = useState<'chats' | 'tasks' | 'revision' | 'approval'>('chats');
   const today = localDate(new Date().toISOString()).slice(0, 10);
   const assigned = (item: {assigneeId: string | null}) => item.assigneeId === data.user.id;
   const chats = data.conversations.filter(room => assigned(room) && room.status === 'waiting_human');
@@ -23,7 +23,16 @@ export function MyWork({data, reload, notify}: PanelProps) {
       <button type="button" aria-pressed={group === 'tasks'} className={group === 'tasks' ? 'active' : ''} onClick={() => setGroup('tasks')}>
         ติดตามวันนี้ <Badge>{tasks.length}</Badge>
       </button>
+      {([['revision','ใบเสนอราคาที่ต้องแก้'],['approval','ข้อยกเว้นรออนุมัติ']] as const).map(([key,label])=>
+        <button type="button" key={key} aria-pressed={group===key} className={group===key?'active':''} onClick={()=>setGroup(key)}>{label}</button>)}
     </div>
+    {(group==='revision'||group==='approval')&&<section aria-label={group==='revision'?'ใบเสนอราคาที่ต้องแก้':'ข้อยกเว้นรออนุมัติ'}>
+      <p>เปิด Sales Office เพื่อดูจำนวนและรายการที่มอบหมายให้บัญชีฝ่ายขายของคุณ</p>
+      <div className="activity-list">{([['domestic','ตลาดในประเทศ'],['export','ตลาดส่งออก']] as const).map(([market,label])=>
+        <a className="activity-row" key={market} href={salePersonalQuoteQueueHref(market,group)}>
+          <strong>{label}</strong><span>{group==='revision'?'เปิดใบเสนอราคาที่ต้องแก้':'เปิดข้อยกเว้นรออนุมัติ'} ↗</span>
+        </a>)}</div>
+    </section>}
     {group === 'chats' && <div className="activity-list">
       {chats.map(room => <a className="activity-row" key={room.id} href={'?conversation=' + encodeURIComponent(room.id) + '#inbox'}>
         <div><strong>{leadNames.get(room.leadId) || room.leadName || 'ลูกค้า'}</strong><small>{room.lastMessage}</small></div>
