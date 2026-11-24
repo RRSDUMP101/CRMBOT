@@ -112,3 +112,19 @@ test('staff detail includes Sale context; visitor detail and other organizations
   assert.deepEqual((await saleContextForLead(db, ids.other, ids.lead)).deals, []);
   assert.equal(JSON.stringify(staff.saleContext).includes('price'), false);
 });
+
+test('staff context only projects deals in the current customer market', async () => {
+  const db=await getDatabase();
+  const next=Number((await cursor()).last_sequence)+1;
+  const domestic=event(next,'domestic-quote',1,{workspace:'domestic'});
+  await applySaleEvents(db,ids.org,[domestic]);
+  assert.equal((await saleContextForLead(db,ids.org,ids.lead)).deals.some(d=>d.workspace==='domestic'),false);
+  try {
+    await database.query("UPDATE leads SET market='domestic' WHERE org_id=$1 AND id=$2",[ids.org,ids.lead]);
+    assert.deepEqual((await saleContextForLead(db,ids.org,ids.lead)).deals.map(d=>d.dealId),['domestic-quote']);
+    await database.query("UPDATE leads SET market='unknown' WHERE org_id=$1 AND id=$2",[ids.org,ids.lead]);
+    assert.deepEqual((await saleContextForLead(db,ids.org,ids.lead)).deals,[]);
+  } finally {
+    await database.query("UPDATE leads SET market='export' WHERE org_id=$1 AND id=$2",[ids.org,ids.lead]);
+  }
+});

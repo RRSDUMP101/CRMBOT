@@ -110,7 +110,11 @@ export async function pullSaleContext(db: D1Binding, env: Env, fetcher: typeof f
 const waitingNames: Record<string, string> = { rrs: 'รอฝ่ายขาย', customer: 'รอลูกค้า', none: 'ไม่มีงานค้าง' };
 /** Staff-only view for one lead. Visitors never receive this. */
 export async function saleContextForLead(db: D1Binding, orgId: string, leadId: string) {
-  const rows = await all(db.prepare('SELECT deal_id,workspace,aggregate_version,payload,updated_at FROM crm_sale_context WHERE org_id=? AND lead_id=? ORDER BY updated_at DESC LIMIT 20').bind(orgId, leadId));
+  const rows = await all(db.prepare(`SELECT c.deal_id,c.workspace,c.aggregate_version,c.payload,c.updated_at
+    FROM crm_sale_context c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id
+    WHERE c.org_id=? AND c.lead_id=?
+      AND (c.workspace='live' AND l.market='export' OR c.workspace='domestic' AND l.market='domestic')
+    ORDER BY c.updated_at DESC LIMIT 20`).bind(orgId, leadId));
   const sync = (await all(db.prepare('SELECT last_success_at,last_error FROM crm_sale_context_cursor WHERE org_id=?').bind(orgId)))[0];
   return {
     syncedAt: sync?.last_success_at ?? null, error: sync?.last_error || null,
