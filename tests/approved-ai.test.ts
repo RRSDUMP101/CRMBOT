@@ -116,10 +116,12 @@ test('approved replies retain the proven writer model in staff history and authe
  source.resultHash = await bridgePayloadHash(source.resultPayload);
  const accepted = await acceptApprovedAi(f.payload, {fetch: f.transport, dispatch: false});
  const staff = await conversationDetail(f.org, f.conversation, true, true);
+ assert.equal(staff.provider, 'whatsapp');
  const row = staff.messages.find(m => m.id === accepted.messageId)!;
  assert.deepEqual(row.modelIdentity, modelIdentity);
  assert.equal(row.approvedAi, true);
  const visitor = await conversationDetail(f.org, f.conversation);
+ assert.equal('provider' in visitor, false);
  assert.equal('modelIdentity' in visitor.messages.find(m => m.id === accepted.messageId)!, false);
  const events = (await readBridgeEvents(f.org)).events;
  assert.deepEqual(events.find(e => e.entity === 'message' && e.record.id === accepted.messageId)?.record.modelIdentity, modelIdentity);

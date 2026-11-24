@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
 import { messageOrder } from './message-order';
+import {conversationChannelSql} from './conversation-channel';
 
 const unreadCount=(staff:Staff)=>staff.role==='Admin'?"MAX(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)":"(SELECT count(*) FROM messages unread_message WHERE unread_message.org_id=c.org_id AND unread_message.conversation_id=c.id AND unread_message.role='user' AND unread_message.source_owner_only=0 AND unread_message.customer_seq>COALESCE(r.last_read_seq,0))";
 const visibleMessage=(staff:Staff,alias:string)=>staff.role==='Admin'?'':` AND ${alias}.source_owner_only=0`;
@@ -82,7 +83,7 @@ export async function inbox(staff:Staff,url:URL) {
     const total=await connection.query(`SELECT count(*) AS total FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${totalWhere}`,totalParams);
     const result=await connection.query(`SELECT c.id,c.lead_id,c.status,c.version,c.assignee_id,c.created_at,c.updated_at,l.name AS lead_name,l.tags,
       c.updated_at AS cursor_updated_at,
-      COALESCE((SELECT si.provider FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1),'web') AS provider,
+      ${conversationChannelSql} AS provider,
       COALESCE((SELECT si.account_id FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT et.account_id FROM external_threads et WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1)) AS account_id,
       ${UNREAD} AS unread_count,
       (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user'${visibleMessage(staff,'m')} ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,

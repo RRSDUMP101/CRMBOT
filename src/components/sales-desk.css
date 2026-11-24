@@ -28,7 +28,7 @@
 .rrs-workspace .desk-conversation{padding:13px 12px}
 .rrs-workspace .desk-conversation-top strong{font-size:14px}
 .rrs-workspace .desk-conversation-preview{font-size:13px;line-height:1.5}
-.rrs-workspace .desk-message-history {background:#fafbfd;min-height:0}
+.rrs-workspace .desk-message-history {min-height:0}
 .desk-history-date{display:flex;align-items:center;justify-content:center;gap:12px;color:#526578;font-size:12px;margin:12px 0 20px}
 .desk-history-date:before,.desk-history-date:after{content:"";height:1px;background:#dae3ea;max-width:75px;flex:1}
 .desk-pinned,.crm-dock-header{display:flex;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--desk-rule);font-size:12px;color:#244764}

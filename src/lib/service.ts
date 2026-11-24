@@ -10,6 +10,7 @@ import {CustomerTurnHandoff,type TurnSummary} from './customer-turn';
 import { extractFacts, summarizeFacts, selectKnowledge, generateReply, providerName, type BotInput } from './bot';
 import { enqueueSocialReply, dispatchSocialReply } from './social-channels';
 import { messageOrder } from './message-order';
+import {conversationChannelSql} from './conversation-channel';
 import type { WebFlowInboundSignal } from './flows';
 import { routeWaitingConversation, validateRequiredFields } from './operators';
 import { aiRuntimeContext } from './ai-lifecycle';
@@ -22,8 +23,8 @@ export {publicMember};
 async function audit(executor: Executor, orgId: string, actorId: string, action: string, entityId: string, metadata:Row={}) {
   await executor.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),orgId,actorId,action,entityId,JSON.stringify(metadata)]);
 }
-async function scopedConversation(executor: Executor, orgId: string, id: string, lock=false) {
-  const result=await executor.query(`SELECT * FROM conversations WHERE org_id=$1 AND id=$2${lock?"":''}`,[orgId,id]);
+async function scopedConversation(executor: Executor, orgId: string, id: string, lock=false, includeChannel=false) {
+  const result=await executor.query(`SELECT c.*${includeChannel?`, ${conversationChannelSql} AS provider`:''} FROM conversations c WHERE c.org_id=$1 AND c.id=$2${lock?"":''}`,[orgId,id]);
   if(!result.rows[0])throw new ApiError(404,'ไม่พบบทสนทนา');return result.rows[0];
 }
 async function scopedLead(executor: Executor, orgId: string, id: string) {
@@ -56,14 +57,14 @@ export async function createVisitor(context:'web'|'widget'='web'): Promise<{toke
 }
 
 export async function conversationDetail(orgId:string,id:string,internal=false,admin=false) {
-  const conversation=await scopedConversation(database,orgId,id);
+  const conversation=await scopedConversation(database,orgId,id,false,internal);
   const lead=await scopedLead(database,orgId,conversation.lead_id);
   // Staff only: Sale-owned deal context. Visitor responses never include it.
   let saleContext=null;if(internal){const binding=await getDatabase();await refreshSaleContextIfStale(binding,process.env).catch(()=>undefined);saleContext=await saleContextForLead(binding,orgId,lead.id).catch(()=>null);}
   const messages=await database.query(`SELECT m.*,${internal?"json_extract(ar.metadata,'$.provider') AS ai_provider,json_extract(ar.metadata,'$.model') AS ai_model,json_extract(p.metadata,'$.approval') AS approval,":''}json_extract(p.metadata,'$.rrsSales.action') AS triage_action,json_extract(p.metadata,'$.rrsSales.category') AS triage_category,COALESCE(p.provider,(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=m.org_id AND et.conversation_id=m.conversation_id)) AS provider,COALESCE(p.delivery_status,(SELECT status FROM external_send_commands WHERE org_id=m.org_id AND message_id=m.id)) AS delivery_status FROM messages m ${internal?"LEFT JOIN audit_events ar ON ar.id=m.id AND ar.org_id=m.org_id AND ar.action='ai.model.used' AND ar.entity_id=m.id":''} LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
   const webFiles=await (await import('./web-chat-attachments')).webAttachmentMetadata(orgId,id);
-  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),webAttachments:webFiles.filter(f=>f.messageId===m.id).map(({messageId,...f})=>({...f,...(internal?{downloadUrl:'/api/admin/conversations/'+id+'/web-attachments/'+f.id}:{})})),...(internal?{modelIdentity:readModelIdentity({provider:m.ai_provider,model:m.ai_model}),approvedAi:m.approval==='approved_ai',provider:m.provider||null,deliveryStatus:m.delivery_status||null,...(m.triage_action?{triage:{action:m.triage_action,category:m.triage_category}}:{}),attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
+  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext,provider:conversation.provider}:{}),messages:messages.rows.map(m=>({...messageView(m),webAttachments:webFiles.filter(f=>f.messageId===m.id).map(({messageId,...f})=>({...f,...(internal?{downloadUrl:'/api/admin/conversations/'+id+'/web-attachments/'+f.id}:{})})),...(internal?{modelIdentity:readModelIdentity({provider:m.ai_provider,model:m.ai_model}),approvedAi:m.approval==='approved_ai',provider:m.provider||null,deliveryStatus:m.delivery_status||null,...(m.triage_action?{triage:{action:m.triage_action,category:m.triage_category}}:{}),attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
 function publicFacts(raw:Record<string,unknown>|null):Record<string,string>{
   return Object.fromEntries(Object.entries(raw||{}).filter((p):p is [string,string]=>p[0]!=='phase1Sales'&&typeof p[1]==='string'));

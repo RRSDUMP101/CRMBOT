@@ -1,0 +1,2 @@
+/** Channel of the thread (conversations c), independent of lead acquisition source. */
+export const conversationChannelSql = "COALESCE((SELECT si.provider FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1),'web')";

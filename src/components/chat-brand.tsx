@@ -6,11 +6,12 @@ const channels:Record<string,{name:string;asset:string}>={
   facebook:{name:'Facebook',asset:'facebook'},instagram:{name:'Instagram',asset:'instagram'},
   gmail:{name:'Gmail',asset:'gmail'},outlook:{name:'Outlook',asset:'microsoftoutlook'}
 };
-export function ChannelIcon({provider}:{provider?:string|null}) {
+export function ChannelIcon({provider,showName=false}:{provider?:string|null;showName?:boolean}) {
   const key=(provider||'').toLowerCase();
   const entry=Object.hasOwn(channels,key)?channels[key]:undefined;
-  const label=entry?.name||(key==='web'||key==='website'?'เว็บแชต':key==='email'?'อีเมล':'ช่องทางอื่น');
-  return <span className="desk-channel-mark" role="img" aria-label={label} title={label}>{entry?<img src={'/brands/'+entry.asset+'.svg'} width="19" height="19" alt=""/>:key==='email'?<Mail size={15}/>:key==='web'||key==='website'?<Globe size={15}/>:<MessageSquare size={15}/>}</span>;
+  const labels:Record<string,string>={web:'เว็บแชต',website:'เว็บแชต',email:'อีเมล',shopify:'Shopify',hubspot:'HubSpot',lazada:'Lazada',tiktokshop:'TikTok Shop'};
+  const label=entry?.name||(Object.hasOwn(labels,key)?labels[key]:'ช่องทางอื่น');
+  return <><span className="desk-channel-mark" role="img" aria-hidden={showName||undefined} aria-label={label} title={label}>{entry?<img src={'/brands/'+entry.asset+'.svg'} width="19" height="19" alt=""/>:key==='email'?<Mail size={15}/>:key==='web'||key==='website'?<Globe size={15}/>:<MessageSquare size={15}/>}</span>{showName&&label}</>;
 }
 export function ModelBadge({identity}:{identity?:ModelIdentity|null}) {
   if(!identity)return <span className="desk-model"><span>ผู้ช่วย AI</span><b>ยังไม่ทราบรุ่น</b></span>;
