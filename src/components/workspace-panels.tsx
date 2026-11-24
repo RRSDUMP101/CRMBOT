@@ -54,7 +54,7 @@ export function Customers({ data, reload, notify }: PanelProps) {
       return <tr key={lead.id} onClick={() => setSelected(lead)}>
         <td><button className="rrs-record-link" onClick={e => {e.stopPropagation(); setSelected(lead);}}>{lead.name || 'ลูกค้าใหม่'}</button><small>{lead.interests || lead.phone || 'ยังไม่ระบุสินค้า'}</small></td>
         <td data-label="สถานะ"><Badge>{stageNames[lead.stage] || lead.stage}</Badge></td>
-        <td data-label="งานถัดไป">{task?.title || 'ยังไม่กำหนด'}</td>
+        <td data-label="งานถัดไป">{task?.title || 'ยังไม่กำหนด'} <button className="rrs-record-link" type="button" onClick={e=>{e.stopPropagation();window.dispatchEvent(new CustomEvent('rrs:open-chat',{detail:{leadId:lead.id}}));}}>เปิดแชท</button></td>
         <td data-label="ผู้รับผิดชอบ">{data.members.find(member => member.id === lead.assigneeId)?.name || 'รอมอบหมาย'}</td>
         <td data-label="กำหนดติดตาม">{task?.kind === 'followup' ? <button className="rrs-record-link" aria-label={'แก้กำหนดติดตามของ '+(lead.name || 'ลูกค้า')} onClick={e => {e.stopPropagation();setReschedule(task);}}>{date(task.dueAt)}</button> : task?.dueAt ? date(task.dueAt) : 'ยังไม่ได้นัด'}</td>
       </tr>;

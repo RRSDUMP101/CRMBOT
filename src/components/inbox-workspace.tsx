@@ -18,7 +18,7 @@ function ChannelIcon({provider}: {provider?: string}) { const p = provider || "w
 const queues: InboxQueue[] = ["all", "unread", "waiting", "mine", "unassigned", "closed"];
 type Drafts = Record<string, { reply: string; note: string }>;
 
-export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, requestedRoom, visible = true }: PanelProps & { requestedRoom?: string; visible?: boolean; searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
+export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, requestedRoom, onRoomChange, visible = true }: PanelProps & { requestedRoom?: string; onRoomChange?: (room:string)=>void; visible?: boolean; searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
   const [shown, setShown] = useState({preview:true,status:true,date:true,channel:true});
   const [pageSize, setPageSize] = useState(25);
   const [queue, setQueue] = useState<InboxQueue>("all");
@@ -37,6 +37,7 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, 
   const [templateOpen, setTemplateOpen] = useState(false); const [templates, setTemplates] = useState<ReplyTemplate[]>([]); const [templateSearch, setTemplateSearch] = useState(""); const [templateLoading, setTemplateLoading] = useState(false); const [templateError, setTemplateError] = useState("");
   const selectedRef = useRef(""); const queryVersion = useRef(0); const listRequest = useRef(0); const loadedPages = useRef(1); const readMessages = useRef(new Set<string>()); const history = useRef<HTMLDivElement>(null);
   selectedRef.current = selected;
+  useEffect(() => { onRoomChange?.(selected); }, [onRoomChange,selected]);
   useEffect(() => { if (requestedRoom) setSelected(requestedRoom); }, [requestedRoom]);
   useEffect(()=>{
     const requested=new URLSearchParams(window.location.search).get('conversation');
