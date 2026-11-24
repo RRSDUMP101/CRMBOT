@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, getDatabase, type Executor, type Row } from './db';
 import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
+import {readModelIdentity,type ModelIdentity} from './model-identity';
+import {recordModelReceipt} from './model-receipt';
 import {recordCustomerFacts,caseContext} from './sales-knowledge';
 import {staffReviewAcknowledgement} from './customer-language';
 import {CustomerTurnHandoff,type TurnSummary} from './customer-turn';
@@ -58,10 +60,10 @@ export async function conversationDetail(orgId:string,id:string,internal=false,a
   const lead=await scopedLead(database,orgId,conversation.lead_id);
   // Staff only: Sale-owned deal context. Visitor responses never include it.
   let saleContext=null;if(internal){const binding=await getDatabase();await refreshSaleContextIfStale(binding,process.env).catch(()=>undefined);saleContext=await saleContextForLead(binding,orgId,lead.id).catch(()=>null);}
-  const messages=await database.query(`SELECT m.*,json_extract(p.metadata,'$.rrsSales.action') AS triage_action,json_extract(p.metadata,'$.rrsSales.category') AS triage_category,COALESCE(p.provider,(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=m.org_id AND et.conversation_id=m.conversation_id)) AS provider,COALESCE(p.delivery_status,(SELECT status FROM external_send_commands WHERE org_id=m.org_id AND message_id=m.id)) AS delivery_status FROM messages m LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
+  const messages=await database.query(`SELECT m.*,${internal?"json_extract(ar.metadata,'$.provider') AS ai_provider,json_extract(ar.metadata,'$.model') AS ai_model,json_extract(p.metadata,'$.approval') AS approval,":''}json_extract(p.metadata,'$.rrsSales.action') AS triage_action,json_extract(p.metadata,'$.rrsSales.category') AS triage_category,COALESCE(p.provider,(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=m.org_id AND et.conversation_id=m.conversation_id)) AS provider,COALESCE(p.delivery_status,(SELECT status FROM external_send_commands WHERE org_id=m.org_id AND message_id=m.id)) AS delivery_status FROM messages m ${internal?"LEFT JOIN audit_events ar ON ar.id=m.id AND ar.org_id=m.org_id AND ar.action='ai.model.used' AND ar.entity_id=m.id":''} LEFT JOIN social_message_provenance p ON p.org_id=m.org_id AND p.message_id=m.id WHERE m.org_id=$1 AND m.conversation_id=$2 ${internal?'':"AND m.role IN ('user','assistant','agent')"} AND ($3=1 OR (m.source_owner_only=0 AND COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0)!=1)) ORDER BY ${messageOrder('m')}`,[orgId,id,admin?1:0]);
   const attachments=internal?(await database.query("SELECT a.id,a.message_id,a.media_type,a.storage_state,a.metadata FROM social_message_attachments a JOIN messages m ON m.org_id=a.org_id AND m.id=a.message_id WHERE a.org_id=$1 AND m.conversation_id=$2 AND a.removed_at IS NULL",[orgId,id])).rows:[];
   const webFiles=await (await import('./web-chat-attachments')).webAttachmentMetadata(orgId,id);
-  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),webAttachments:webFiles.filter(f=>f.messageId===m.id).map(({messageId,...f})=>({...f,...(internal?{downloadUrl:'/api/admin/conversations/'+id+'/web-attachments/'+f.id}:{})})),...(internal?{provider:m.provider||null,deliveryStatus:m.delivery_status||null,...(m.triage_action?{triage:{action:m.triage_action,category:m.triage_category}}:{}),attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
+  return {conversation:conversationView(conversation),lead:leadView(lead),...(internal?{saleContext}:{}),messages:messages.rows.map(m=>({...messageView(m),webAttachments:webFiles.filter(f=>f.messageId===m.id).map(({messageId,...f})=>({...f,...(internal?{downloadUrl:'/api/admin/conversations/'+id+'/web-attachments/'+f.id}:{})})),...(internal?{modelIdentity:readModelIdentity({provider:m.ai_provider,model:m.ai_model}),approvedAi:m.approval==='approved_ai',provider:m.provider||null,deliveryStatus:m.delivery_status||null,...(m.triage_action?{triage:{action:m.triage_action,category:m.triage_category}}:{}),attachments:attachments.filter(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return a.message_id===m.id&&(admin||!meta.sourceOwnerOnly&&!meta.sourceScopeUnknown);}).map(a=>{const meta=typeof a.metadata==='string'?JSON.parse(a.metadata):a.metadata||{};return {id:a.id,type:a.media_type,state:a.storage_state,...(typeof meta.name==='string'?{name:meta.name}:{}),...(typeof meta.deliveryStatus==='string'?{deliveryStatus:meta.deliveryStatus}:{}),...(typeof meta.archiveState==='string'?{archiveState:meta.archiveState}:{}),...(admin&&typeof meta.archiveError==='string'?{archiveError:meta.archiveError}:{})};})}:{})}))};
 }
 function publicFacts(raw:Record<string,unknown>|null):Record<string,string>{
   return Object.fromEntries(Object.entries(raw||{}).filter((p):p is [string,string]=>p[0]!=='phase1Sales'&&typeof p[1]==='string'));
@@ -457,7 +459,7 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
   }
   await routeWaitingConversation(visitor.orgId,visitor.conversationId);
   const stream=new ReadableStream({async start(controller) {
-    let summary:TurnSummary|undefined,handoffReason:string|undefined;
+    let summary:TurnSummary|undefined,handoffReason:string|undefined,modelIdentity:ModelIdentity|undefined;
     let text='';let closed=false;let first=true;let usage:{inputTokens:number;outputTokens:number;estimatedCostUsd:number|null}|undefined;
     const abort=new AbortController();signal.addEventListener('abort',()=>abort.abort(),{once:true});
     const emit=(event:Row)=>{if(!closed){try{controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));}catch{closed=true;abort.abort();}}};
@@ -477,7 +479,11 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
         if(prepared.input.turn)await recordSalesClarification(connection,prepared.orgId,c.id,prepared.clientId,prepared.input.turn.requestId,handoffReason);
         await audit(connection,prepared.orgId,'system','ai.lifecycle.handoff',c.id,{reason:handoffReason});
       }
-      if(text&&!handoffReason)await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,reply_to_client_id,generation_version,sources,input_tokens,output_tokens,estimated_cost_usd) VALUES($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11)",[randomUUID(),prepared.orgId,prepared.conversationId,text,actual,prepared.clientId,prepared.version,JSON.stringify(prepared.sources),usage?.inputTokens??null,usage?.outputTokens??null,usage?.estimatedCostUsd??null]);
+      if(text&&!handoffReason){
+        const assistantId=randomUUID();
+        await connection.query("INSERT INTO messages(id,org_id,conversation_id,role,content,status,reply_to_client_id,generation_version,sources,input_tokens,output_tokens,estimated_cost_usd) VALUES($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11)",[assistantId,prepared.orgId,prepared.conversationId,text,actual,prepared.clientId,prepared.version,JSON.stringify(prepared.sources),usage?.inputTokens??null,usage?.outputTokens??null,usage?.estimatedCostUsd??null]);
+        if(actual==='complete' && modelIdentity)await recordModelReceipt(connection,prepared.orgId,assistantId,modelIdentity);
+      }
       await connection.query('UPDATE messages SET status=$4 WHERE org_id=$1 AND conversation_id=$2 AND client_id=$3 AND generation_version=$5',[prepared.orgId,prepared.conversationId,prepared.clientId,actual,prepared.version]);
       if(current)await connection.query("UPDATE conversations SET generating_client_id=NULL,generation_started_at=NULL,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2 AND version=$3",[prepared.orgId,prepared.conversationId,prepared.version]);
       return actual;
@@ -489,6 +495,7 @@ export async function messageStream(visitor:Visitor,body:Record<string,unknown>,
       for await(const chunk of generateReply({...prepared.input,signal:abort.signal})) {
         if(signal.aborted||abort.signal.aborted||!await active()){abort.abort();await finish('interrupted');emit({type:'cancelled'});return;}
         if(chunk.summary)summary=chunk.summary;
+        if(chunk.modelIdentity)modelIdentity=chunk.modelIdentity;
         if(chunk.usage)usage=chunk.usage;
         if(chunk.text) {
           // Recheck the generation before delivery. Never enqueue inside a retryable plan.

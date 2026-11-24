@@ -1,9 +1,10 @@
 /** Server-only provider boundary. No API key, system prompt or private KB is sent to the browser. */
+import {readModelIdentity,type ModelIdentity} from './model-identity';
 import {isEnglishCustomerReply} from './customer-language';
 import {customerTurn,CustomerTurnHandoff,type TurnScope,type TurnSummary} from './customer-turn';
 export type KnowledgeLite = {id:string;title:string;content:string;tags:string[];version:number;sourceUrl?:string};
 export type BotInput = {turn?:TurnScope;history:{role:string;content:string}[];facts:Record<string,string>;knowledge:KnowledgeLite[];settings:{botName:string;personality:string;businessHours:string;handoffRule:string;aiEnabled:boolean};signal?:AbortSignal};
-export type BotChunk = {summary?:TurnSummary;text?:string;usage?:{inputTokens:number;outputTokens:number;estimatedCostUsd:number|null}};
+export type BotChunk = {modelIdentity?:ModelIdentity;summary?:TurnSummary;text?:string;usage?:{inputTokens:number;outputTokens:number;estimatedCostUsd:number|null}};
 
 const normalize = (s:string) => s.normalize('NFKC').toLowerCase().replace(/ดั้ม(?!พ)/g,'ดั้มพ์').replace(/ดั๊ม/g,'ดั้มพ์').replace(/รีโว่/g,'revo').replace(/ไฮลักซ์/g,'hilux').replace(/รีโว/g,'revo');
 export function extractFacts(text:string, previous:Record<string,string>):Record<string,string> {
@@ -110,7 +111,7 @@ export async function* generateReply(input:BotInput):AsyncGenerator<BotChunk> {
       ...input.history.filter(m=>['user','assistant','agent'].includes(m.role)).slice(-20).map(m=>({role:m.role==='user'?'user':'assistant',content:m.content.slice(0,6000)}))]
   })});
   if(!response.ok||!response.body) throw new Error('บริการ AI ไม่พร้อมใช้งาน กรุณาลองใหม่หรือคุยกับเจ้าหน้าที่');
-  const reader=response.body.getReader(); const decoder=new TextDecoder(); let buffer=''; let completed=false; let answer=''; let usage:BotChunk['usage'];
+  const reader=response.body.getReader(); const decoder=new TextDecoder(); let buffer=''; let completed=false; let answer=''; let usage:BotChunk['usage']; let modelIdentity:ModelIdentity|undefined;
   try {while(true) {
     const {done,value}=await reader.read(); if(done) break; buffer+=decoder.decode(value,{stream:true});
     const events=buffer.split(/\r?\n\r?\n/); buffer=events.pop()||'';
@@ -120,7 +121,7 @@ export async function* generateReply(input:BotInput):AsyncGenerator<BotChunk> {
       if(e.type==='response.output_text.delta'&&typeof e.delta==='string') { answer+=e.delta; if(answer.length>6000)throw new CustomerTurnHandoff('invalid_response'); }
       if(e.type==='response.failed'||e.type==='error'||e.type==='response.incomplete') throw new Error('AI ตอบไม่สำเร็จ กรุณาลองใหม่');
       if(e.type==='response.completed') {
-        completed=true; const u=e.response?.usage;
+        completed=true; modelIdentity=readModelIdentity({provider:'openai',model:e.response?.model}); const u=e.response?.usage;
         if(u) {const i=Number(u.input_tokens),o=Number(u.output_tokens); const ri=process.env.AI_INPUT_USD_PER_MILLION,ro=process.env.AI_OUTPUT_USD_PER_MILLION;
           const validRates=!!ri&&!!ro&&Number.isFinite(Number(ri))&&Number.isFinite(Number(ro))&&Number(ri)>=0&&Number(ro)>=0;
           usage={inputTokens:i,outputTokens:o,estimatedCostUsd:validRates?(i*Number(ri)+o*Number(ro))/1e6:null};}
@@ -128,6 +129,6 @@ export async function* generateReply(input:BotInput):AsyncGenerator<BotChunk> {
     }
   } if(!completed) throw new Error('AI หยุดตอบก่อนเสร็จ กรุณาลองใหม่');
     if(!isEnglishCustomerReply(answer))throw new CustomerTurnHandoff('language_review');
-    yield {text:answer}; if(usage)yield {usage};
+    yield {text:answer,...(modelIdentity?{modelIdentity}:{})}; if(usage)yield {usage};
   } finally {await reader.cancel().catch(()=>{});reader.releaseLock();}
 }

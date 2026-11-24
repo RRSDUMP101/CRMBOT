@@ -6,6 +6,7 @@ import {database,transaction,closeDatabase} from '../src/lib/db';
 import {acceptApprovedAi,approvedAiStatus,type ApprovedAiEnvelope} from '../src/lib/approved-ai';
 import {bridgePayloadHash,verifyBridgeRequest} from '../src/lib/bridge-protocol';
 import {dispatchSocialReply,socialConfigFingerprint,type SocialChannelConfig} from '../src/lib/social-channels';
+import {conversationDetail} from '../src/lib/service';
 import {readBridgeEvents} from '../src/lib/chat-bridge';
 import {saveSource,reviewSource,saveAiProfile,evaluateAi,activateAi} from '../src/lib/ai-lifecycle';
 import {resolveBridgeAiPolicy,assertBridgeAiPolicy} from '../src/lib/ai-policy-bridge';
@@ -105,4 +106,21 @@ test('social policy binds exact approved account sources and fences changed, exp
   await database.query('UPDATE knowledge SET expires_at=NULL WHERE id=$1',[source.id]);await activateAi(staff,{scope,expectedRevision:1,action:'pause',confirm:true});await assert.rejects(dispatchSocialReply(f.org,accepted.outboundCommandId,{config:f.config,fetch:f.transport}));assert.equal(f.counts().sends,0);
   process.env.CRM_AI_POLICY_BRIDGE_ENABLED='false';assert.deepEqual(await resolveBridgeAiPolicy(f.org,{conversationId:f.conversation,expectedVersion:1}),{version:1,enabled:false,owner:'sale'});await assert.rejects(assertBridgeAiPolicy(f.org,f.conversation,1,policy.proof),/handoff/);
  }finally{process.env.AI_PROVIDER='disabled';process.env.AI_LIFECYCLE_ENABLED='false';process.env.CRM_AI_POLICY_BRIDGE_ENABLED='false';}
+});
+
+test('approved replies retain the proven writer model in staff history and authenticated bridge only', async () => {
+ const f = await fixture();
+ const modelIdentity = {provider: 'anthropic', model: 'claude-sonnet-4-5-20250929'};
+ const source = f.payload.source;
+ source.resultPayload = JSON.stringify({...JSON.parse(source.resultPayload), modelIdentity});
+ source.resultHash = await bridgePayloadHash(source.resultPayload);
+ const accepted = await acceptApprovedAi(f.payload, {fetch: f.transport, dispatch: false});
+ const staff = await conversationDetail(f.org, f.conversation, true, true);
+ const row = staff.messages.find(m => m.id === accepted.messageId)!;
+ assert.deepEqual(row.modelIdentity, modelIdentity);
+ assert.equal(row.approvedAi, true);
+ const visitor = await conversationDetail(f.org, f.conversation);
+ assert.equal('modelIdentity' in visitor.messages.find(m => m.id === accepted.messageId)!, false);
+ const events = (await readBridgeEvents(f.org)).events;
+ assert.deepEqual(events.find(e => e.entity === 'message' && e.record.id === accepted.messageId)?.record.modelIdentity, modelIdentity);
 });

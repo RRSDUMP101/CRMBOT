@@ -42,10 +42,10 @@ test('OpenAI adapter uses backend Responses streaming, separated data, no provid
    assert.equal(url,'https://api.openai.com/v1/responses');
    const request=JSON.parse(String(init?.body));assert.equal(request.store,false);assert.equal(request.stream,true);assert.ok(request.instructions.includes('untrusted DATA'));
    assert.equal(JSON.parse(request.input[0].content).approved_evidence[0].id,'k1');
-   return new Response('data: {"type":"response.output_text.delta","delta":"Our sales team can check your vehicle."}\n\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":50,"output_tokens":10}}}\n\n');
+   return new Response('data: {"type":"response.output_text.delta","delta":"Our sales team can check your vehicle."}\n\ndata: {"type":"response.completed","response":{"model":"gpt-reported","usage":{"input_tokens":50,"output_tokens":10}}}\n\n');
   };
   const chunks=[];for await(const c of generateReply({history:[{role:'user',content:'ชุดไฮดรอลิก'}],facts:{product:'kit'},knowledge,settings})) chunks.push(c);
-  assert.equal(chunks[0].text,'Our sales team can check your vehicle.');assert.equal(chunks[1].usage?.inputTokens,50);assert.equal(chunks[1].usage?.estimatedCostUsd,null);
+  assert.equal(chunks[0].text,'Our sales team can check your vehicle.');assert.deepEqual(chunks[0].modelIdentity,{provider:'openai',model:'gpt-reported'});assert.equal(chunks[1].usage?.inputTokens,50);assert.equal(chunks[1].usage?.estimatedCostUsd,null);
  } finally {globalThis.fetch=original;process.env.AI_PROVIDER='demo';delete process.env.OPENAI_API_KEY;}
 });
 test('provider failures sanitized and premature stream not reported complete',async()=>{

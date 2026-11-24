@@ -1,3 +1,4 @@
+import {readModelIdentity} from './model-identity';
 import { database, transaction, type Executor, type Row } from './db';
 import { BridgeError,bridgeKeyConfig } from './bridge-protocol';
 import {bridgeNonceClaimer} from './bridge-nonces';
@@ -53,8 +54,10 @@ export async function readBridgeEvents(orgId: string, after = 0, limit = 100,env
   after = bridgeInteger(after, 'cursor'); limit = bridgeInteger(limit, 'limit', 100, 1);
   const meta = await metadata(orgId);
   if (after > meta.headSequence) throw new BridgeError(409, 'Cursor is ahead of this log; verify deployment and database before recovery');
-  const rows = (await database.query(`SELECT sequence,event_id,entity,record_json,occurred_at
-    FROM crm_bridge_events WHERE org_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence LIMIT $4`,
+  const rows = (await database.query(`SELECT e.sequence,e.event_id,e.entity,e.record_json,e.occurred_at,
+    json_extract(ar.metadata,'$.provider') AS ai_provider,json_extract(ar.metadata,'$.model') AS ai_model
+    FROM crm_bridge_events e LEFT JOIN audit_events ar ON e.entity='message' AND ar.id=e.record_id AND ar.entity_id=e.record_id AND ar.org_id=e.org_id AND ar.action='ai.model.used'
+    WHERE e.org_id=$1 AND e.sequence>$2 AND e.sequence<=$3 ORDER BY e.sequence LIMIT $4`,
   [orgId, after, meta.headSequence, limit])).rows;
   const metadataRows=envelopeVersion===2?(await database.query('SELECT * FROM crm_bridge_event_envelopes WHERE org_id=$1 AND sequence>$2 AND sequence<=$3 ORDER BY sequence LIMIT $4',[orgId,after,meta.headSequence,limit])).rows:[];
   const envelopes=new Map(metadataRows.map(row=>[Number(row.sequence),row]));
@@ -62,6 +65,9 @@ export async function readBridgeEvents(orgId: string, after = 0, limit = 100,env
     if (Number(row.sequence) !== after + index + 1) throw new BridgeError(409, 'Bridge log has a gap; snapshot recovery is required');
     const record = JSON.parse(row.record_json);
     if (record.org_id !== orgId) throw new BridgeError(500, 'Bridge event scope mismatch');
+    // The immutable receipt is created with the message. Historical events stay unattributed.
+    const identity=readModelIdentity({provider:row.ai_provider,model:row.ai_model});
+    if(identity)record.modelIdentity=identity;
     const base:BridgeEvent={ version: 1, eventId: row.event_id, orgId, sequence: Number(row.sequence), entity: row.entity,
       operation: 'upsert', record, occurredAt: row.occurred_at };
     if(envelopeVersion===1)return base;

@@ -703,3 +703,32 @@ button, input, textarea, select { font: inherit; } button, a, summary { -webkit-
 
 .inbox-columns{position:relative}.inbox-columns>div{position:absolute;top:100%;left:0;z-index:20;min-width:200px;padding:12px;border:1px solid #ccd8e7;background:white;border-radius:8px;box-shadow:0 6px 20px #1233}.inbox-columns label{display:flex;padding:6px;gap:8px}.desk-result-count{flex-wrap:wrap;gap:8px}.desk-inbox[data-preview="false"] .desk-conversation-preview,.desk-inbox[data-status="false"] .desk-conversation-bottom,.desk-inbox[data-date="false"] .desk-conversation-top time,.desk-inbox[data-channel="false"] .desk-avatar i{display:none}
 body:has(.rrs-data-view.is-expanded) :is(.app-rail,.mobile-bottom-nav,.rrs-sidebar,.dom-sidebar,.workspace-topbar,.rrs-topbar,.dom-topbar){visibility:hidden} .rrs-data-view.is-expanded{z-index:90}
+
+/* The same incoming, outgoing and staff-note palette is used in the full inbox and the conversation dock. */
+.desk-channel-mark{display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;background:#fff;border-radius:6px;color:#39616a}
+.desk-channel-mark img,.desk-model img{display:block;object-fit:contain}
+.rrs-workspace .desk-message-history{background-color:#e5f3ef;background-image:radial-gradient(#a9cbc378 .85px,transparent .85px);background-size:15px 15px}
+.rrs-workspace .desk-message-history .message-bubble{background:#fff;color:#18333c;border:1px solid #cadfd8;border-radius:15px 15px 15px 4px}
+.rrs-workspace .desk-message-history :is(.message-agent,.message-assistant) .message-bubble{background:#205f66;color:#fff;border-color:#205f66;border-radius:15px 15px 4px 15px}
+.rrs-workspace .desk-message-history .message-note .message-bubble{background:#fff0cd;color:#684b13;border-color:#edcf91;border-radius:10px}
+.rrs-workspace .desk-message-history .message-system .message-bubble{background:#f2f8f5;color:#466158}
+.rrs-workspace .desk-conversation.selected{background:#e3f3ec;box-shadow:inset 3px 0 #187765}
+.rrs-workspace .desk-history-date{color:#365f59;background:#f5faf8}
+.rrs-workspace .desk-composer:focus-within{box-shadow:inset 0 2px #70a89c}
+.rrs-workspace .desk-composer.is-note{background:#fff5dc}
+.desk-model,.message-label .desk-model{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;color:#26434a}
+.desk-model span,.message-label .desk-model span{font-size:inherit;color:inherit}
+.desk-model b{padding:2px 6px;border-radius:4px;background:#edf1f1;color:#46555b;font-size:12px}
+.desk-model.is-claude b{background:#f8e4d9;color:#77371f}
+.desk-model.is-openai b{background:#e8ecef;color:#1f2a31}
+.rrs-workspace .desk-today>button:nth-child(1){background:#fff1d2;color:#6e4917}
+.rrs-workspace .desk-today>button:nth-child(2){background:#e4f4ee;color:#19594d}
+.rrs-workspace .desk-today>button:nth-child(3){background:#eeeaff;color:#513e77}
+.rrs-workspace .desk-today>button:nth-child(4){background:#e8f2fc;color:#244e72}
+
+.desk-recent-inbox{border-top:3px solid #5b9f92}
+.desk-recent-room{display:flex;align-items:center;gap:12px;width:100%;padding:12px 2px;text-align:left;border-top:1px solid #e0ebe7;background:#fff}
+.desk-recent-room:hover,.desk-recent-room:focus-visible{background:#eff9f5}
+.desk-recent-room>span:not(.desk-channel-mark){min-width:0;flex:1}
+.desk-recent-room strong,.desk-recent-room small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.desk-recent-room small,.desk-recent-room time{color:#506873;font-size:13px}

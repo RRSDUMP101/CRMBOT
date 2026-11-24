@@ -1,3 +1,4 @@
+import {readModelIdentity} from './model-identity';
 import {bridgeKeyConfig,signBridgeRequest} from './bridge-protocol';
 import {isEnglishCustomerReply} from './customer-language';
 import type {BotInput} from './bot';
@@ -24,5 +25,6 @@ export async function customerTurn(input:BotInput,scope:TurnScope,transport:type
   if(x.status!=='reply'||typeof x.text!=='string'||!x.text.trim()||x.text.length>6000)throw new CustomerTurnHandoff(typeof x.reason==='string'&&/^[a-z0-9_-]{1,80}$/i.test(x.reason)?x.reason:'review_required');
   if(!isEnglishCustomerReply(x.text))throw new CustomerTurnHandoff('language_review');
   const summary:TurnSummary|undefined=typeof x.summaryTh==='string'&&x.summaryTh.length<=2400&&/[ก-๙]/u.test(x.summaryTh)?{summaryTh:x.summaryTh,missing:Array.isArray(x.missing)?x.missing.filter((v:unknown)=>typeof v==='string'&&v.length<=160).slice(0,12):[]}:undefined;
-  return {text:x.text as string,summary};
+  const modelIdentity=readModelIdentity(x.modelIdentity);
+  return {text:x.text as string,summary,...(modelIdentity?{modelIdentity}:{})};
 }

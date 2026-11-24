@@ -9,6 +9,8 @@ import {enqueueSocialReply,dispatchSocialReply} from './social-channels';
 import {bridgeConfig} from './chat-bridge';
 import {assertBridgeAiPolicy,parseAiPolicyProof,type AiPolicyProof} from './ai-policy-bridge';
 
+import {readModelIdentity} from './model-identity';
+import {recordModelReceipt} from './model-receipt';
 export type ApprovedAiEnvelope={version:1;kind:'approved-ai-text';commandId:string;conversationId:string;expectedVersion:number;actorId:string;provider:'whatsapp';accountId:string;remoteId:string;text:string;source:{system:'rrs-sale-office';workspace:'live'|'domestic';outboxId:string;jobId:string;jobVersion:number;resultId:string;resultHash:string;resultPayload:string;sourceHash:string;sourceRevision:number;approvalId:string;approvedBy:string;approvedAt:string;aiPolicy?:AiPolicyProof}};
 function object(v:unknown):Row{if(!v||typeof v!=='object'||Array.isArray(v))throw new ApiError(400,'Invalid approved AI command');return v as Row;}
 function bounded(v:unknown,max:number){if(typeof v!=='string'||!v||v.length>max)throw new ApiError(400,'Invalid approved AI text field');return v;}
@@ -61,6 +63,8 @@ export async function acceptApprovedAi(raw:unknown,options:{fetch?:typeof fetch;
     if(!lead?.contact_consent_at||!lead.contact_consent_version)throw new ApiError(409,'Recorded CRM consent required');
     const messageId=randomUUID(),time=new Date().toISOString().replace(/(\.\d{3})Z$/,(_,f)=>f+'000Z');
     await c.query("INSERT INTO messages(id,org_id,conversation_id,role,content) VALUES($1,$2,$3,'agent',$4)",[messageId,config.orgId,payload.conversationId,payload.text]);
+    const identityUsed=readModelIdentity(JSON.parse(payload.source.resultPayload).modelIdentity);
+    if(identityUsed)await recordModelReceipt(c,config.orgId,messageId,identityUsed);
     const command=await enqueueSocialReply(c,config.orgId,payload.conversationId,messageId,payload.text);if(!command.commandId)throw new ApiError(409,'WhatsApp intent required');
     await c.query('UPDATE social_message_provenance SET metadata=$3 WHERE org_id=$1 AND message_id=$2',[config.orgId,messageId,JSON.stringify({approval:'approved_ai',approvedBy:staff.id,commandId:command.commandId,approvedAi:{bridgeCommandId:payload.commandId,sourceSystem:payload.source.system,workspace:payload.source.workspace,jobId:payload.source.jobId,resultId:payload.source.resultId,resultHash:payload.source.resultHash,sourceHash:payload.source.sourceHash,approvalId:payload.source.approvalId,sourceOutboxId:payload.source.outboxId}})]);
     await c.query('INSERT INTO crm_approved_ai_commands(org_id,command_id,payload_hash,payload_json,source_workspace,source_outbox_id,source_job_id,result_hash,actor_id,conversation_id,message_id,outbound_command_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',[config.orgId,payload.commandId,hash,serialized,payload.source.workspace,payload.source.outboxId,payload.source.jobId,payload.source.resultHash,staff.id,payload.conversationId,messageId,command.commandId,time]);
