@@ -7,6 +7,7 @@ import { hashToken, STAFF_COOKIE, VISITOR_COOKIE, WIDGET_COOKIE, type Staff } fr
 import { signBridgeRequest } from '../src/lib/bridge-protocol';
 import { handleBridgeCommand } from '../src/lib/bridge-commands';
 import { messageStream, visitorDetail, conversationAction } from '../src/lib/service';
+import { inbox as staffInbox } from '../src/lib/helpdesk';
 import { readBridgeEvents } from '../src/lib/chat-bridge';
 import { realtimeResponse } from '../src/lib/realtime';
 import { POST } from '../src/app/api/bridge/[...path]/route';
@@ -215,4 +216,29 @@ test('Thai customer question produces one English review acknowledgement and a s
     await handleBridgeCommand(reply); await handleBridgeCommand(reply);
     const after=await visitorDetail(visitor); assert.equal(after.messages.filter(x=>x.content===reply.text).length,1);
   } finally { process.env.AI_PROVIDER=previousProvider; if(previousActors===undefined)delete process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS;else process.env.CRM_CLARIFICATION_ALLOWED_MEMBER_IDS=previousActors; }
+});
+
+test('staff composer replay commits one text and one note while rejecting changed content',async()=>{
+  const f=await fixture();
+  for (const action of ['reply','note']) {
+    const body={commandId:randomUUID(), text:'Staff composer fixture '+action};
+    await Promise.all([conversationAction(f.staff,f.conversation,action,body),conversationAction(f.staff,f.conversation,action,body)]);
+    await conversationAction(f.staff,f.conversation,action,body);
+    await assert.rejects(conversationAction(f.staff,f.conversation,action,{...body,text:'Changed fixture'}),/ข้อมูลอื่น/);
+  }
+  const state=await counts(f.org);
+  assert.equal(state.messages,2);assert.equal(state.commands,2);assert.equal(state.audits,2);
+});
+
+test('company and quote search only locate linked work in the current customer market',async()=>{
+  const f=await fixture(), other=await fixture(), deal=randomUUID();
+  await database.query("UPDATE leads SET market='export' WHERE org_id=$1 AND id=$2",[f.org,f.lead]);
+  const payload=JSON.stringify({companyName:'Example บริษัททดสอบ',quotation:{number:'QT-MARKET-FIXTURE'}});
+  await database.query("INSERT INTO crm_sale_context(org_id,deal_id,lead_id,workspace,aggregate_version,sale_sequence,payload,updated_at) VALUES($1,$2,$3,'live',1,1,$4,$5)",[f.org,deal,f.lead,payload,new Date().toISOString()]);
+  const find=(staff:Staff,q:string)=>staffInbox(staff,new URL('/api/admin/inbox?'+new URLSearchParams({q,leadId:f.lead}),origin));
+  assert.equal((await find(f.staff,'บริษัททดสอบ')).items[0]?.id,f.conversation);
+  assert.equal((await find(f.staff,'QT-MARKET-FIXTURE')).items[0]?.id,f.conversation);
+  assert.equal((await find(other.staff,'QT-MARKET-FIXTURE')).items.length,0);
+  await database.query("UPDATE leads SET market='domestic' WHERE org_id=$1 AND id=$2",[f.org,f.lead]);
+  assert.equal((await find(f.staff,'QT-MARKET-FIXTURE')).items.length,0);
 });
