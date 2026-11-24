@@ -13,6 +13,19 @@ import { POST } from '../src/app/api/bridge/[...path]/route';
 import { GET as getApi } from '../src/app/api/[...path]/route';
 import { NextRequest } from 'next/server';
 
+test('native reply and note reuse the same action receipt across a retry and reject a changed draft',async()=>{
+  const f=await fixture();
+  for(const action of ['reply','note']){
+    const body={clientId:randomUUID(),text:action==='reply'?'We will confirm the specifications.':'ตรวจรุ่นรถ'};
+    const send=()=>conversationAction(f.staff,f.conversation,action,body);
+    await Promise.all([send(),send()]);
+    await send();
+    await assert.rejects(conversationAction(f.staff,f.conversation,action,{...body,text:body.text+' updated'}),{status:409});
+  }
+  assert.equal((await counts(f.org)).messages,2);
+  assert.equal((await counts(f.org)).commands,2);
+});
+
 const origin = 'http://localhost';
 const secret = 'synthetic-command-and-stream-test-secret-32-characters';
 const keys = ['DEMO_MODE','AI_PROVIDER','D1_LOCAL_DIR','RRS_WORKERS','APP_ORIGIN','SESSION_SECRET','CRM_BRIDGE_ENABLED','CRM_BRIDGE_ORG_ID','CRM_BRIDGE_SECRET','CRM_BRIDGE_ALLOWED_MEMBER_IDS'] as const;

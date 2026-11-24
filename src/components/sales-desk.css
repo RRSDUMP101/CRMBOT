@@ -1,0 +1,83 @@
+.rrs-workspace { --desk-rule: #dbe3e9; --desk-tint: #f4f7fa; }
+.rrs-workspace .app-rail {background:#f6f8fa;border-right:1px solid var(--desk-rule);color:#172f45;}
+.rrs-workspace .rail-group-label,.rrs-workspace .rail-account small{color:#52677a}
+.rrs-workspace .rail-item,.rrs-workspace .rail-operator-links a,.rrs-workspace .rail-account strong,.rrs-workspace .rail-account button {color:#294356}
+.rrs-workspace .rail-item svg {color:#516b7c}
+.rrs-workspace .rail-item:hover,.rrs-workspace .rail-item.active,.rrs-workspace .rail-item[aria-current=page] {background:#e0edff;color:#074f99;box-shadow:none}
+.rrs-workspace .rail-item.active svg{color:#0759a5}
+.rrs-workspace .rail-brand .rrs-brand-type b{background:none;color:#183b56;-webkit-text-fill-color:currentColor}
+.rrs-workspace .rail-brand .rrs-brand-type small,.rrs-workspace .rail-sale-link{color:#225077}
+.rrs-workspace .workspace-topbar {background:#fff;color:#193546;border-bottom:1px solid var(--desk-rule);min-height:66px;height:66px;box-shadow:none}
+.rrs-workspace .workspace-brandline>div small,.rrs-workspace .workspace-refresh,.rrs-workspace .mobile-menu{color:#526878}
+.rrs-workspace .workspace-brandline>div strong {color:#193546;font-size:19px}
+.rrs-workspace .workspace-topbar-actions .button{color:#225077;border-color:var(--desk-rule)}
+.rrs-workspace .workspace-demo-label{background:#fff3d8;color:#765211}
+.rrs-workspace .main-content.inbox-main {height:calc(100dvh - 66px);min-height:0}
+.crm-inbox-full {height:100%;min-height:0}
+.crm-inbox-full[hidden],.crm-room-dock[hidden]{display:none!important}
+.rrs-workspace .desk-inbox {height:100%;min-height:0;padding:0;gap:0;grid-template-rows:minmax(0,1fr);grid-template-columns: minmax(240px,27%) minmax(270px,1fr) minmax(220px,24%);background:#fff}
+.rrs-workspace .desk-inbox>.desk-priorities{display:none}
+.rrs-workspace .desk-list-pane,.rrs-workspace .desk-chat-pane,.rrs-workspace .desk-profile-pane {grid-row:1;border:0;border-radius:0;min-height:0}
+.rrs-workspace .desk-list-pane,.rrs-workspace .desk-chat-pane {border-right:1px solid var(--desk-rule)}
+.rrs-workspace .desk-conversations{min-height:0}
+.rrs-workspace .desk-list-header {padding:15px 14px 10px}
+.rrs-workspace .desk-list-header h1{font-size:17px}
+.rrs-workspace .desk-queues{display:flex;flex-wrap:wrap;padding:0 12px 10px;gap:5px}
+.rrs-workspace .desk-queues>button {display:flex;gap:6px;align-items:center;justify-content:space-between;border-radius:5px;padding:4px 8px;min-height:30px;font-size:12px}
+.rrs-workspace .desk-result-count{font-size:11px;padding:5px 12px}
+.rrs-workspace .desk-conversation{padding:13px 12px}
+.rrs-workspace .desk-conversation-top strong{font-size:14px}
+.rrs-workspace .desk-conversation-preview{font-size:13px;line-height:1.5}
+.rrs-workspace .desk-message-history {background:#fafbfd;min-height:0}
+.desk-history-date{display:flex;align-items:center;justify-content:center;gap:12px;color:#526578;font-size:12px;margin:12px 0 20px}
+.desk-history-date:before,.desk-history-date:after{content:"";height:1px;background:#dae3ea;max-width:75px;flex:1}
+.desk-pinned,.crm-dock-header{display:flex;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--desk-rule);font-size:12px;color:#244764}
+.desk-pinned{background:#f1f7ff;flex:none}
+.desk-pinned>svg:last-child{margin-left:auto}
+.rrs-workspace .desk-choose-queue{display:none}
+.desk-view-menu{display:none}
+.desk-today{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:20px;border:1px solid var(--desk-rule);border-radius:8px;overflow:hidden;background:white}
+.desk-today button{display:grid;grid-template-columns:1fr auto;gap:5px;padding:14px 16px;text-align:left;background:white;color:#24435c;border-right:1px solid var(--desk-rule)}
+.desk-today button:hover{background:#f0f6ff}
+.desk-today span{grid-column:1/-1;font-size:13px}
+.desk-today b{font-size:23px}
+.desk-today svg{align-self:center}
+@media(min-width:1400px){
+ .rrs-workspace .desk-inbox:not(.desk-inbox-compact){grid-template-columns:139px minmax(215px,24%) minmax(285px,1fr) minmax(205px,22%)}
+ .desk-inbox:not(.desk-inbox-compact) .desk-view-menu{grid-row:1;display:flex;flex-direction:column;align-items:stretch;gap:3px;background:#f9fafc;border-right:1px solid var(--desk-rule);padding:15px 8px}
+ .desk-view-menu h2{font-size:14px;color:#345367;margin:3px 7px 14px}
+ .desk-view-menu button{display:flex;align-items:center;justify-content:space-between;text-align:left;background:transparent;padding:9px 7px;color:#41586b;border-radius:5px;font-size:13px}
+ .desk-view-menu button[aria-pressed=true]{background:#deecfa;color:#154f87;font-weight:650}
+ .desk-view-menu b{font-size:11px}
+ .rrs-workspace .desk-inbox:not(.desk-inbox-compact) .desk-queues{display:none}
+}
+@media(max-width:780px){.desk-today{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.crm-lead-row{border:1px solid var(--desk-rule);border-radius:8px;overflow:hidden;margin-bottom:9px;background:white}
+.crm-lead-row>.lead-card{margin:0;border:0;width:100%;box-shadow:none}
+.crm-lead-row>.button{margin:0 8px 6px}
+.crm-room-dock{position:fixed;right:20px;bottom:16px;z-index:59;width:min(440px,calc(100vw - 32px));height:min(690px,calc(100dvh - 96px));display:flex;flex-direction:column;background:#fff;border:1px solid #abbfd0;border-radius:12px;overflow:hidden;box-shadow:0 12px 38px #12314d30}
+.crm-dock-header{padding:5px 8px 5px 13px}
+.crm-dock-header span{margin-right:auto;font-weight:600;display:flex;gap:8px;align-items:center}
+.crm-dock-header .button{min-height:32px}
+.rrs-workspace .desk-inbox-compact{display:flex;flex:1;min-height:0;height:auto}
+.rrs-workspace .desk-inbox-compact>:is(.desk-priorities,.desk-list-pane,.desk-profile-pane,.profile-backdrop){display:none!important}
+.rrs-workspace .desk-inbox-compact>.desk-chat-pane{display:flex;flex:1;min-width:0;border:0}
+.desk-inbox-compact :is(.profile-toggle,.desk-back){display:none!important}
+.crm-dock-bubble{position:fixed;right:18px;bottom:18px;z-index:59;width:52px;height:52px;display:grid;place-items:center;border-radius:50%;background:var(--rrs-blue);color:white;box-shadow:0 4px 14px #19426738}
+.crm-dock-bubble b{position:absolute;right:-2px;top:-4px;padding:0 5px;border-radius:12px;background:#a63128;color:#fff;font-size:11px}
+@media(max-width:1260px){.rrs-workspace .desk-inbox{grid-template-columns:minmax(248px,34%) minmax(0,1fr)}}
+@media(max-width:780px){
+ .rrs-workspace .main-content.inbox-main{height:calc(100dvh - 130px - env(safe-area-inset-bottom));}
+ .rrs-workspace .desk-inbox{display:flex;flex-direction:column;padding:0;gap:0}
+ .rrs-workspace .desk-list-pane{flex:1;min-height:0}
+ .rrs-workspace .desk-chat-pane,.rrs-workspace .desk-inbox.has-selection>.desk-list-pane{display:none}
+ .rrs-workspace .desk-inbox.has-selection>.desk-chat-pane{display:flex;flex:1}
+ .rrs-workspace .desk-back,.rrs-workspace .desk-choose-queue{display:inline-flex}
+ .rrs-workspace .desk-list-header .desk-choose-queue{margin-left:auto}
+ .rrs-workspace .desk-inbox:not(.queue-open) .desk-queues{display:none}
+ .rrs-workspace .desk-profile-pane.is-open{inset:0;width:100%;border-radius:0}
+ .rrs-workspace .desk-composer{max-height:42dvh}
+ .crm-room-dock{inset:0;width:100%;height:100dvh;max-height:100dvh;border:0;border-radius:0;z-index:75;padding-bottom:env(safe-area-inset-bottom)}
+ .crm-dock-bubble{bottom:calc(76px + env(safe-area-inset-bottom))}
+ .rrs-workspace .workspace-brandline>div small{display:none}
+}

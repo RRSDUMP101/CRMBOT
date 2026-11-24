@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, getDatabase, type Executor, type Row } from './db';
 import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
 import { ApiError, type Staff, type Visitor, fields, str, uuid, oneOf, tags, isoDate, assignee, requireAdmin, hashPassword, hashToken, newToken, rateLimit } from './auth';
@@ -128,7 +128,16 @@ export async function appointmentConfirm(visitor:Visitor,body:Record<string,unkn
 }
 
 export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>,bridgeCommand?:{id:string;hash:string;sourceMessageId?:string}) {
-  uuid(id);fields(body,['text']);
+  uuid(id);
+  const canRetry = !bridgeCommand && (action==='reply' || action==='note');
+  fields(body,canRetry?['text','clientId']:['text']);
+  if(canRetry && body.clientId !== undefined){
+    const requestId=uuid(body.clientId);
+    bridgeCommand={
+      id:'desk:'+requestId,
+      hash:createHash('sha256').update(JSON.stringify([action,str(body.text,'ข้อความ',6000,true)])).digest('hex')
+    };
+  }
   if(!['claim','release','reply','note','resolve','summarize'].includes(action))throw new ApiError(404,'ไม่พบคำสั่ง');
   const queuedCommand=await transaction(staff.orgId, async connection=>{
     if(bridgeCommand){

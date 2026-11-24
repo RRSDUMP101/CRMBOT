@@ -38,13 +38,15 @@ function cursorValue(value:string) {
 
 export async function inbox(staff:Staff,url:URL) {
   const UNREAD=unreadCount(staff);
-  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
+  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account','lead'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
   const query=str(url.searchParams.get('q'),'คำค้น',200);
   const view=oneOf(url.searchParams.get('view')||'all',['all','mine','unassigned','waiting','closed','unread'],'กล่องข้อความ');
   const rawLimit=url.searchParams.get('limit')||'30';
   if(!/^\d{1,3}$/.test(rawLimit)||Number(rawLimit)<1||Number(rawLimit)>100)throw new ApiError(400,'จำนวนรายการต้องอยู่ระหว่าง 1 ถึง 100');
   const limit=Number(rawLimit);const params:unknown[]=[staff.orgId,staff.id];const where=['c.org_id=$1'];
   const bind=(value:unknown)=>{params.push(value);return `$${params.length}`;};
+  const lead=url.searchParams.get('lead');
+  if(lead)where.push(`c.lead_id=${bind(uuid(lead,'ลูกค้า'))}`);
   where.push(view==='closed'?"c.status='resolved'":"c.status!='resolved'");
   if(view==='mine')where.push('c.assignee_id=$2');
   if(view==='unassigned')where.push('c.assignee_id IS NULL');
@@ -70,7 +72,7 @@ export async function inbox(staff:Staff,url:URL) {
     // D1 limits LIKE patterns to 50 bytes, too short for normal Thai names.
     // INSTR keeps search literal (including % and _) without truncation.
     const term=bind(query);
-    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${visibleMessage(staff,'search_message')} AND instr(lower(search_message.content),lower(${term}))>0))`);
+    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM crm_sale_context sc WHERE sc.org_id=c.org_id AND sc.lead_id=c.lead_id AND COALESCE(json_extract(sc.payload,'$.removed'),0)=0 AND (instr(lower(json_extract(sc.payload,'$.quotation.number')),lower(${term}))>0 OR instr(lower(json_extract(sc.payload,'$.title')),lower(${term}))>0)) OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${visibleMessage(staff,'search_message')} AND instr(lower(search_message.content),lower(${term}))>0))`);
   }
   const totalParams=[...params];const totalWhere=where.join(' AND ');
   const cursor=url.searchParams.get('cursor');

@@ -1,11 +1,13 @@
 "use client";
-import {DataView} from "./data-view";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { subscribeCRMChanges } from './realtime';
-import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartColumn, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Megaphone, Menu, MessageSquare, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe, Zap, Search } from "lucide-react";
+import { ArrowUpRight, Bell, BookOpen, CalendarDays, ChartColumn, ChartNoAxesCombined, ChevronRight, CircleHelp, LayoutDashboard, LogOut, Megaphone, Menu, MessageSquare, Plus, Minus, Maximize2, RefreshCw, Settings2, ShieldCheck, Sparkles, Users, Workflow, X, Bookmark, Globe, Zap, Search } from "lucide-react";
 import { Button, Card, Badge, Empty, Field, Input, RrsBrand } from "./ui";
 import { api, date, number, stages, stageNames, type Member, type Snapshot } from "./data";
 import { Customers, Tasks, KnowledgePanel, SettingsPanel, MembersPanel } from "./workspace-panels";
+import "./sales-desk.css";
+import type {InboxQueue,InboxResult} from "./inbox-data";
 import { InboxWorkspace } from "./inbox-workspace";
 import { useFocusScope } from "./focus-scope";
 import { ReplyTemplatesPanel } from "./reply-templates";
@@ -28,7 +30,7 @@ const nav = [
   { id: "reports", label: "รายงานและ SLA", short: "รายงาน", icon: ChartColumn, group: "งานประจำวัน" },
   { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark, group: "สื่อสารและแคมเปญ" },
   { id: "broadcast", label: "แคมเปญข้อความ", short: "แคมเปญ", icon: Megaphone, group: "สื่อสารและแคมเปญ" },
-  { id: "wa-templates", label: "All Inbox", short: "เทมเพลต", icon: MessageSquare, group: "สื่อสารและแคมเปญ" },
+  { id: "wa-templates", label: "เทมเพลต WhatsApp", short: "เทมเพลต", icon: MessageSquare, group: "สื่อสารและแคมเปญ" },
   { id: "operators", label: "ทีมและการจัดสรรงาน", short: "ทีม", icon: Users, group: "AI และระบบอัตโนมัติ" },
   { id: "flows", label: "Flow Builder", short: "Flow", icon: Zap, group: "AI และระบบอัตโนมัติ" },
   { id: "knowledge", label: "คลังความรู้", short: "ความรู้", icon: BookOpen, group: "AI และระบบอัตโนมัติ" },
@@ -41,24 +43,29 @@ const nav = [
   { id: "system-health", label: "สถานะซิงก์และระบบ", short: "สถานะ", icon: RefreshCw, group: "ตั้งค่าและเชื่อมต่อ", admin: true },
 ];
 const navGroups = [...new Set(nav.map(item => item.group))];
-const viewDescriptions: Record<string, string> = {
-  inbox: "ดูแลลูกค้าและติดตามงานในหน้าเดียว", dashboard: "ภาพรวมบทสนทนาและโอกาสขายของทีม",
-  customers: "ข้อมูลลูกค้าและขั้นตอนการขาย", tasks: "จัดลำดับงานและนัดหมายที่ต้องดูแล",
-  reports: "เวลาตอบกลับ งานค้าง และผลงานจากข้อมูลจริง", templates: "คำตอบที่ใช้บ่อยของทีม",
-  broadcast: "จัดเตรียมข้อความสำหรับลูกค้าที่ให้ความยินยอม", flows: "ออกแบบ ทดลอง และจัดการขั้นตอนอัตโนมัติ",
-};
 type Bootstrap = { demo: boolean; provider: string; user: Member | null };
-export type PanelProps = { data: Snapshot; reload: () => Promise<void>; notify: (text: string) => void };
+export type PanelProps = { data: Snapshot; reload: () => Promise<void>; notify: (text: string) => void; openLeadChat?:(leadId:string)=>void };
 
 export default function Workspace() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [data, setData] = useState<Snapshot | null>(null);
   const [view, setView] = useState("inbox"); const [mobile, setMobile] = useState(false);
   const [globalSearch, setGlobalSearch] = useState("");
-  const [inboxSearch, setInboxSearch] = useState({ value: "", revision: 0 });
+  const [inboxSearch, setInboxSearch] = useState<{value:string;revision:number;queue?:InboxQueue}>({ value: "", revision: 0 });
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [roomRequest,setRoomRequest]=useState<{id:string;sequence:number}>();
+  const [dock,setDock]=useState<'closed'|'open'|'minimized'>('closed');
+  const [dueOnly,setDueOnly]=useState(false);
+  const [dockTitle,setDockTitle]=useState('');
+  const [dockUnread,setDockUnread]=useState(0);
+  const openSequence=useRef(0);
   const navigate = useCallback((next: string) => {
-    setView(next); setMobile(false); window.history.replaceState(null, "", "#" + next);
+    setView(next); setMobile(false);setDueOnly(false);
+    const url=new URL(location.href);
+    if(next!=='inbox')url.searchParams.delete('conversation');
+    url.hash=next;
+    if(url.toString()!==location.href)window.history.pushState(null,'',url);
+    if(next==='inbox')setDock('closed');
   }, []);
   const railRef = useRef<HTMLElement>(null);
   useFocusScope(mobile, railRef, () => setMobile(false), true, "#workspace-menu-trigger");
@@ -66,13 +73,34 @@ export default function Workspace() {
   const [error, setError] = useState(""); const [loading, setLoading] = useState(false); const [toast, setToast] = useState("");
   const [from, setFrom] = useState(new Date(Date.now() + 7 * 3600000 - 29 * 86400000).toISOString().slice(0, 10)); const [to, setTo] = useState(new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10));
   const notify = useCallback((text: string) => { setToast(text); }, []);
+  const openLeadChat=async(leadId:string)=>{
+    const seq=++openSequence.current;
+    try{
+      const find=(view:string)=>api<InboxResult>('/api/admin/inbox?'+new URLSearchParams({lead:leadId,view,limit:'1'}));
+      const row=(await find('all')).items[0] || (await find('closed')).items[0];
+      if(seq!==openSequence.current)return;
+      if(!row){notify('ยังไม่มีห้องสนทนาของลูกค้ารายนี้');return;}
+      setRoomRequest({id:row.id,sequence:seq});setDockTitle(row.leadName||'ลูกค้า');setDockUnread(row.unreadCount);setDock('open');
+      const url=new URL(location.href);url.searchParams.set('conversation',row.id);
+      window.history.pushState({rrsDock:true},'',url);
+    }catch(e){if(seq===openSequence.current)notify((e as Error).message);}
+  };
+  const changeDock=(state:'closed'|'minimized')=>{
+    ++openSequence.current;setDock(state);
+    const url=new URL(location.href);url.searchParams.delete('conversation');
+    window.history.replaceState(null,'',url);
+  };
+  useEffect(()=>{
+    const pop=()=>{if(!window.history.state?.rrsDock)setDock('closed');};
+    window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop);
+  },[]);
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(""), 4500); return () => clearTimeout(timer); } }, [toast]);
   const initialize = useCallback(async () => { setError(""); try { setBootstrap(await api<Bootstrap>("/api/bootstrap")); } catch (e) { setError((e as Error).message); } }, []);
   const reload = useCallback(async () => { if (!bootstrap?.user) return; setLoading(true); try { const params = new URLSearchParams(); if (from) params.set("from", from); if (to) params.set("to", to); setData(await api<Snapshot>("/api/admin/snapshot?" + params)); setRefreshedAt(new Date()); setError(""); } catch (e) { setError((e as Error).message); } finally { setLoading(false); } }, [bootstrap?.user, from, to]);
   useEffect(() => { void initialize(); }, [initialize]);
   // The channel connection wizard returns here from the provider's consent screen.
   useEffect(() => {
-    const restoreView = () => { const hash = window.location.hash.slice(1); if (hash === "social-accounts") setView("integrations"); else if (nav.some(item => item.id === hash)) setView(hash); };
+    const restoreView = () => { const hash = window.location.hash.slice(1); if (hash === "social-accounts") setView("integrations"); else if (nav.some(item => item.id === hash)) setView(hash); else if(!hash)setView("inbox"); };
     restoreView(); window.addEventListener("hashchange", restoreView); return () => window.removeEventListener("hashchange", restoreView);
   }, []);
   useEffect(() => { void reload(); }, [reload]);
@@ -80,7 +108,7 @@ export default function Workspace() {
   useEffect(() => { if (!bootstrap?.user) return; const timer = setInterval(() => void reload(), 15000); return () => clearInterval(timer); }, [bootstrap?.user, reload]);
   if (!bootstrap) return <main className="full-state">{error ? <><h2>เชื่อมต่อระบบไม่สำเร็จ</h2><p role="alert">{error}</p><Button onClick={initialize}>ลองอีกครั้ง</Button></> : <><span className="spinner" /><p>กำลังเตรียมพื้นที่ทำงาน</p></>}</main>;
   if (!bootstrap.user) return <Login demo={bootstrap.demo} onLogin={async () => { setData(null); await initialize(); }} />;
-  const props: PanelProps | null = data ? { data, reload, notify } : null;
+  const props: PanelProps | null = data ? { data, reload, notify, openLeadChat } : null;
   const active = nav.find(n => n.id === view) || nav[1];
   const visibleNav = nav.filter(item => !item.admin || bootstrap.user?.role === "Admin");
   const restricted = !!active.admin && bootstrap.user.role !== "Admin";
@@ -92,19 +120,24 @@ export default function Workspace() {
       <nav aria-label="เมนูหลัก">{navGroups.map(group => <div className="rail-group" key={group}><p className="rail-group-label">{group}</p>{visibleNav.filter(item => item.group === group).map(item => <button key={item.id} title={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => navigate(item.id)} className={`rail-item ${view === item.id ? "active" : ""}`}><item.icon size={20} /><span>{item.label}</span></button>)}</div>)}</nav>
       <div className="rail-operator-links"><a href="/operators?tab=mentions">บันทึกและการกล่าวถึง</a><a href="/operators?tab=fields">ฟิลด์เพิ่มเติม</a></div>
       <a className="rail-sale-link" href="https://rrs-sales-office-hub.com/" target="_blank" rel="noreferrer">เปิด Sale Office <ArrowUpRight size={16} /></a>
-      <div className="rail-account"><span className="user-avatar">{bootstrap.user.name.slice(0, 1)}</span><div><strong>{bootstrap.user.name}</strong><small>{bootstrap.user.role === "Admin" ? "ผู้ดูแลระบบ" : "ทีมขาย RRS"}</small></div><button title="ออกจากระบบ" aria-label="ออกจากระบบ" onClick={async () => { try { await api("/api/auth/logout", {}); setData(null); await initialize(); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div>
+      <div className="rail-account"><span className="user-avatar">{bootstrap.user.name.slice(0, 1)}</span><div><strong>{bootstrap.user.name}</strong><small>{bootstrap.user.role === "Admin" ? "ผู้ดูแลระบบ" : "ทีมขาย RRS"}</small></div><button title="ออกจากระบบ" aria-label="ออกจากระบบ" onClick={async () => { try { await api("/api/auth/logout", {}); setData(null);setDock('closed');setRoomRequest(undefined);await initialize(); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div>
     </aside>
     <div className="workspace-body" inert={mobile || undefined}>
       <header className="workspace-topbar">
-        <div className="workspace-brandline"><button id="workspace-menu-trigger" className="mobile-menu" aria-label="เปิดเมนู" aria-expanded={mobile} onClick={() => setMobile(true)}><Menu size={21} /></button><div><strong>{active.label}</strong><small>{viewDescriptions[view] || "พื้นที่ทำงาน RRS CRM"}</small></div></div>
+        <div className="workspace-brandline"><button id="workspace-menu-trigger" className="mobile-menu" aria-label="เปิดเมนู" aria-expanded={mobile} onClick={() => setMobile(true)}><Menu size={21} /></button><div><small>RRS / CRM Terminal</small><strong>{active.label}</strong></div></div>
         <form className="workspace-search" role="search" onSubmit={event => { event.preventDefault(); setInboxSearch(previous => ({ value: globalSearch.trim(), revision: previous.revision + 1 })); navigate("inbox"); }}><Search size={18} /><Input aria-label="ค้นหาลูกค้าและข้อความในกล่องข้อความ" placeholder="ค้นหาลูกค้าหรือข้อความ…" value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} /><button type="submit" aria-label="ค้นหาในกล่องข้อความ"><ChevronRight size={18} /></button></form>
         <div className="workspace-topbar-actions"><button className="workspace-refresh" title="รีเฟรชข้อมูลพื้นที่ทำงาน" aria-label="รีเฟรชข้อมูลพื้นที่ทำงาน" disabled={loading} onClick={reload}><RefreshCw size={18} className={loading ? "spin" : ""} /><span>{refreshedAt ? `อัปเดต ${refreshedAt.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" })}` : "กำลังโหลด"}</span></button>{(bootstrap.demo || bootstrap.provider === "demo") && <span className="workspace-demo-label">ข้อมูลสาธิต</span>}{bootstrap.provider === "disabled" && <span className="workspace-demo-label">AI ยังไม่เปิด</span>}<a href="/chat" target="_blank" rel="noreferrer" className="button button-secondary button-sm">เปิดเว็บแชต <ArrowUpRight size={15} /></a></div>
       </header>
       <main id="workspace-main" tabIndex={-1} className={`main-content ${view === "inbox" ? "inbox-main" : ""}`}>
-        {view !== "inbox" && <><div className="page-heading"><div><h1>{active.label}</h1><p>{view === "dashboard" ? "ติดตามทุกบทสนทนาและโอกาสขาย ด้วยข้อมูลจริงของทีม" : view === "templates" ? "คำตอบที่ใช้บ่อย ช่วยทีมตอบได้เร็วและสม่ำเสมอ" : view === "flows" ? "ติดแท็ก มอบหมาย สร้างงาน และส่งข้อความตามเงื่อนไข ทดสอบก่อนเผยแพร่ทุกครั้ง" : view === "broadcast" ? "ส่งข่าวสารถึงลูกค้า WhatsApp และ LINE ที่ยินยอมแล้วเท่านั้น ปิดไว้เป็นค่าเริ่มต้น" : view === "reports" ? "เวลาตอบกลับ งานค้าง และผลงานรายช่องทาง คำนวณจากข้อมูลจริงเท่านั้น" : "จัดการข้อมูลของทีมในที่เดียว"}</p></div>{view !== "reports" && <Button variant="secondary" size="sm" disabled={loading} onClick={reload}><RefreshCw size={15} className={loading ? "spin" : ""} />รีเฟรช</Button>}</div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
+        {view !== "inbox" && <><div className="page-heading"><h1>{active.label}</h1></div>{(bootstrap.demo || bootstrap.provider === "demo") && <div className="demo-banner"><Sparkles size={16} /><span>{bootstrap.demo ? "ฐานข้อมูลสาธิต · " : "ฐานข้อมูล PostgreSQL · "}{bootstrap.provider === "demo" ? "ใช้ตัวตอบตามกฎ ยังไม่เชื่อม LLM ภายนอก" : "เชื่อมผู้ให้บริการ AI ภายนอกผ่านเซิร์ฟเวอร์"}</span></div>}</>}
         {error && <div className="alert alert-error" role="alert">{error}<Button variant="ghost" size="sm" onClick={reload}>ลองอีกครั้ง</Button></div>}
         {!data && !error && <div className="workspace-loading"><span className="spinner" /><p>กำลังเปิดพื้นที่ทำงาน…</p></div>}
-        {restricted && <Card><Empty title="พื้นที่สำหรับผู้ดูแลระบบ" detail="เลือกเมนูอื่นเพื่อทำงานต่อ หรือติดต่อผู้ดูแลหากต้องการสิทธิ์เพิ่มเติม" /></Card>}{props && !restricted && <>{view === "inbox" && <DataView table={false} title="All Inbox"><InboxWorkspace {...props} searchRequest={inboxSearch} navigate={navigate} /></DataView> }{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={navigate} />}{view === "reports" && <ReportsPanel user={data!.user} members={data!.members} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} />}{view === "broadcast" && <BroadcastPanel isAdmin={data!.user.role === "Admin"} />}{view === "flows" && <FlowsPanel {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "ai-lifecycle" && <AiLifecyclePanel />}{view === "wa-templates" && <WhatsappTemplatesPanel isAdmin={data!.user.role === "Admin"} />}{view === "operators" && <><div className="operator-shortcuts"><a href="/operators?tab=teams" className="button button-secondary">ทีมและเวลาทำการ <ArrowUpRight size={15} /></a><a href="/operators?tab=fields" className="button button-secondary">ฟิลด์เพิ่มเติม <ArrowUpRight size={15} /></a><a href="/operators?tab=mentions" className="button button-secondary">บันทึกและการกล่าวถึง <ArrowUpRight size={15} /></a></div><OperatorWorkspace embedded /></>}{view === "public-api" && data!.user.role === "Admin" && <IntegrationsApiPanel />}{view === "connectors" && <ConnectorsPanel />}{view === "system-health" && data!.user.role === "Admin" && <SystemHealthPanel />}{view === "settings" && <><SettingsPanel {...props} /><Card className="rrs-optional-integration"><div><Badge>F26 · ส่วนเสริม</Badge><h2>REA ยังไม่ได้เชื่อมต่อ</h2><p>ระบบ CRM และ Sale Office ใช้งานได้ตามปกติ การวิเคราะห์เพิ่มเติมด้วย REA ยังไม่มีการเชื่อมต่อที่ได้รับอนุญาต</p></div><Button disabled>ยังไม่เปิดใช้งาน</Button></Card></>}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
+        {props && <div className={view==='inbox'?'crm-inbox-full':'crm-room-dock'} hidden={view!=='inbox' && dock!=='open'}>
+          {view!=='inbox' && <div className="crm-dock-header"><span><MessageSquare size={16}/> {dockTitle}</span><Button variant="ghost" size="icon" aria-label="ย่อแชท" onClick={()=>changeDock('minimized')}><Minus size={16}/></Button><Button variant="ghost" size="icon" aria-label="ขยายไปกล่องข้อความ" onClick={()=>{const url=new URL(location.href);if(roomRequest?.id)url.searchParams.set('conversation',roomRequest.id);url.hash='inbox';history.pushState(null,'',url);setView('inbox');setDock('closed');}}><Maximize2 size={15}/></Button><Button variant="ghost" size="icon" aria-label="ปิดแชท" onClick={()=>changeDock('closed')}><X size={16}/></Button></div>}
+          <InboxWorkspace {...props} searchRequest={inboxSearch} navigate={navigate} roomRequest={roomRequest} visible={view==='inbox'||dock==='open'} compact={view!=='inbox'} onUnread={setDockUnread} />
+        </div>}
+        {view!=='inbox'&&dock==='minimized'&&<button className="crm-dock-bubble" aria-label={'กลับไปตอบ '+dockTitle+' · '+dockUnread+' ข้อความยังไม่อ่าน'} onClick={()=>setDock('open')}><MessageSquare size={23}/>{dockUnread>0&&<b>{dockUnread}</b>}</button>}
+        {restricted && <Card><Empty title="พื้นที่สำหรับผู้ดูแลระบบ" detail="เลือกเมนูอื่นเพื่อทำงานต่อ หรือติดต่อผู้ดูแลหากต้องการสิทธิ์เพิ่มเติม" /></Card>}{props && !restricted && <>{view === "dashboard" && <Dashboard {...props} from={from} to={to} setFrom={setFrom} setTo={setTo} navigate={navigate} openQueue={queue=>{setInboxSearch(prev=>({revision:prev.revision+1,value:"",queue}));navigate("inbox");}} openDue={()=>{navigate("tasks");setDueOnly(true);}} />}{view === "reports" && <ReportsPanel user={data!.user} members={data!.members} />}{view === "customers" && <Customers {...props} />}{view === "tasks" && <Tasks {...props} dueOnly={dueOnly} setDueOnly={setDueOnly} />}{view === "broadcast" && <BroadcastPanel isAdmin={data!.user.role === "Admin"} />}{view === "flows" && <FlowsPanel {...props} />}{view === "templates" && <ReplyTemplatesPanel {...props} />}{view === "knowledge" && <KnowledgePanel {...props} />}{view === "ai-lifecycle" && <AiLifecyclePanel />}{view === "wa-templates" && <WhatsappTemplatesPanel isAdmin={data!.user.role === "Admin"} />}{view === "operators" && <><div className="operator-shortcuts"><a href="/operators?tab=teams" className="button button-secondary">ทีมและเวลาทำการ <ArrowUpRight size={15} /></a><a href="/operators?tab=fields" className="button button-secondary">ฟิลด์เพิ่มเติม <ArrowUpRight size={15} /></a><a href="/operators?tab=mentions" className="button button-secondary">บันทึกและการกล่าวถึง <ArrowUpRight size={15} /></a></div><OperatorWorkspace embedded /></>}{view === "public-api" && data!.user.role === "Admin" && <IntegrationsApiPanel />}{view === "connectors" && <ConnectorsPanel />}{view === "system-health" && data!.user.role === "Admin" && <SystemHealthPanel />}{view === "settings" && <><SettingsPanel {...props} /><Card className="rrs-optional-integration"><div><Badge>F26 · ส่วนเสริม</Badge><h2>REA ยังไม่ได้เชื่อมต่อ</h2><p>ระบบ CRM และ Sale Office ใช้งานได้ตามปกติ การวิเคราะห์เพิ่มเติมด้วย REA ยังไม่มีการเชื่อมต่อที่ได้รับอนุญาต</p></div><Button disabled>ยังไม่เปิดใช้งาน</Button></Card></>}{view === "members" && <MembersPanel {...props} />}{view === "integrations" && <WidgetSettingsPanel isAdmin={data!.user.role === "Admin"} />}</>}
       </main>{view !== "inbox" && <footer className="workspace-footer">RRS Connect <span>เขตเวลา Asia/Bangkok (UTC+7)</span></footer>}
     </div><nav className="mobile-bottom-nav" aria-label="เมนูมือถือ" inert={mobile || undefined}>{["inbox", "tasks", "customers"].map(id => { const item = nav.find(item => item.id === id)!; return <button key={id} aria-current={view === id ? "page" : undefined} onClick={() => navigate(id)}><item.icon size={21} /><span>{item.short}</span></button>; })}<button onClick={() => setMobile(true)} aria-label="เปิดเมนูทั้งหมด"><Menu size={21} /><span>เพิ่มเติม</span></button></nav>{toast && <div className="toast" role="status"><ShieldCheck size={18} />{toast}<button onClick={() => setToast("")} aria-label="ปิดข้อความ"><X size={14} /></button></div>}
   </div>;
@@ -135,10 +168,12 @@ function auditActionLabel(action: string, metadata?: Record<string, unknown>) {
   };
   return labels[key] || "อัปเดตข้อมูลในระบบ";
 }
-function Dashboard({ data, from, to, setFrom, setTo, navigate }: PanelProps & { from: string; to: string; setFrom: (v: string) => void; setTo: (v: string) => void; navigate: (v: string) => void }) {
+function Dashboard({ data, from, to, setFrom, setTo, navigate, openQueue, openDue }: PanelProps & { openQueue:(q:InboxQueue)=>void;openDue:()=>void; from: string; to: string; setFrom: (v: string) => void; setTo: (v: string) => void; navigate: (v: string) => void }) {
+  const [counts,setCounts]=useState<InboxResult['counts']>();
+  useEffect(()=>{let live=true;api<Pick<InboxResult,'counts'>>('/api/admin/inbox/summary').then(value=>{if(live)setCounts(value.counts);}).catch(()=>{if(live)setCounts(undefined);});return()=>{live=false;};},[data]);
   const m = data.metrics; const totalStages = Object.values(m.stages).reduce((a, b) => a + b, 0); const due = data.tasks.filter(t => ["open", "pending", "confirmed"].includes(t.status) && new Date(t.dueAt) <= new Date());
   const cards = [{ title: "บทสนทนา", value: number(m.conversations), icon: MessageSquare, caption: "เริ่มสนทนาในช่วงวันที่เลือก", accent: "teal" }, { title: "ลีดใหม่", value: number(m.newLeads), icon: Users, caption: "สร้างเมื่อเริ่มแชต ยังไม่ใช่ลีดที่คัดกรองแล้ว", accent: "blue" }, { title: "งานถึงกำหนด", value: number(m.dueTasks), icon: CalendarDays, caption: "งานค้างที่ถึงกำหนดแล้ว", accent: "amber" }, { title: "ส่งต่อเจ้าหน้าที่", value: number(m.handoffRate * 100) + "%", icon: Workflow, caption: "สัดส่วนบทสนทนาที่ขอส่งต่อ", accent: "purple" }];
-  return <><div className="filter-row"><span><span className="status-dot" />ข้อมูลจากกิจกรรมจริงในระบบ</span><div className="date-filters"><label>ตั้งแต่ <Input type="date" value={from} onChange={e => setFrom(e.target.value)} aria-label="วันที่เริ่มต้น" /></label><span>—</span><label>ถึง <Input type="date" value={to} min={from || undefined} onChange={e => setTo(e.target.value)} aria-label="วันที่สิ้นสุด" /></label>{(from || to) && <Button variant="ghost" size="sm" onClick={() => { setFrom(new Date(Date.now() + 7 * 3600000 - 29 * 86400000).toISOString().slice(0, 10)); setTo(new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10)); }}>30 วันล่าสุด</Button>}</div></div><div className="stats-grid">{cards.map(c => <Card className="stat-card" key={c.title}><div className="stat-top"><span>{c.title}</span><span className={`stat-icon icon-${c.accent}`}><c.icon size={20} /></span></div><strong className="stat-number">{c.value}</strong><small>{c.caption}</small></Card>)}</div>
+  return <><div className="desk-today" aria-label="คิวที่เปิดทำต่อได้">{([['waiting','รอเจ้าหน้าที่'],['mine','งานของฉัน'],['unread','ยังไม่อ่าน']] as const).map(([queue,label])=><button key={queue} onClick={()=>openQueue(queue)}><span>{label}</span><b>{counts?number(counts[queue]):'—'}</b><ChevronRight size={16}/></button>)}<button onClick={openDue}><span>งานถึงกำหนด</span><b>{number(due.length)}</b><ChevronRight size={16}/></button></div><div className="filter-row"><span><span className="status-dot" />ข้อมูลจากกิจกรรมจริงในระบบ</span><div className="date-filters"><label>ตั้งแต่ <Input type="date" value={from} onChange={e => setFrom(e.target.value)} aria-label="วันที่เริ่มต้น" /></label><span>—</span><label>ถึง <Input type="date" value={to} min={from || undefined} onChange={e => setTo(e.target.value)} aria-label="วันที่สิ้นสุด" /></label>{(from || to) && <Button variant="ghost" size="sm" onClick={() => { setFrom(new Date(Date.now() + 7 * 3600000 - 29 * 86400000).toISOString().slice(0, 10)); setTo(new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10)); }}>30 วันล่าสุด</Button>}</div></div><div className="stats-grid">{cards.map(c => <Card className="stat-card" key={c.title}><div className="stat-top"><span>{c.title}</span><span className={`stat-icon icon-${c.accent}`}><c.icon size={20} /></span></div><strong className="stat-number">{c.value}</strong><small>{c.caption}</small></Card>)}</div>
   <div className="dashboard-grid"><Card className="pipeline-card"><div className="card-heading"><div><h2>ภาพรวม Pipeline</h2><p>สถานะปัจจุบันของลีดที่สร้างในช่วงวันที่เลือก</p></div><Badge>{number(totalStages)} ลีด</Badge></div><div className="pipeline-chart">{stages.map((s, i) => <div className="pipeline-chart-row" key={s}><span><i style={{ background: ["#91b9c4", "#51a4a5", "#20877c", "#0c6455", "#b8bfc5"][i] }} />{stageNames[s]}</span><div className="bar-track"><div style={{ width: totalStages ? `${Math.max(((m.stages[s] || 0) / totalStages) * 100, (m.stages[s] || 0) ? 4 : 0)}%` : "0%", background: ["#91b9c4", "#51a4a5", "#20877c", "#0c6455", "#b8bfc5"][i] }} /></div><b>{m.stages[s] || 0}</b></div>)}</div><button className="card-link" onClick={() => navigate("customers")}>จัดการโอกาสขาย <ArrowUpRight size={16} /></button></Card><Card className="response-card"><div className="card-heading"><div><h2>คุณภาพการตอบกลับ</h2><p>เวลาเฉลี่ยจนได้รับคำตอบแรก</p></div><Sparkles size={19} /></div><div className="response-metric"><span>ผู้ช่วย AI</span><strong>{m.aiFirstResponseMs == null ? "—" : number(m.aiFirstResponseMs / 1000)}<small> วินาที</small></strong></div><div className="response-metric"><span>เจ้าหน้าที่หลังส่งต่อ</span><strong>{m.humanFirstResponseMs == null ? "—" : number(m.humanFirstResponseMs / 1000)}<small> วินาที</small></strong></div><p className="metric-help">ไม่นับสถานะกำลังตอบและบันทึกภายใน หากยังไม่มีคำตอบจะแสดง —</p><div className="usage-box"><span>ค่าใช้จ่าย AI โดยประมาณ</span><strong>{m.estimatedCostUsd == null ? "ไม่มีข้อมูล" : `$${m.estimatedCostUsd.toFixed(4)}`}</strong><small>Input {number(m.inputTokens)} · Output {number(m.outputTokens)} tokens</small></div></Card></div>
   <div className="dashboard-grid"><Card><div className="card-heading"><div><h2>งานที่ต้องดูแล</h2><p>ช่วยให้ไม่มีลูกค้าตกหล่น</p></div><Button variant="ghost" size="sm" onClick={() => navigate("tasks")}>ดูทั้งหมด <ChevronRight size={15} /></Button></div>{due.length ? <div className="activity-list">{due.slice(0, 5).map(t => <div className="activity-row" key={t.id}><span className="activity-icon"><CalendarDays size={17} /></span><div><strong>{t.title}</strong><small>{data.leads.find(l => l.id === t.leadId)?.name || "ลูกค้าใหม่"} · {date(t.dueAt)}</small></div><Badge tone="amber">ถึงกำหนด</Badge></div>)}</div> : <Empty title="ยังไม่มีงานถึงกำหนด" detail="งานติดตามที่ครบกำหนดจะแสดงที่นี่" />}</Card><Card><div className="card-heading"><div><h2>กิจกรรมล่าสุด</h2><p>ประวัติการเปลี่ยนแปลงในองค์กร</p></div><Bell size={18} /></div>{data.audit.length ? <div className="activity-list">{data.audit.slice(0, 5).map(a => <div className="activity-row" key={a.id}><span className="activity-dot" /><div><strong>{auditActionLabel(a.action, a.metadata)}</strong><small>{date(a.createdAt)} · {data.members.find(m => m.id === a.actorId)?.name || "ระบบ / ลูกค้า"}</small>{a.metadata?.previousStage !== undefined && <small>{stageNames[String(a.metadata.previousStage)] || String(a.metadata.previousStage)} → {stageNames[String(a.metadata.nextStage)] || String(a.metadata.nextStage)}</small>}{Array.isArray(a.metadata?.fields) && <small>ข้อมูลที่แก้: {(a.metadata.fields as string[]).join(", ")}</small>}</div></div>)}</div> : <Empty title="ยังไม่มีกิจกรรม" detail="เริ่มแชตหรืออัปเดตลูกค้าเพื่อดูความเคลื่อนไหว" />}</Card></div><details className="definitions"><summary><CircleHelp size={16} />นิยามตัวชี้วัดและช่วงเวลา</summary><p>วันที่เริ่มต้นและสิ้นสุดนับทั้งวันตาม Asia/Bangkok บทสนทนาและลีดใหม่กรองตามวันที่สร้าง Pipeline แสดงสถานะปัจจุบันของลีดในกลุ่มที่เลือก งานถึงกำหนดนับงานที่ยังเปิด รวมถึงนัดที่รอยืนยันหรือยืนยันแล้วและถึงกำหนด ณ เวลาปัจจุบัน ทุกช่วงวันที่ ลีดใหม่หมายถึงโปรไฟล์ที่สร้างเมื่อเริ่มแชต ซึ่งอาจยังไม่มีข้อมูลติดต่อ อัตราส่งต่อคือจำนวนบทสนทนาที่เคยส่งต่อหารด้วยบทสนทนาในกลุ่มที่เลือก เวลาตอบ AI นับจากรับข้อความจนเริ่มส่งคำตอบจริง ส่วนเจ้าหน้าที่นับจากส่งต่อจนเจ้าหน้าที่ตอบครั้งแรก ค่าโทเคนและค่าใช้จ่ายจะแสดงเมื่อผู้ให้บริการส่งข้อมูลกลับมาเท่านั้น</p></details></>;
 }
