@@ -20,7 +20,11 @@ test('mapped staff edit only the selected CRM lead with version, market and repl
     await database.query("INSERT INTO leads(id,org_id,name,market,phone) VALUES($1,$2,'Original','export','12345678')",[lead,org]);
     await database.query("INSERT INTO conversations(id,org_id,lead_id) VALUES($1,$2,$3)",[room,org,lead]);
     const scope={actorId:actor,conversationId:room,leadId:lead,market:'export'};
-    const read=async()=>await bridgeLeadProfile(org,{...scope,action:'read'}) as {version:number;name:string;assigneeId:string|null;members:{id:string}[]};
+    const read=async()=>{
+      const result=await bridgeLeadProfile(org,{...scope,action:'read'});
+      assert(result.members);
+      return {version:Number(result.version),name:result.name,assigneeId:result.assigneeId,members:result.members};
+    };
     const profile=await read();
     assert(profile.members.some(x=>x.id===owner));assert(!profile.members.some(x=>x.id===foreign));
     const write={...scope,action:'update',commandId:randomUUID(),version:profile.version,changes:{name:'Revised',email:'new@example.invalid',assigneeId:owner}};
