@@ -128,7 +128,13 @@ export async function appointmentConfirm(visitor:Visitor,body:Record<string,unkn
 }
 
 export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>,bridgeCommand?:{id:string;hash:string;sourceMessageId?:string}) {
-  uuid(id);fields(body,['text']);
+  uuid(id);
+  fields(body, !bridgeCommand && (action === 'note' || action === 'reply') ? ['text','commandId'] : ['text']);
+  if (!bridgeCommand && body.commandId !== undefined) {
+    const commandId = uuid(body.commandId);
+    const content = str(body.text,'ข้อความ',6000,true);
+    bridgeCommand = { id:commandId, hash:hashToken(JSON.stringify(['staff-inbox',staff.id,id,action,content])) };
+  }
   if(!['claim','release','reply','note','resolve','summarize'].includes(action))throw new ApiError(404,'ไม่พบคำสั่ง');
   const queuedCommand=await transaction(staff.orgId, async connection=>{
     if(bridgeCommand){
