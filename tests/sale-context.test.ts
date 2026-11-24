@@ -7,6 +7,7 @@ import { before, after, test } from 'node:test';
 import { database, getDatabase, closeDatabase } from '../src/lib/db';
 import { applySaleEvents, pullSaleContext, refreshSaleContextIfStale, saleContextForLead, saleContextHash } from '../src/lib/sale-context';
 import { verifyBridgeRequest } from '../src/lib/bridge-protocol';
+import { saleQuotationHref } from '../src/components/data';
 import { conversationDetail } from '../src/lib/service';
 
 const ids = { org: randomUUID(), other: randomUUID(), lead: randomUUID(), conversation: randomUUID() };
@@ -58,12 +59,19 @@ test('default off makes no request', async () => {
 
 test('signed pull applies newest version per deal, ACKs after commit, and is idempotent', async () => {
   const db = await getDatabase();
-  outbox.push(event(1, 'deal-1', 5), event(2, 'deal-2', 6, { waiting: 'rrs' }), event(3, 'deal-1', 7, { quotation: { number: 'QT-1', revision: 2, status: 'approved', sentAt: '', acceptedAt: '' } }));
+  outbox.push(event(1, 'deal-1', 5), event(2, 'deal-2', 6, { waiting: 'rrs' }), event(3, 'deal-1', 7, { quotation: { id:'quote-2', number: 'QT-1', revision: 2, status: 'approved', sentAt: '', acceptedAt: '' } }));
   assert.deepEqual(await pullSaleContext(db, env()), { status: 'ok', sequence: 3, applied: 3 });
   assert.deepEqual(acks, [3]);
   let view = await saleContextForLead(db, ids.org, ids.lead);
   assert.equal(view.deals.length, 2); const deal1 = view.deals.find(d => d.dealId === 'deal-1')!;
   assert.equal(deal1.quotation.revision, 2); assert.equal(deal1.version, 7); assert.equal(view.deals.find(d => d.dealId === 'deal-2')!.waitingLabel, 'รอฝ่ายขาย');
+  assert.equal(deal1.quotation.id,'quote-2');
+  const current=new URL(saleQuotationHref(deal1));
+  assert.equal(current.pathname,'/quotations'); assert.equal(current.searchParams.get('id'),'quote-2');
+  const legacy=new URL(saleQuotationHref(view.deals.find(d=>d.dealId==='deal-2')!));
+  assert.equal(legacy.searchParams.get('section'),'saved'); assert.equal(legacy.searchParams.get('deal'),'deal-2'); assert.equal(legacy.searchParams.has('id'),false);
+  const domestic=new URL(saleQuotationHref({...deal1,workspace:'domestic'}));
+  assert.equal(domestic.pathname,'/domestic/quotations'); assert.equal(domestic.searchParams.get('mode'),'domestic');
   // Replaying committed events changes nothing.
   await applySaleEvents(db, ids.org, outbox.slice(0, 3)); assert.equal((await cursor()).last_sequence, 3);
   // An older Sale revision arriving later never overwrites the newer one.

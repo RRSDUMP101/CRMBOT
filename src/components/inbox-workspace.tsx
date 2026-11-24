@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { subscribeCRMChanges } from './realtime';
 import { ArrowLeft, ArrowUpRight, Bookmark, Check, ClipboardList, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X, Clock3, CalendarDays, Users } from "lucide-react";
-import { api, date, stageNames, stages, statusNames, type Detail, type SaleContext } from "./data";
+import { api, date, saleQuotationHref, stageNames, stages, statusNames, type Detail, type SaleContext } from "./data";
 import { emptyCounts, queueNames, type InboxItem, type InboxQueue, type InboxResult, type ReplyTemplate } from "./inbox-data";
 import { Badge, Button, Empty, Input, Select, Textarea } from "./ui";
 import { ChatMessage, LeadEditor, Modal, Summary } from "./workspace-panels";
@@ -183,7 +183,7 @@ function SaleContextSection({ context }: { context: SaleContext }) {
       <dt>ดีล</dt><dd>{deal.title} · {deal.workspace === "domestic" ? "ในประเทศ" : "ส่งออก"}</dd>
       <dt>สถานะ</dt><dd>{deal.salesStatus || "—"}{deal.waitingLabel ? ` · ${deal.waitingLabel}` : ""}</dd>
       <dt>งานถัดไป</dt><dd>{deal.nextAction || "—"}{deal.followDate ? ` · ${deal.followDate}` : ""}</dd>
-      <dt>ใบเสนอราคา</dt><dd>{deal.quotation ? `${deal.quotation.number} r${deal.quotation.revision} · ${quotationNames[deal.quotation.status] || deal.quotation.status}` : "—"}</dd>
+      <dt>ใบเสนอราคา</dt><dd>{deal.quotation ? <a href={saleQuotationHref(deal)} target="_blank" rel="noreferrer">{deal.quotation.number} R{deal.quotation.revision} · {quotationNames[deal.quotation.status] || deal.quotation.status} <ArrowUpRight size={12}/>{!deal.quotation.id&&' · ดูรายการของดีล'}</a> : "—"}</dd>
       <dt>ใบสั่งขาย</dt><dd>{deal.salesOrder ? deal.salesOrder.number : "—"}</dd>
       <dt>การชำระเงิน</dt><dd>{deal.payments.confirmed} ยืนยันแล้ว · {deal.payments.reported} รอตรวจ</dd>
       <dt>ผลิต / ขนส่ง</dt><dd>{deal.production ? productionNames[deal.production.status] || deal.production.status : "—"} / {deal.shipment ? shipmentNames[deal.shipment.status] || deal.shipment.status : "—"}</dd>
