@@ -4,6 +4,7 @@ import { database, demoMode, transaction } from '@/lib/db';
 import { ApiError, STAFF_COOKIE, assertOrigin, checkPassword, cookieValue, fields, hashToken, isWidgetRequest, newToken, rateLimit, readJson, setCookie, staffSession, str, uuid, visitorCookieName, visitorSession } from '@/lib/auth';
 import { adminAction, appointmentConfirm, appointmentPreview, conversationAction, conversationDetail, createVisitor, handoff, messageStream, publicMember, saveContact, snapshot, visitorDetail } from '@/lib/service';
 import { providerName } from '@/lib/bot';
+import {previousSalesSetting} from "@/lib/sales-setting-history";
 import { adminWidgetConfig, getPublicWidgetConfig, getWidgetEmbedConfig, inbox, inboxSummary, markConversationRead, replyTemplates, saveWidgetConfig, templateAction } from '@/lib/helpdesk';
 import {downloadFile,listFiles,uploadFile} from '@/lib/files';
 import {realtimeResponse} from '@/lib/realtime';
@@ -82,6 +83,7 @@ async function handle(request:NextRequest) {
         const file=await exportReport(staff,url);
         return new Response(file.body,{status:200,headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="${file.filename}"`,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
       }
+      if(path.join('/')==='admin/sales-settings/previous'&&method==='GET')return json(await previousSalesSetting(staff,url.searchParams.get('templateId')));
       if(path.join('/')==='admin/reply-templates'&&method==='GET')return json(await replyTemplates(staff));
       if(path[1]==='snapshot'&&path.length===2&&method==='GET')return json(await snapshot(staff,url));
       if(path[1]==='conversations'&&path.length===3&&method==='GET')return json(await conversationDetail(staff.orgId,uuid(path[2]),true,staff.role==='Admin'));

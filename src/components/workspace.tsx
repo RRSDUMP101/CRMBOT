@@ -28,7 +28,7 @@ const nav = [
   { id: "customers", label: "ลูกค้าและโอกาสขาย", short: "ลูกค้า", icon: Users, group: "งานประจำวัน" },
   { id: "tasks", label: "งานติดตาม", short: "งาน", icon: CalendarDays, group: "งานประจำวัน" },
   { id: "reports", label: "รายงานและ SLA", short: "รายงาน", icon: ChartColumn, group: "งานประจำวัน" },
-  { id: "templates", label: "ข้อความสำเร็จรูป", short: "ข้อความ", icon: Bookmark, group: "สื่อสารและแคมเปญ" },
+  { id: "templates", label: "ตั้งค่าการขายและข้อความ", short: "ข้อความ", icon: Bookmark, group: "สื่อสารและแคมเปญ" },
   { id: "broadcast", label: "แคมเปญข้อความ", short: "แคมเปญ", icon: Megaphone, group: "สื่อสารและแคมเปญ" },
   { id: "wa-templates", label: "All Inbox", short: "เทมเพลต", icon: MessageSquare, group: "สื่อสารและแคมเปญ" },
   { id: "operators", label: "ทีมและการจัดสรรงาน", short: "ทีม", icon: Users, group: "AI และระบบอัตโนมัติ" },

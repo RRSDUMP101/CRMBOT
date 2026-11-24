@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
+import {rememberSetting} from './sales-setting-history';
 import { messageOrder } from './message-order';
 
 const unreadCount=(staff:Staff)=>staff.role==='Admin'?"MAX(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)":"(SELECT count(*) FROM messages unread_message WHERE unread_message.org_id=c.org_id AND unread_message.conversation_id=c.id AND unread_message.role='user' AND unread_message.source_owner_only=0 AND unread_message.customer_seq>COALESCE(r.last_read_seq,0))";
@@ -135,13 +136,18 @@ export async function templateAction(staff:Staff,body:Record<string,unknown>) {
       if(!existing)throw new ApiError(404,'ไม่พบข้อความตอบสำเร็จรูป');
       if(existing.version!==version(values.version))throw new ApiError(409,'ข้อความนี้ถูกแก้ไขแล้ว กรุณาโหลดรายการใหม่');
     }
-    if(action==='deleteReplyTemplate')await connection.query('DELETE FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id]);
+    if(action==='deleteReplyTemplate'){
+      await connection.query('DELETE FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id]);
+      await connection.query("DELETE FROM sales_setting_undo WHERE org_id=$1 AND kind='replyTemplate' AND entity_id=$2",[staff.orgId,id]);
+    }
     else {
       const title=str(values.title,'ชื่อข้อความ',120,true);const content=str(values.content,'เนื้อหา',4000,true);const category=str(values.category,'หมวดหมู่',80)||'ทั่วไป';
       const rawShortcut=str(values.shortcut,'คำย่อ',41,true).replace(/^\//,'').toLowerCase();
       if(!/^[a-z0-9_-]{1,40}$/.test(rawShortcut))throw new ApiError(400,'คำย่อใช้ตัวอักษรอังกฤษ ตัวเลข - หรือ _ ไม่เกิน 40 ตัว');
       const shortcut=`/${rawShortcut}`;
       if((await connection.query('SELECT id FROM reply_templates WHERE org_id=$1 AND shortcut=$2 AND id!=$3',[staff.orgId,shortcut,id])).rows.length)throw new ApiError(409,'คำย่อนี้มีอยู่แล้วในองค์กร');
+      if(existing && (existing.title!==title || existing.shortcut!==shortcut || existing.content!==content || existing.category!==category))
+        await rememberSetting(connection,staff,'replyTemplate',id,{title:existing.title,shortcut:existing.shortcut,content:existing.content,category:existing.category});
       if(existing)await connection.query("UPDATE reply_templates SET title=$3,shortcut=$4,content=$5,category=$6,version=version+1,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,title,shortcut,content,category]);
       else {
         const count=(await connection.query("SELECT count(*) AS total FROM reply_templates WHERE org_id=$1",[staff.orgId])).rows[0].total;
