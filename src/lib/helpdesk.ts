@@ -38,7 +38,7 @@ function cursorValue(value:string) {
 
 export async function inbox(staff:Staff,url:URL) {
   const UNREAD=unreadCount(staff);
-  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
+  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account','leadId'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
   const query=str(url.searchParams.get('q'),'คำค้น',200);
   const view=oneOf(url.searchParams.get('view')||'all',['all','mine','unassigned','waiting','closed','unread'],'กล่องข้อความ');
   const rawLimit=url.searchParams.get('limit')||'30';
@@ -46,6 +46,8 @@ export async function inbox(staff:Staff,url:URL) {
   const limit=Number(rawLimit);const params:unknown[]=[staff.orgId,staff.id];const where=['c.org_id=$1'];
   const bind=(value:unknown)=>{params.push(value);return `$${params.length}`;};
   where.push(view==='closed'?"c.status='resolved'":"c.status!='resolved'");
+  const leadId=url.searchParams.get('leadId');
+  if(leadId)where.push(`c.lead_id=${bind(uuid(leadId,'รหัสลูกค้า'))}`);
   if(view==='mine')where.push('c.assignee_id=$2');
   if(view==='unassigned')where.push('c.assignee_id IS NULL');
   if(view==='waiting')where.push("c.status='waiting_human'");
@@ -70,7 +72,14 @@ export async function inbox(staff:Staff,url:URL) {
     // D1 limits LIKE patterns to 50 bytes, too short for normal Thai names.
     // INSTR keeps search literal (including % and _) without truncation.
     const term=bind(query);
-    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${visibleMessage(staff,'search_message')} AND instr(lower(search_message.content),lower(${term}))>0))`);
+    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0
+      OR instr(lower(COALESCE(json_extract(l.facts,'$.company'),'')),lower(${term}))>0
+      OR EXISTS(SELECT 1 FROM crm_sale_context sc WHERE sc.org_id=c.org_id AND sc.lead_id=c.lead_id
+        AND ((sc.workspace='live' AND l.market='export') OR (sc.workspace='domestic' AND l.market='domestic'))
+        AND COALESCE(json_extract(sc.payload,'$.removed'),0)=0 AND
+        (instr(lower(COALESCE(json_extract(sc.payload,'$.companyName'),'')),lower(${term}))>0 OR
+         instr(lower(COALESCE(json_extract(sc.payload,'$.quotation.number'),'')),lower(${term}))>0))
+      OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${visibleMessage(staff,'search_message')} AND instr(lower(search_message.content),lower(${term}))>0))`);
   }
   const totalParams=[...params];const totalWhere=where.join(' AND ');
   const cursor=url.searchParams.get('cursor');

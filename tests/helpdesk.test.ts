@@ -153,6 +153,21 @@ describe("RRS helpdesk and widget HTTP acceptance", { concurrency: false }, () =
     assert.equal(after.messages.filter((message: Json) => message.role === "agent" && message.content === selected.content).length, 1);
   });
 
+  test("staff reply and note retries keep one message per command", async () => {
+    const visitor = await makeVisitor(`ส่งครั้งเดียว-${runId}`);
+    const path = `/api/admin/conversations/${visitor.id}`;
+    await agent.post(path+"/claim");
+    for (const action of ["reply","note"]) {
+      const commandId=randomUUID(), text=`ตรวจส่งซ้ำ ${action} ${runId}`;
+      await agent.post(path+"/"+action,{text,commandId});
+      const again=await agent.post(path+"/"+action,{text,commandId});
+      assert.equal(again.messages.filter((m:Json)=>m.content===text).length,1);
+      assert.equal((await agent.request(path+"/"+action,{body:{text:text+"!",commandId}})).status,409);
+    }
+    const customer = await visitor.client.history();
+    assert.equal(customer.messages.some((m:Json)=>m.role==="note"),false);
+  });
+
   test("reply templates enforce role, organization and authenticated access", async () => {
     denied((await new Client().json("/api/admin/reply-templates")).response.status, "anonymous templates");
     assert.ok(!(await outsider.ok("/api/admin/reply-templates")).templates.some((item: Json) => item.id === template.id));
