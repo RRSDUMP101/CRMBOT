@@ -1,3 +1,4 @@
+import {rememberSetting} from './sales-setting-history';
 import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, getDatabase, type Executor, type Row } from './db';
 import { refreshSaleContextIfStale, saleContextForLead } from './sale-context';
@@ -128,7 +129,13 @@ export async function appointmentConfirm(visitor:Visitor,body:Record<string,unkn
 }
 
 export async function conversationAction(staff:Staff,id:string,action:string,body:Record<string,unknown>,bridgeCommand?:{id:string;hash:string;sourceMessageId?:string}) {
-  uuid(id);fields(body,['text']);
+  uuid(id);
+  fields(body, !bridgeCommand && (action === 'note' || action === 'reply') ? ['text','commandId'] : ['text']);
+  if (!bridgeCommand && body.commandId !== undefined) {
+    const commandId = uuid(body.commandId);
+    const content = str(body.text,'ข้อความ',6000,true);
+    bridgeCommand = { id:commandId, hash:hashToken(JSON.stringify(['staff-inbox',staff.id,id,action,content])) };
+  }
   if(!['claim','release','reply','note','resolve','summarize'].includes(action))throw new ApiError(404,'ไม่พบคำสั่ง');
   const queuedCommand=await transaction(staff.orgId, async connection=>{
     if(bridgeCommand){
@@ -247,11 +254,16 @@ export async function adminAction(staff:Staff,body:Record<string,unknown>) {
       if(!(await connection.query('SELECT id FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,entityId])).rows.length)throw new ApiError(404,'ไม่พบเอกสาร');
       await connection.query('DELETE FROM knowledge WHERE org_id=$1 AND id=$2',[staff.orgId,entityId]);
     } else if(action==='updateSettings') {
-      fields(values,['botName','personality','businessHours','handoffRule','aiEnabled']);const settings=await orgSettings(staff.orgId,connection);
+      fields(values,['botName','expectedBotName','personality','businessHours','handoffRule','aiEnabled']);const settings=await orgSettings(staff.orgId,connection);
+      const previousName=settings.botName;
+      if(values.expectedBotName!==undefined && str(values.expectedBotName,'ชื่อที่ใช้งานอยู่',80,true)!==previousName)
+        throw new ApiError(409,'ชื่อที่แสดงเปลี่ยนแล้ว กรุณาโหลดหน้าตั้งค่าใหม่');
+      metadata={changedFields:Object.keys(values).filter(key=>key!=='expectedBotName')};
       for(const key of ['botName','personality','businessHours','handoffRule'])if(values[key]!==undefined)settings[key]=str(values[key],key,key==='botName'?80:1500,true);
       if(values.aiEnabled!==undefined){if(typeof values.aiEnabled!=='boolean')throw new ApiError(400,'สถานะ AI ไม่ถูกต้อง');settings.aiEnabled=values.aiEnabled;}
+      if(previousName!==settings.botName)await rememberSetting(connection,staff,'botName',staff.orgId,previousName);
       await connection.query('UPDATE organizations SET settings=$2 WHERE id=$1',[staff.orgId,JSON.stringify(settings)]);
-      if(settings.aiEnabled===false)await connection.query("UPDATE conversations SET version=version+1,generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND status='bot_active'",[staff.orgId]);
+      if(values.aiEnabled===false)await connection.query("UPDATE conversations SET version=version+1,generating_client_id=NULL,generation_started_at=NULL WHERE org_id=$1 AND status='bot_active'",[staff.orgId]);
     } else if(action==='createMember') {
       fields(values,['name','email','role','password']);entityId=randomUUID();
       const email=str(values.email,'อีเมล',254,true).toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new ApiError(400,'อีเมลไม่ถูกต้อง');

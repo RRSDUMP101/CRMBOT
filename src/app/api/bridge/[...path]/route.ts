@@ -19,6 +19,7 @@ async function handle(request: Request) {
     const config = bridgeConfig();
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\/bridge\//, '');
+    if(path==='room-files/upload'&&request.method==='POST'&&!url.search)return await (await import('@/lib/bridge-room-files')).signedRoomUpload(request,config);
     const { body } = await verifyBridgeRequest(request, config, path === 'import' ? 8 * 1024 * 1024 : path==='approved-commands'?512_000:64_000);
     if(path==='knowledge-source'&&request.method==='POST')return json(await (await import('@/lib/sales-learning')).learningEvidence(config.orgId,objectBody(body,['conversationId','messageId','excerpt'])));
     if(path==='knowledge-proposal'&&request.method==='POST')return json(await (await import('@/lib/sales-learning')).acceptLearningProposal(config.orgId,objectBody(body,['commandId','conversationId','messageId','excerpt','sourceHash','sourceVersion','summary','runId'])));
@@ -48,11 +49,17 @@ async function handle(request: Request) {
       return await downloadSocialAttachment(config.orgId,path.slice('attachments/'.length),fetch,url.searchParams.get('owner')==='true');
     }
     if (url.search) throw new BridgeError(400, 'Unexpected bridge query');
+    if(path==='inbox'&&request.method==='POST')return json(await (await import('@/lib/bridge-inbox')).saleInbox(objectBody(body,['action','actorId','workspace','owner','roomIds','q','view','limit','cursor','conversationId','throughMessageId'])));
+    if(path==='room-files'&&request.method==='POST')return await (await import('@/lib/bridge-room-files')).roomFileAction(objectBody(body,['actorId','conversationId','workspace','action','attachmentId','clientId','expectedVersion']));
     if(path==='spam-candidate'&&request.method==='POST'){
       objectBody(body,[]);
       return json(await (await import('@/lib/semantic-spam')).claimSemanticSpam(config.orgId));
     }
     if(path==='spam-suggestion'&&request.method==='POST')return json(await (await import('@/lib/semantic-spam')).finishSemanticSpam(config.orgId,objectBody(body,['messageId','token','suggestion'])));
+    if(path==='lead-profile'&&request.method==='POST'){
+      const input=objectBody(body,['action','actorId','conversationId','leadId','market','version','commandId','changes']);
+      return json(await (await import('@/lib/lead-profile-bridge')).bridgeLeadProfile(config.orgId,input));
+    }
     if(path==='ai-policy'&&request.method==='POST')return json(await (await import('@/lib/ai-policy-bridge')).resolveBridgeAiPolicy(config.orgId,objectBody(body,['conversationId','expectedVersion'])));
     if(path==='domestic-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-domestic-messages')).acceptDomestic(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','source'])));
     if(path==='reviewed-messages'&&request.method==='POST')return json(await (await import('@/lib/reviewed-sale-messages')).acceptReviewedSale(objectBody(body,['version','kind','commandId','conversationId','expectedVersion','expectedCustomerSeq','actorId','provider','accountId','remoteId','text','template','parts','source'])));

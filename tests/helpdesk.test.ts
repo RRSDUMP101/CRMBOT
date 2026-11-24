@@ -153,6 +153,44 @@ describe("RRS helpdesk and widget HTTP acceptance", { concurrency: false }, () =
     assert.equal(after.messages.filter((message: Json) => message.role === "agent" && message.content === selected.content).length, 1);
   });
 
+  test("staff reply and note retries keep one message per command", async () => {
+    const visitor = await makeVisitor(`ส่งครั้งเดียว-${runId}`);
+    const path = `/api/admin/conversations/${visitor.id}`;
+    await agent.post(path+"/claim");
+    for (const action of ["reply","note"]) {
+      const commandId=randomUUID(), text=`ตรวจส่งซ้ำ ${action} ${runId}`;
+      await agent.post(path+"/"+action,{text,commandId});
+      const again=await agent.post(path+"/"+action,{text,commandId});
+      assert.equal(again.messages.filter((m:Json)=>m.content===text).length,1);
+      assert.equal((await agent.request(path+"/"+action,{body:{text:text+"!",commandId}})).status,409);
+    }
+    const customer = await visitor.client.history();
+    assert.equal(customer.messages.some((m:Json)=>m.role==="note"),false);
+  });
+
+  test("Admin previews and restores the previous saved settings; Agents cannot read their history",async()=>{
+    const key=encodeURIComponent(template.id);
+    const path="/api/admin/sales-settings/previous?templateId="+key;
+    const history=await admin.ok(path);
+    assert.match(history.previous.content,/เพื่อให้ทีมตรวจสอบ/);
+    assert.equal((await agent.request(path)).status,403);
+    const privateResult=await outsider.json(path);
+    assert.ok(privateResult.response.status===403 || privateResult.data.previous===null);
+    const current=template;
+    await admin.post("/api/admin/action",{action:"saveReplyTemplate",id:current.id,values:{...history.previous,version:current.version}});
+    template=(await admin.ok("/api/admin/reply-templates")).templates.find((item:Json)=>item.id===current.id);
+    assert.equal(template.content,history.previous.content);assert.equal(template.version,current.version+1);
+    const initial=(await admin.ok("/api/admin/snapshot")).settings.botName;
+    const display="ทีมขาย "+runId;
+    await admin.post("/api/admin/action",{action:"updateSettings",values:{botName:display,expectedBotName:initial}});
+    const prior=await admin.ok("/api/admin/sales-settings/previous");
+    assert.equal(prior.previous,initial);assert.equal((await agent.request("/api/admin/sales-settings/previous")).status,403);
+    const stale=await admin.json("/api/admin/action",{body:{action:"updateSettings",values:{botName:"stale",expectedBotName:initial}}});
+    assert.equal(stale.response.status,409);
+    await admin.post("/api/admin/action",{action:"updateSettings",values:{botName:prior.previous,expectedBotName:display}});
+    assert.equal((await admin.ok("/api/admin/snapshot")).settings.botName,initial);
+  });
+
   test("reply templates enforce role, organization and authenticated access", async () => {
     denied((await new Client().json("/api/admin/reply-templates")).response.status, "anonymous templates");
     assert.ok(!(await outsider.ok("/api/admin/reply-templates")).templates.some((item: Json) => item.id === template.id));

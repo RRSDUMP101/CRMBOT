@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { database, transaction, camel, demoMode, type Executor, type Row } from './db';
 import { ApiError, fields, oneOf, requireAdmin, str, uuid, type Staff } from './auth';
+import {rememberSetting} from './sales-setting-history';
 import { messageOrder } from './message-order';
 
 const unreadCount=(staff:Staff)=>staff.role==='Admin'?"MAX(c.customer_message_seq-COALESCE(r.last_read_seq,0),0)":"(SELECT count(*) FROM messages unread_message WHERE unread_message.org_id=c.org_id AND unread_message.conversation_id=c.id AND unread_message.role='user' AND unread_message.source_owner_only=0 AND unread_message.customer_seq>COALESCE(r.last_read_seq,0))";
@@ -11,16 +12,35 @@ async function event(connection:Executor,staff:Staff,action:string,entityId:stri
   await connection.query('INSERT INTO audit_events(id,org_id,actor_id,action,entity_id,metadata) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),staff.orgId,staff.id,action,entityId,JSON.stringify(metadata)]);
 }
 
-export async function inboxSummary(staff:Staff,connection:Executor=database) {
-  const UNREAD=unreadCount(staff);
+export type SaleInboxScope={roomIds:string[];market:'domestic'|'export';owner:boolean};
+function bridgeMarketFilter(scope:SaleInboxScope,bind:(v:unknown)=>string){
+  return `c.id IN (SELECT value FROM json_each(${bind(JSON.stringify(scope.roomIds))})) AND (l.market=${bind(scope.market)} OR l.market='unknown')`;
+}
+const inboxVisibility=(staff:Staff,scope?:SaleInboxScope):Staff=>scope&&!scope.owner?{...staff,role:'Agent'}:staff;
+function saleMessage(staff:Staff,alias:string,scope?:SaleInboxScope){
+  const visibility=inboxVisibility(staff,scope);
+  const ordinary=visibleMessage(visibility,alias);
+  if(!scope)return ordinary;
+  // Previously imported evidence can carry its source scope in provenance before
+  // the message flag is projected. Retractions must not disclose old text.
+  return ordinary+` AND NOT EXISTS(SELECT 1 FROM social_message_provenance p WHERE p.org_id=${alias}.org_id AND p.message_id=${alias}.id
+    AND (p.removed_at IS NOT NULL${visibility.role==='Admin'?'':" OR CASE WHEN json_valid(p.metadata) THEN COALESCE(json_extract(p.metadata,'$.sourceOwnerOnly'),0) OR COALESCE(json_extract(p.metadata,'$.sourceScopeUnknown'),0) ELSE 1 END"}))`;
+}
+function scopeUnread(staff:Staff,scope?:SaleInboxScope){
+  return scope?`(SELECT count(*) FROM messages unread_message WHERE unread_message.org_id=c.org_id AND unread_message.conversation_id=c.id AND unread_message.role='user'
+    AND unread_message.customer_seq>COALESCE(r.last_read_seq,0)${saleMessage(staff,'unread_message',scope)})`:unreadCount(staff);
+}
+export async function inboxSummary(staff:Staff,connection:Executor=database,scope?:SaleInboxScope) {
+  const UNREAD=scopeUnread(staff,scope),params:unknown[]=[staff.orgId,staff.id];
+  const market=scope?' AND '+bridgeMarketFilter(scope,value=>{params.push(value);return '$'+params.length;}):'';
   const result=await connection.query(`SELECT
-    count(*) FILTER(WHERE c.status!='resolved') AS "all",
+    count(*) FILTER(WHERE ${scope?'1':"c.status!='resolved'"}) AS "all",
     count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id=$2) AS mine,
     count(*) FILTER(WHERE c.status!='resolved' AND c.assignee_id IS NULL) AS unassigned,
     count(*) FILTER(WHERE c.status='waiting_human') AS waiting,
     count(*) FILTER(WHERE c.status='resolved') AS closed,
     count(*) FILTER(WHERE c.status!='resolved' AND ${UNREAD}>0) AS unread
-    FROM conversations c ${READ_JOIN} WHERE c.org_id=$1`,[staff.orgId,staff.id]);
+    FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE c.org_id=$1${market}`,params);
   return {counts:result.rows[0]};
 }
 
@@ -36,16 +56,19 @@ function cursorValue(value:string) {
   } catch {throw new ApiError(400,'รหัสหน้ารายการไม่ถูกต้อง');}
 }
 
-export async function inbox(staff:Staff,url:URL) {
-  const UNREAD=unreadCount(staff);
-  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
+export async function inbox(staff:Staff,url:URL,scope?:SaleInboxScope) {
+  const UNREAD=scopeUnread(staff,scope);
+  for(const key of url.searchParams.keys())if(!['q','view','status','assignee','tag','cursor','limit','unread','provider','account','leadId'].includes(key))throw new ApiError(400,'ตัวกรองไม่ถูกต้อง');
   const query=str(url.searchParams.get('q'),'คำค้น',200);
   const view=oneOf(url.searchParams.get('view')||'all',['all','mine','unassigned','waiting','closed','unread'],'กล่องข้อความ');
   const rawLimit=url.searchParams.get('limit')||'30';
   if(!/^\d{1,3}$/.test(rawLimit)||Number(rawLimit)<1||Number(rawLimit)>100)throw new ApiError(400,'จำนวนรายการต้องอยู่ระหว่าง 1 ถึง 100');
   const limit=Number(rawLimit);const params:unknown[]=[staff.orgId,staff.id];const where=['c.org_id=$1'];
   const bind=(value:unknown)=>{params.push(value);return `$${params.length}`;};
-  where.push(view==='closed'?"c.status='resolved'":"c.status!='resolved'");
+  if(scope)where.push(bridgeMarketFilter(scope,bind));
+  if(view!=='all'||!scope)where.push(view==='closed'?"c.status='resolved'":"c.status!='resolved'");
+  const leadId=url.searchParams.get('leadId');
+  if(leadId)where.push(`c.lead_id=${bind(uuid(leadId,'รหัสลูกค้า'))}`);
   if(view==='mine')where.push('c.assignee_id=$2');
   if(view==='unassigned')where.push('c.assignee_id IS NULL');
   if(view==='waiting')where.push("c.status='waiting_human'");
@@ -70,7 +93,14 @@ export async function inbox(staff:Staff,url:URL) {
     // D1 limits LIKE patterns to 50 bytes, too short for normal Thai names.
     // INSTR keeps search literal (including % and _) without truncation.
     const term=bind(query);
-    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0 OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${visibleMessage(staff,'search_message')} AND instr(lower(search_message.content),lower(${term}))>0))`);
+    where.push(`(instr(lower(l.name),lower(${term}))>0 OR instr(lower(l.phone),lower(${term}))>0 OR instr(lower(l.email),lower(${term}))>0
+      OR instr(lower(COALESCE(json_extract(l.facts,'$.company'),'')),lower(${term}))>0
+      OR EXISTS(SELECT 1 FROM crm_sale_context sc WHERE sc.org_id=c.org_id AND sc.lead_id=c.lead_id
+        AND ((sc.workspace='live' AND l.market='export') OR (sc.workspace='domestic' AND l.market='domestic'))
+        AND COALESCE(json_extract(sc.payload,'$.removed'),0)=0 AND
+        (instr(lower(COALESCE(json_extract(sc.payload,'$.companyName'),'')),lower(${term}))>0 OR
+         instr(lower(COALESCE(json_extract(sc.payload,'$.quotation.number'),'')),lower(${term}))>0))
+      OR EXISTS(SELECT 1 FROM messages search_message WHERE search_message.org_id=c.org_id AND search_message.conversation_id=c.id AND search_message.role IN ('user','assistant','agent')${saleMessage(staff,'search_message',scope)} AND instr(lower(search_message.content),lower(${term}))>0))`);
   }
   const totalParams=[...params];const totalWhere=where.join(' AND ');
   const cursor=url.searchParams.get('cursor');
@@ -83,20 +113,22 @@ export async function inbox(staff:Staff,url:URL) {
       COALESCE((SELECT si.provider FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT ea.provider FROM external_threads et JOIN external_accounts ea ON ea.org_id=et.org_id AND ea.id=et.account_id WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1),'web') AS provider,
       COALESCE((SELECT si.account_id FROM social_identities si WHERE si.org_id=c.org_id AND si.conversation_id=c.id),(SELECT et.account_id FROM external_threads et WHERE et.org_id=c.org_id AND et.conversation_id=c.id LIMIT 1)) AS account_id,
       ${UNREAD} AS unread_count,
-      (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user'${visibleMessage(staff,'m')} ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,
-      (SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent')${visibleMessage(staff,'m')} ORDER BY ${messageOrder('m',true)} LIMIT 1) AS last_message
+      (SELECT m.id FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role='user'${saleMessage(staff,'m',scope)} ORDER BY m.customer_seq DESC LIMIT 1) AS last_customer_message_id,
+      (SELECT m.content FROM messages m WHERE m.org_id=c.org_id AND m.conversation_id=c.id AND m.role IN ('user','assistant','agent')${saleMessage(staff,'m',scope)} ORDER BY ${messageOrder('m',true)} LIMIT 1) AS last_message
       FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id ${READ_JOIN} WHERE ${where.join(' AND ')} ORDER BY c.updated_at DESC,c.id DESC LIMIT ${pageLimit}`,params);
     const pageRows=result.rows.slice(0,limit);const last=pageRows.at(-1);
     const items=pageRows.map(row=>{const item=camel(row);delete item.cursorUpdatedAt;return item;});
     const nextCursor=result.rows.length>limit&&last?Buffer.from(JSON.stringify({updatedAt:last.cursor_updated_at,id:last.id})).toString('base64url'):null;
-    return {items,nextCursor,total:total.rows[0].total,...await inboxSummary(staff,connection)};
+    return {items,nextCursor,total:total.rows[0].total,...await inboxSummary(staff,connection,scope)};
   }, staff);
 }
 
-export async function markConversationRead(staff:Staff,id:string,body:Record<string,unknown>) {
+export async function markConversationRead(staff:Staff,id:string,body:Record<string,unknown>,scope?:SaleInboxScope) {
   uuid(id);fields(body,['throughMessageId']);const messageId=uuid(body.throughMessageId);
   await transaction(staff.orgId, async connection=>{
-    const message=(await connection.query(`SELECT m.customer_seq FROM messages m WHERE m.org_id=$1 AND m.conversation_id=$2 AND m.id=$3 AND m.role='user'${visibleMessage(staff,'m')}`,[staff.orgId,id,messageId])).rows[0];
+    const params:unknown[]=[staff.orgId,id,messageId];
+    const scoped=scope?' AND EXISTS(SELECT 1 FROM conversations c JOIN leads l ON l.org_id=c.org_id AND l.id=c.lead_id WHERE c.org_id=m.org_id AND c.id=m.conversation_id AND '+bridgeMarketFilter(scope,v=>{params.push(v);return '$'+params.length;})+')':'';
+    const message=(await connection.query(`SELECT m.customer_seq FROM messages m WHERE m.org_id=$1 AND m.conversation_id=$2 AND m.id=$3 AND m.role='user'${saleMessage(staff,'m',scope)}${scoped}`,params)).rows[0];
     if(!message||!message.customer_seq)throw new ApiError(404,'ไม่พบข้อความลูกค้าในบทสนทนานี้');
     await connection.query("INSERT INTO conversation_reads(org_id,conversation_id,member_id,last_read_seq) VALUES($1,$2,$3,$4)\n      ON CONFLICT(org_id,conversation_id,member_id) DO UPDATE SET last_read_seq=MAX(conversation_reads.last_read_seq,excluded.last_read_seq),updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z')",[staff.orgId,id,staff.id,message.customer_seq]);
   }, staff);
@@ -126,13 +158,18 @@ export async function templateAction(staff:Staff,body:Record<string,unknown>) {
       if(!existing)throw new ApiError(404,'ไม่พบข้อความตอบสำเร็จรูป');
       if(existing.version!==version(values.version))throw new ApiError(409,'ข้อความนี้ถูกแก้ไขแล้ว กรุณาโหลดรายการใหม่');
     }
-    if(action==='deleteReplyTemplate')await connection.query('DELETE FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id]);
+    if(action==='deleteReplyTemplate'){
+      await connection.query('DELETE FROM reply_templates WHERE org_id=$1 AND id=$2',[staff.orgId,id]);
+      await connection.query("DELETE FROM sales_setting_undo WHERE org_id=$1 AND kind='replyTemplate' AND entity_id=$2",[staff.orgId,id]);
+    }
     else {
       const title=str(values.title,'ชื่อข้อความ',120,true);const content=str(values.content,'เนื้อหา',4000,true);const category=str(values.category,'หมวดหมู่',80)||'ทั่วไป';
       const rawShortcut=str(values.shortcut,'คำย่อ',41,true).replace(/^\//,'').toLowerCase();
       if(!/^[a-z0-9_-]{1,40}$/.test(rawShortcut))throw new ApiError(400,'คำย่อใช้ตัวอักษรอังกฤษ ตัวเลข - หรือ _ ไม่เกิน 40 ตัว');
       const shortcut=`/${rawShortcut}`;
       if((await connection.query('SELECT id FROM reply_templates WHERE org_id=$1 AND shortcut=$2 AND id!=$3',[staff.orgId,shortcut,id])).rows.length)throw new ApiError(409,'คำย่อนี้มีอยู่แล้วในองค์กร');
+      if(existing && (existing.title!==title || existing.shortcut!==shortcut || existing.content!==content || existing.category!==category))
+        await rememberSetting(connection,staff,'replyTemplate',id,{title:existing.title,shortcut:existing.shortcut,content:existing.content,category:existing.category});
       if(existing)await connection.query("UPDATE reply_templates SET title=$3,shortcut=$4,content=$5,category=$6,version=version+1,updated_at=(strftime('%Y-%m-%dT%H:%M:%f','now')||'000Z') WHERE org_id=$1 AND id=$2",[staff.orgId,id,title,shortcut,content,category]);
       else {
         const count=(await connection.query("SELECT count(*) AS total FROM reply_templates WHERE org_id=$1",[staff.orgId])).rows[0].total;

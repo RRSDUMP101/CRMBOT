@@ -6,7 +6,18 @@ export type Task = { id: string; leadId: string; title: string; dueAt: string; s
 export type Knowledge = { id: string; title: string; content: string; tags: string[]; status: string; processingStatus: string; error?: string | null; version: number; sourceUrl: string; expiresAt: string | null; updatedAt: string };
 export type Settings = { botName: string; personality: string; businessHours: string; handoffRule: string; aiEnabled: boolean };
 export type Metrics = { conversations: number; newLeads: number; stages: Record<string, number>; dueTasks: number; handoffRate: number; aiFirstResponseMs: number | null; humanFirstResponseMs: number | null; inputTokens: number | null; outputTokens: number | null; estimatedCostUsd: number | null; timezone: string };
-export type SaleDeal = { dealId: string; workspace: "live" | "domestic"; title: string; stage: number; salesStatus: string; waiting: string; waitingLabel: string; nextAction: string; followDate: string; quotation: { number: string; revision: number; status: string; sentAt: string; acceptedAt: string } | null; salesOrder: { number: string; acceptedAt: string } | null; payments: { reported: number; confirmed: number }; production: { status: string; due: string } | null; shipment: { status: string; due: string } | null; updatedAt: string };
+export type SaleDeal = { dealId: string; workspace: "live" | "domestic"; title: string; stage: number; salesStatus: string; waiting: string; waitingLabel: string; nextAction: string; followDate: string; quotation: { id?: string; number: string; revision: number; status: string; sentAt: string; acceptedAt: string } | null; salesOrder: { number: string; acceptedAt: string } | null; payments: { reported: number; confirmed: number }; production: { status: string; due: string } | null; shipment: { status: string; due: string } | null; updatedAt: string };
+const salesOfficeOrigin='https://rrs-sales-office-hub.com';
+export function salePersonalQuoteQueueHref(market:'domestic'|'export', queue:'revision'|'approval') {
+  const domestic=market==='domestic';
+  return salesOfficeOrigin+(domestic?'/domestic/today':'/today')+'?'+new URLSearchParams({mode:domestic?'domestic':'live',quoteQueue:queue}).toString();
+}
+export function saleQuotationHref(deal: Pick<SaleDeal,'workspace'|'dealId'|'quotation'>) {
+  const path=deal.workspace==='domestic'?'/domestic/quotations':'/quotations';
+  const params=new URLSearchParams({mode:deal.workspace,deal:deal.dealId,section:deal.quotation?.id?'edit':'saved'});
+  if(deal.quotation?.id)params.set('id',deal.quotation.id);
+  return salesOfficeOrigin+path+'?'+params.toString();
+}
 export type SaleContext = { syncedAt: string | null; error: string | null; deals: SaleDeal[] };
 export type Detail = { conversation: Conversation; lead: Lead; messages: Message[]; saleContext?: SaleContext | null };
 export type Snapshot = { user: Member; conversations: Conversation[]; leads: Lead[]; tasks: Task[]; knowledge: Knowledge[]; members: Member[]; settings: Settings; metrics: Metrics; audit: { id: string; action: string; createdAt: string; actorId: string; entityId: string; metadata?: Record<string, unknown> }[]; integrations: { sheets: string; drive: string; channels: string } };
