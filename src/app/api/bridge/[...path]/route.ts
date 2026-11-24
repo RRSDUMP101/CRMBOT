@@ -49,6 +49,7 @@ async function handle(request: Request) {
       return await downloadSocialAttachment(config.orgId,path.slice('attachments/'.length),fetch,url.searchParams.get('owner')==='true');
     }
     if (url.search) throw new BridgeError(400, 'Unexpected bridge query');
+    if(path==='inbox'&&request.method==='POST')return json(await (await import('@/lib/bridge-inbox')).saleInbox(objectBody(body,['action','actorId','workspace','owner','roomIds','q','view','limit','cursor','conversationId','throughMessageId'])));
     if(path==='room-files'&&request.method==='POST')return await (await import('@/lib/bridge-room-files')).roomFileAction(objectBody(body,['actorId','conversationId','workspace','action','attachmentId','clientId','expectedVersion']));
     if(path==='spam-candidate'&&request.method==='POST'){
       objectBody(body,[]);

@@ -242,3 +242,34 @@ test('company and quote search only locate linked work in the current customer m
   await database.query("UPDATE leads SET market='domestic' WHERE org_id=$1 AND id=$2",[f.org,f.lead]);
   assert.equal((await find(f.staff,'QT-MARKET-FIXTURE')).items.length,0);
 });
+
+test('signed Sale inbox scopes counts, matching text, pagination and read receipts to the mapped member and eligible rooms',async()=>{
+  const f=await fixture();allowBridge(f);
+  const otherRoom=randomUUID(),otherLead=randomUUID(),notMapped=randomUUID();
+  await database.query("UPDATE leads SET market='domestic' WHERE org_id=$1 AND id=$2",[f.org,f.lead]);
+  await database.query("INSERT INTO leads(id,org_id,name,market) VALUES($1,$2,'Export customer','export')",[otherLead,f.org]);
+  for(const [room,lead] of [[otherRoom,otherLead],[notMapped,f.lead]])await database.query("INSERT INTO conversations(id,org_id,lead_id) VALUES($1,$2,$3)",[room,f.org,lead]);
+  const incoming=randomUUID(),privateMessage=randomUUID();
+  for(const [room,id,seq,restricted] of [[f.conversation,incoming,1,0],[f.conversation,privateMessage,2,1],[otherRoom,randomUUID(),1,0],[notMapped,randomUUID(),1,0]]){
+    await database.query("INSERT INTO messages(id,org_id,conversation_id,role,content,customer_seq,source_owner_only) VALUES($1,$2,$3,'user',$4,$5,$6)",[id,f.org,room,restricted?'Restricted source fixture':'Normal customer fixture',seq,restricted]);
+  }
+  const base={action:'list',actorId:f.member,workspace:'domestic',owner:false,roomIds:[f.conversation,otherRoom],view:'unread',limit:'1'};
+  const send=async(payload:Record<string,unknown>)=>{
+    const url=origin+'/api/bridge/inbox',body=JSON.stringify(payload);
+    return POST(new Request(url,{method:'POST',headers:await signBridgeRequest(url,{secret,orgId:f.org,method:'POST',body}),body}));
+  };
+  async function list(extra:Record<string,unknown>={}){
+    const response=await send({...base,...extra});assert.equal(response.status,200);
+    return await response.json() as {total:number;counts:{all:number;unread:number};items:{id:string;lastMessage:string;unreadCount:number;lastCustomerMessageId:string}[];nextCursor:string|null};
+  }
+  const first=await list();
+  assert.equal(first.total,1);assert.equal(first.counts.all,1);assert.equal(first.items[0].id,f.conversation);
+  assert.equal(first.items[0].unreadCount,1);assert.equal(first.items[0].lastCustomerMessageId,incoming);
+  assert.equal((await list({q:'Restricted source fixture'})).total,0);
+  const eligible=[f.conversation,notMapped];const two=await list({roomIds:eligible});assert.ok(two.nextCursor);
+  const next=await list({roomIds:eligible,cursor:two.nextCursor});assert.notEqual(two.items[0].id,next.items[0].id);
+  const read={action:'read',actorId:f.member,workspace:'domestic',owner:false,conversationId:f.conversation,throughMessageId:incoming};
+  assert.equal((await send({...read,throughMessageId:privateMessage})).status,404);
+  assert.equal((await send(read)).status,200);assert.equal((await list()).counts.unread,0);
+  assert.equal((await send({...base,actorId:randomUUID()})).status,403);
+});
