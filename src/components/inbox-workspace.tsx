@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import "./messenger.css";
 import { subscribeCRMChanges } from './realtime';
 import { ArrowLeft, ArrowUpRight, Bookmark, Check, ClipboardList, ChevronDown, CircleHelp, Globe, Inbox, LockKeyhole, MessageSquare, PanelRight, Pencil, RefreshCw, Search, Send, SlidersHorizontal, Sparkles, UserRound, X, Clock3, CalendarDays, Users } from "lucide-react";
 import { api, date, saleQuotationHref, stageNames, stages, statusNames, type Detail, type SaleContext } from "./data";
@@ -17,7 +18,7 @@ function ChannelIcon({provider}: {provider?: string}) { const p = provider || "w
 const queues: InboxQueue[] = ["all", "unread", "waiting", "mine", "unassigned", "closed"];
 type Drafts = Record<string, { reply: string; note: string }>;
 
-export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }: PanelProps & { searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
+export function InboxWorkspace({ data, reload, notify, searchRequest, navigate, requestedRoom, visible = true }: PanelProps & { requestedRoom?: string; visible?: boolean; searchRequest?: { value: string; revision: number }; navigate?: (view: string) => void }) {
   const [shown, setShown] = useState({preview:true,status:true,date:true,channel:true});
   const [pageSize, setPageSize] = useState(25);
   const [queue, setQueue] = useState<InboxQueue>("all");
@@ -36,6 +37,7 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
   const [templateOpen, setTemplateOpen] = useState(false); const [templates, setTemplates] = useState<ReplyTemplate[]>([]); const [templateSearch, setTemplateSearch] = useState(""); const [templateLoading, setTemplateLoading] = useState(false); const [templateError, setTemplateError] = useState("");
   const selectedRef = useRef(""); const queryVersion = useRef(0); const listRequest = useRef(0); const loadedPages = useRef(1); const readMessages = useRef(new Set<string>()); const history = useRef<HTMLDivElement>(null);
   selectedRef.current = selected;
+  useEffect(() => { if (requestedRoom) setSelected(requestedRoom); }, [requestedRoom]);
   useEffect(()=>{
     const requested=new URLSearchParams(window.location.search).get('conversation');
     if(requested && /^[a-f0-9-]{36}$/i.test(requested))setSelected(requested);
@@ -80,13 +82,13 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
       if (selectedRef.current !== id) return;
       setDetail(previous => previous?.conversation.id === id && (previous.conversation.version > next.conversation.version || new Date(previous.conversation.updatedAt) > new Date(next.conversation.updatedAt)) ? previous : next); setError("");
       const lastUser = [...next.messages].reverse().find(message => message.role === "user");
-      if (lastUser && document.visibilityState === "visible" && !readMessages.current.has(lastUser.id)) {
+      if (visible && lastUser && document.visibilityState === "visible" && !readMessages.current.has(lastUser.id)) {
         readMessages.current.add(lastUser.id);
         try { await api(`/api/admin/conversations/${id}/read`, { throughMessageId: lastUser.id }); void refreshList(); }
         catch { readMessages.current.delete(lastUser.id); }
       }
     } catch (e) { if (selectedRef.current === id) setError((e as Error).message); }
-  }, [refreshList]);
+  }, [refreshList, visible]);
   useEffect(() => {
     if (!selected) { setDetail(null); return; }
     setDetail(null); setError(""); void loadDetail(selected);
@@ -96,7 +98,10 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
   useEffect(()=>subscribeCRMChanges(()=>{void refreshList();if(selectedRef.current)void loadDetail(selectedRef.current);}),[refreshList,loadDetail]);
   useEffect(() => { const panel = history.current; if (panel) panel.scrollTop = panel.scrollHeight; }, [detail?.conversation.id, detail?.messages.length]);
   const selectConversation = (id: string) => { selectedRef.current = id; setSelected(id); setNote(false); setTemplateOpen(false); setProfileOpen(false); setError(""); };
+  const actionInFlight = useRef(new Set<string>());
   const act = async (action: string, content?: string) => {
+    if (!selected || actionInFlight.current.has(selected)) return;
+    actionInFlight.current.add(selected);
     const id = selected; const mode = note ? "note" : "reply"; setBusy(true); setError("");
     try {
       const updated = await api<Detail>(`/api/admin/conversations/${id}/${action}`, content === undefined ? {} : { text: content });
@@ -105,7 +110,7 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
       await Promise.all([refreshList(), reload()]);
       notify(({ claim: "รับช่วงแล้ว AI หยุดตอบ", release: "ส่งกลับให้ AI แล้ว", resolve: "จบการสนทนาแล้ว", reply: "บันทึกคำตอบแล้ว ตรวจสถานะการส่งใต้ข้อความ", note: "บันทึกภายในแล้ว", summarize: "อัปเดตสรุปความต้องการแล้ว" } as Record<string, string>)[action] || "บันทึกแล้ว");
     } catch (e) { if (selectedRef.current === id) setError((e as Error).message); }
-    finally { setBusy(false); }
+    finally { actionInFlight.current.delete(id); setBusy(false); }
   };
   const updateStage = async (stage: string) => {
     if (!detail) return; const id = selected; setBusy(true); setError("");
@@ -119,6 +124,8 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
     catch (e) { setTemplateError((e as Error).message); } finally { setTemplateLoading(false); }
   };
   const activeDetail = detail?.conversation.id === selected ? detail : null;
+  const pinnedDeal = activeDetail?.saleContext?.deals.find(deal => deal.quotation);
+  const calendarDay = (timestamp: string) => new Date(timestamp).toLocaleDateString("th-TH", { timeZone:"Asia/Bangkok", dateStyle:"long" });
   const activeOwner = data.members.find(member => member.id === activeDetail?.conversation.assigneeId);
   const canReply = activeDetail?.conversation.status === "human_active";
   const shownTemplates = templates.filter(template => `${template.title} ${template.shortcut} ${template.category}`.toLowerCase().includes(templateSearch.toLowerCase()));
@@ -155,7 +162,8 @@ export function InboxWorkspace({ data, reload, notify, searchRequest, navigate }
         <div className="desk-chat-actions"><span><UserRound size={14} />{activeOwner?.name || "ยังไม่มอบหมาย"}</span><div className="button-row">{canReply ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => act("release")}><Sparkles size={14} />ส่งกลับ AI</Button> : <Button size="sm" disabled={busy} onClick={() => act("claim")}><UserRound size={14} />รับช่วงตอบ</Button>}<Button variant="secondary" size="sm" disabled={busy || activeDetail.conversation.status === "resolved"} onClick={() => act("resolve")}><Check size={14} />จบแชต</Button></div></div>
         <div className={`desk-ownership-status ${canReply ? "is-human" : ""}`}><span className="status-dot" />{canReply ? "AI พักอยู่ · เจ้าหน้าที่กำลังดูแล" : activeDetail.conversation.status === "resolved" ? "จบการสนทนาแล้ว" : activeDetail.conversation.status === "waiting_human" ? "ลูกค้ารอเจ้าหน้าที่รับช่วง" : "ผู้ช่วย AI กำลังดูแล"}</div>
         {error && <div className="desk-inline-error" role="alert">{error}</div>}
-        <div className="desk-message-history" ref={history}>{activeDetail.messages.length ? activeDetail.messages.map(message => <ChatMessage key={message.id} message={message} />) : <Empty title="ยังไม่มีข้อความ" detail="ข้อความใหม่ของลูกค้าจะปรากฏที่นี่" />}</div>
+        {pinnedDeal?.quotation && <a className="chat-work-pin" href={saleQuotationHref(pinnedDeal)} target="_blank" rel="noreferrer"><Bookmark size={14}/> ใบเสนอราคา {pinnedDeal.quotation.number} · {quotationNames[pinnedDeal.quotation.status] || pinnedDeal.quotation.status} <ArrowUpRight size={14}/></a>}
+        <div className="desk-message-history" ref={history}>{activeDetail.messages.length ? activeDetail.messages.map((message, i, messages) => <Fragment key={message.id}>{(i === 0 || calendarDay(messages[i-1].createdAt) !== calendarDay(message.createdAt)) && <div className="chat-day-label">{calendarDay(message.createdAt)}</div>}<ChatMessage message={message} /></Fragment>) : <Empty title="ยังไม่มีข้อความ" detail="ข้อความใหม่ของลูกค้าจะปรากฏที่นี่" />}</div>
         <form className={`desk-composer ${note ? "is-note" : ""}`} onSubmit={e => { e.preventDefault(); if (text.trim()) void act(note ? "note" : "reply", text); }}>
           <div className="desk-composer-tabs" role="group" aria-label="ประเภทข้อความ"><button type="button" aria-pressed={!note} className={!note ? "active" : ""} onClick={() => setNote(false)}><MessageSquare size={15} />ตอบลูกค้า</button><button type="button" aria-pressed={note} className={note ? "active" : ""} onClick={() => { setNote(true); setTemplateOpen(false); }}><LockKeyhole size={14} />บันทึกภายใน</button>{text && <span>มีข้อความร่าง</span>}</div>
           {!canReply && !note && <div className="composer-locked"><Sparkles size={14} /><span>{activeDetail.conversation.status === "resolved" ? "แชตนี้จบแล้ว รับช่วงเพื่อเริ่มดูแลต่อ" : "รับช่วงก่อนตอบลูกค้า เพื่อให้ AI หยุดตอบ"}</span></div>}
