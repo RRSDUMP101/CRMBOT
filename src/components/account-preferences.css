@@ -45,3 +45,13 @@ html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(2){background:
 html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(3){background:#39314f;color:#e4d6ff}
 html[data-theme=dark] .rrs-workspace .desk-today>button:nth-child(4){background:#213b55;color:#cbe3ff}
 html[data-theme=dark] .rrs-workspace .rail-item.active svg {color:#b5d9ff}
+.font-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+.font-options button { display:grid; grid-template-columns:minmax(0,1fr) auto; align-content:center; min-height:55px; }
+.font-options button span:first-child { grid-column:1; font-size:19px; line-height:1.1; }
+.font-options button span:nth-child(2) { grid-column:1; font-size:12px; overflow-wrap:anywhere; }
+.font-options button svg { grid-area:1/2/3/3; align-self:center; }
+.font-size-group label { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:600; }
+.font-size-group output { font-weight:500; color:var(--menu-muted); font-variant-numeric:tabular-nums; }
+.font-size-group input { display:block; width:100%; min-height:32px; accent-color:var(--menu-accent); }
+.font-size-group .type-reset { display:flex; align-items:center; gap:6px; margin-left:auto; border:0; padding:6px 0; font-size:12px; color:var(--menu-accent); background:transparent; }
+.account-popover { overscroll-behavior:contain; scrollbar-width:thin; }
