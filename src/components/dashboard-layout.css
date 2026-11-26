@@ -45,6 +45,7 @@
   gap: 16px;
 }
 .crm-overview-main > *, .crm-overview-rail > * { min-width: 0; margin-block: 0; }
+.crm-overview-main { container-type: inline-size; }
 .crm-overview-rail[hidden] { display: none; }
 .crm-overview .card { padding: 18px; }
 .crm-overview .card-heading { gap: 8px; padding: 0; margin-bottom: 12px; align-items: center; }
@@ -52,7 +53,8 @@
 .crm-overview .filter-row { gap: 8px; margin: 0; }
 .crm-overview .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .rrs-workspace .crm-overview .stat-card { padding: 14px; min-width: 0; }
-.crm-overview .stat-top { align-items: start; gap: 5px; }
+.crm-overview .stat-top { align-items: start; flex-wrap: wrap; gap: 5px; }
+.crm-overview .stat-top > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .crm-overview .stat-icon { flex: none; width: 30px; height: 30px; border-radius: 8px; }
 .crm-overview .stat-icon svg { width: 16px; }
 .crm-overview .stat-number { margin-block: 4px; }
@@ -83,6 +85,12 @@
 html[data-theme=dark] .rrs-workspace .crm-agenda-trigger[aria-expanded=true] { background: #244460; color: #d4ecff; border-color: #537a9b; }
 html[data-theme=dark] .crm-overview :is(.crm-customer-link,.crm-appointments time) { color: #a9d1ff; }
 html[data-theme=dark] .crm-overview :is(.crm-appointments li small,.crm-appointments li span,.crm-appointments p,.card-heading > svg) { color: #b8cce0; }
+@container (max-width: 800px) {
+  .crm-overview .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 320px) {
+  .crm-overview .stat-icon { display: none; }
+}
 @media (min-width: 1060px) {
   .crm-overview.agenda-open { grid-template-columns: minmax(0, 1fr) clamp(240px, 18vw, 280px); }
 }
