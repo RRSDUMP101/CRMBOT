@@ -1,0 +1,123 @@
+/* Responsive workspace frame and dashboard. Font sizes use the shared type scale at build time. */
+.rrs-workspace .main-content:not(.inbox-main) {
+  width: 100%;
+  max-width: none;
+  padding: 20px clamp(14px, 1.7vw, 30px) 28px;
+}
+.rrs-workspace .workspace-topbar {
+  position: relative;
+  z-index: 52;
+  gap: 10px;
+  padding-inline: clamp(12px, 1.6vw, 24px);
+}
+.rrs-workspace .workspace-topbar .account-controls { margin-left: 0; }
+.rrs-workspace .workspace-brandline { min-width: 0; }
+.rrs-workspace .workspace-brandline > div strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rrs-workspace .crm-agenda-trigger, .rrs-workspace .crm-search-trigger {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--desk-rule);
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+}
+.rrs-workspace .crm-search-trigger { display: none; }
+.rrs-workspace .crm-agenda-trigger[aria-expanded=true] { color: #1659a5; background: #eaf3ff; border-color: #bfdaff; }
+.rrs-workspace .app-rail .rail-item { min-height: 36px; padding-block: 7px; }
+.rrs-workspace .page-heading { margin-bottom: 14px; }
+.crm-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+.crm-overview-main, .crm-overview-rail {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 16px;
+}
+.crm-overview-main > *, .crm-overview-rail > * { min-width: 0; margin-block: 0; }
+.crm-overview-rail[hidden] { display: none; }
+.crm-overview .card { padding: 18px; }
+.crm-overview .card-heading { gap: 8px; padding: 0; margin-bottom: 12px; align-items: center; }
+.crm-overview .card-heading > svg { flex: none; color: #53718c; }
+.crm-overview .filter-row { gap: 8px; margin: 0; }
+.crm-overview .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.rrs-workspace .crm-overview .stat-card { padding: 14px; min-width: 0; }
+.crm-overview .stat-top { align-items: start; gap: 5px; }
+.crm-overview .stat-icon { flex: none; width: 30px; height: 30px; border-radius: 8px; }
+.crm-overview .stat-icon svg { width: 16px; }
+.crm-overview .stat-number { margin-block: 4px; }
+.crm-overview .pipeline-chart { margin: 12px 0; padding: 4px 0; gap: 9px; }
+.crm-overview .bar-track { height: 12px; }
+.crm-overview .activity-list { padding: 0; }
+.crm-overview .pipeline-chart-row { grid-template-columns: minmax(90px, 1fr) minmax(30px, 4fr) minmax(28px, auto); }
+.crm-overview .card-link { width: auto; display: inline-flex; align-items: center; gap: 5px; padding: 8px 0 0; }
+.crm-overview :is(h2,strong,small,p,.crm-customer-link) { overflow-wrap: anywhere; }
+.crm-followup-scroll { overflow-x: auto; scrollbar-width: thin; }
+.crm-followups table { width: 100%; border-collapse: collapse; }
+.rrs-workspace .crm-followups :is(th,td) { text-align: start; padding: 10px 8px; }
+.crm-followups time { white-space: nowrap; }
+.crm-customer-link { background: transparent; color: #165aa2; text-align: start; font-weight: 600; }
+.crm-customer-link:hover { text-decoration: underline; }
+.crm-appointments ol { list-style: none; margin: 0; padding: 0; }
+.crm-appointments li { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 10px; align-items: baseline; border-top: 1px solid var(--desk-rule); padding: 10px 0; }
+.crm-appointments li time { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700; color: #175ba3; }
+.crm-appointments li :is(strong, small, span) { display: block; line-height: 1.5; }
+.crm-appointments li small, .crm-appointments li span, .crm-appointments p { color: #50677c; font-size: 13px; }
+.crm-appointments .card-link { margin-top: 10px; }
+.crm-overview-rail .activity-row { align-items: start; }
+.crm-overview-rail .activity-row > div { min-width: 0; }
+.crm-overview-rail .activity-dot { flex: none; margin-top: 5px; }
+.crm-overview .desk-recent-room { flex-wrap: wrap; }
+.crm-overview .desk-recent-room time { max-width: 100%; }
+.crm-overview .desk-today { margin-block: 0; }
+html[data-theme=dark] .rrs-workspace .crm-agenda-trigger[aria-expanded=true] { background: #244460; color: #d4ecff; border-color: #537a9b; }
+html[data-theme=dark] .crm-overview :is(.crm-customer-link,.crm-appointments time) { color: #a9d1ff; }
+html[data-theme=dark] .crm-overview :is(.crm-appointments li small,.crm-appointments li span,.crm-appointments p,.card-heading > svg) { color: #b8cce0; }
+@media (min-width: 1060px) {
+  .crm-overview.agenda-open { grid-template-columns: minmax(0, 1fr) clamp(240px, 18vw, 280px); }
+}
+@media (min-width: 1360px) {
+  .rrs-workspace .app-rail { width: 220px; }
+  .rrs-workspace .workspace-body { margin-left: 220px; width: calc(100% - 220px); }
+}
+@media (max-width: 1059px) {
+  .crm-overview.agenda-open .crm-overview-rail { grid-row: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 680px) {
+  .rrs-workspace .workspace-topbar .workspace-brandline { flex: 1; }
+  .rrs-workspace .workspace-brandline > div { min-width: 0; max-width: none; }
+  .rrs-workspace .workspace-topbar .crm-search-trigger { display: inline-grid; }
+  .rrs-workspace .workspace-topbar .workspace-search { display: none; }
+  .rrs-workspace .workspace-topbar .workspace-search.is-open {
+    display: flex;
+    position: absolute;
+    top: calc(100% + 3px);
+    inset-inline: 10px;
+    width: auto;
+    box-shadow: 0 5px 16px #081b3329;
+  }
+  .crm-overview .stats-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .crm-overview.agenda-open .crm-overview-rail { grid-template-columns: minmax(0, 1fr); }
+  .crm-overview .card { padding: 14px; }
+  .crm-overview .card-heading { flex-wrap: wrap; }
+  .crm-overview-main, .crm-overview-rail { gap: 12px; }
+  .crm-followups table { min-width: 450px; }
+  .rrs-workspace .crm-overview .date-filters { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px 10px; }
+  .crm-overview .date-filters > span { display: none; }
+  .crm-overview .date-filters > .button { grid-column: 1 / -1; justify-self: end; min-height: 30px; }
+}
+@media (max-width: 360px) {
+  .rrs-workspace .workspace-topbar { padding-inline: 7px; gap: 4px; }
+  .crm-overview .stats-grid { gap: 6px; }
+  .rrs-workspace .crm-overview .stat-card { padding: 10px; }
+}

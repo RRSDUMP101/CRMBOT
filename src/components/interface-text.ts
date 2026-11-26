@@ -1,5 +1,11 @@
 // Only translate interface copy supplied by the application. Customer content stays verbatim.
 const english: Record<string, string> = {
+  "นัดหมายและกิจกรรม": "Appointments and activity",
+  "งานติดตามที่ถึงกำหนด": "Follow-ups due",
+  "กำหนด": "Due",
+  "นัดหมายวันนี้": "Today’s appointments",
+  "ยังไม่มีนัดหมายวันนี้": "No appointments today",
+  "ดูงานและนัดหมาย": "View tasks and appointments",
   "ภาพรวม": "Overview",
   "กล่องข้อความ": "Inbox",
   "แชต": "Chat",
